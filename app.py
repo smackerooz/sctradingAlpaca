@@ -77,7 +77,7 @@ try:
                 
                 val = float(o.filled_avg_price) * float(o.filled_qty)
                 order_time_sgt = o.filled_at.astimezone(SGT)
-                is_liq = (order_time_sgt.hour == 3 and order_time_sgt.minute >= 45) or (order_time_sgt.hour >= 4)
+                is_liq = (order_time_sgt.hour == 3 and order_time_sgt.minute >= 45) and (order_time_sgt.date() == datetime.now(SGT).date())
 
                 if o.side == OrderSide.BUY:
                     total_buy_vol += val
