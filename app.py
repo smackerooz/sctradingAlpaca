@@ -86,32 +86,57 @@ def log_trade(ticker, action, qty, price):
 st.set_page_config(page_title="AI Shariah Trader", layout="wide")
 st.title("🌙 Alpaca-Linked AI Scalper")
 
-m1, m2, m3 = st.columns(3)
+# --- LIVE EQUITY CALCULATION ---
+holdings_value_usd = 0.0
+holdings_display_list = []
+
+for ticker, qty in st.session_state.portfolio.items():
+    if qty > 0:
+        try:
+            # Use yfinance for a quick price check for the dashboard
+            h_ticker = yf.Ticker(ticker)
+            # fast_info is efficient for dashboard refreshes
+            last_p = h_ticker.fast_info['last_price']
+            market_val_usd = last_p * qty
+            holdings_value_usd += market_val_usd
+            
+            holdings_display_list.append({
+                "Stock": ticker, 
+                "Qty": round(qty, 4), 
+                "Current Price": f"${last_p:.2f}",
+                "Value (USD)": f"${market_val_usd:.2f}"
+            })
+        except:
+            # Fallback to entry price if Yahoo Finance blips
+            holdings_value_usd += (st.session_state.entry_prices[ticker] * qty)
+            holdings_display_list.append({"Stock": ticker, "Qty": round(qty, 4), "Current Price": "Syncing..."})
+
+total_holdings_sgd = holdings_value_usd * USD_SGD_RATE
+grand_total_sgd = st.session_state.balance + total_holdings_sgd
+net_pnl_sgd = grand_total_sgd - INITIAL_BALANCE_SGD
+
+# --- RENDER TOP METRICS ---
+m1, m2, m3, m4 = st.columns(4)
 m1.metric("Alpaca Cash", f"${st.session_state.balance:,.2f} SGD")
-active_trades = sum(1 for v in st.session_state.portfolio.values() if v > 0)
-m3.metric("Active Positions", active_trades)
+m2.metric("Holdings Value", f"${total_holdings_sgd:,.2f} SGD")
+m3.metric("GRAND TOTAL", f"${grand_total_sgd:,.2f} SGD", delta=f"${net_pnl_sgd:,.2f} vs Start")
+m4.metric("Active Positions", len(holdings_display_list))
 
 st.write("---")
 
 col_left, col_right = st.columns(2)
 with col_left:
     st.subheader("📈 Current Holdings")
-    holdings_data = [{"Stock": t, "Qty": q} for t, q in st.session_state.portfolio.items() if q > 0]
-    if holdings_data:
-        st.table(pd.DataFrame(holdings_data))
+    if holdings_display_list:
+        st.table(pd.DataFrame(holdings_display_list))
     else:
-        st.info("No active trades.")
+        st.info("No active trades. Scanning for signals...")
 
 with col_right:
     st.subheader("📜 Recent Logs")
     if os.path.exists(LOG_FILE):
-        # 2026 Syntax Update: width='stretch'
         log_df = pd.read_csv(LOG_FILE).tail(10)
         st.dataframe(log_df.iloc[::-1], width='stretch')
-
-st.write("---")
-st.subheader("📡 Live Signal Tracker")
-signal_table = st.empty()
 
 # 4. TRADING LOOP
 while True:
