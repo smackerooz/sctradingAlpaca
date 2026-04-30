@@ -86,12 +86,17 @@ try:
     # 3. TRADE LOG TABLE (Fetched from Alpaca Orders)
     with col_r:
         st.subheader("📜 Recent Trade Activity")
-        # Fetch last 10 filled orders
         from alpaca.trading.requests import GetOrdersRequest
         from alpaca.trading.enums import QueryOrderStatus
         
-        order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=10)
-        orders = trading_client.get_orders(filter_params=order_filter)
+        # Define the filter request
+        order_filter = GetOrdersRequest(
+            status=QueryOrderStatus.CLOSED, 
+            limit=10
+        )
+        
+        # FIX: Pass order_filter directly, NOT as filter_params
+        orders = trading_client.get_orders(order_filter)
         
         if orders:
             logs_df = pd.DataFrame([{
@@ -104,11 +109,6 @@ try:
             st.dataframe(logs_df, width='stretch')
         else:
             st.info("No recent trade logs found.")
-
-except Exception as e:
-    st.error(f"Sync Error: {e}")
-
-st.write("---")
 
 # 4. TRADING ENGINE
 def execute_trade(ticker, action, price_usd):
