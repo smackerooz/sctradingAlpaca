@@ -45,16 +45,33 @@ if 'portfolio_tracker' not in st.session_state:
 st.set_page_config(page_title="Alpaca AI Scalper (USD)", layout="wide")
 st.title("🌙 Alpaca AI Scalper - USD Dashboard")
 
-# --- MORNING REPORT SECTION ---
-st.write("---")
+st.write("---") 
 try:
     from alpaca.trading.requests import GetOrdersRequest
-    from alpaca.trading.enums import QueryOrderStatus
+    from alpaca.trading.enums import QueryOrderStatus, OrderSide 
     
-    # Logic to fetch and sum the 3:45 AM SGT (19:45 UTC) SELL orders
-    # ... (Rest of the report code from my previous message)
+    order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=100)
+    all_orders = trading_client.get_orders(order_filter)
+    
+    liquidation_trades = []
+    if all_orders:
+        for o in all_orders:
+            if o.side == OrderSide.SELL and o.filled_avg_price is not None:
+                time_diff = datetime.now(pytz.utc) - o.filled_at
+                if time_diff.total_seconds() < 43200:
+                    liquidation_trades.append(o)
+
+    if liquidation_trades:
+        total_val = sum(float(o.filled_qty) * float(o.filled_avg_price) for o in liquidation_trades)
+        with st.expander("📊 Last Night's Liquidation Report", expanded=True):
+            c1, c2 = st.columns(2)
+            c1.metric("Total Liquidated", f"${total_val:,.2f}")
+            c2.success(f"Successfully cleared {len(liquidation_trades)} positions.")
+    else:
+        st.info("⏱️ **Morning Report:** Liquidation trades will appear here after the 3:45 AM SGT trigger.")
+
 except Exception as e:
-    st.write(f"Morning Report Syncing... {e}")
+    st.warning(f"⚠️ Morning Report is warming up... (Detail: {e})")
 st.write("---")
 
 try:
