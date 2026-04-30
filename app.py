@@ -52,7 +52,8 @@ try:
     from alpaca.trading.enums import QueryOrderStatus, OrderSide 
     
     # 1. Fetch closed orders from the last 12 hours
-    order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=100)
+    # We increase the limit to 500 to ensure we see the BUYs that matched the SELLs
+    order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500)
     all_orders = trading_client.get_orders(order_filter)
     
     # Initialize Buckets
@@ -63,17 +64,15 @@ try:
     pl_liquidation = 0.0
 
     if all_orders:
+        # Separate buys and sells for easier matching
+        buys = [o for o in all_orders if o.side == OrderSide.BUY and o.filled_avg_price]
+        sells = [o for o in all_orders if o.side == OrderSide.SELL and o.filled_avg_price]
+
         for o in all_orders:
-            # Check if order is within the last 12 hours
             time_diff = datetime.now(pytz.utc) - o.filled_at
-            if time_diff.total_seconds() < 43200:
+            if time_diff.total_seconds() < 43200: # 12 hour window
                 
-                price = float(o.filled_avg_price) if o.filled_avg_price else 0.0
-                qty = float(o.filled_qty)
-                val = price * qty
-                
-                # Determine if it was during Liquidation (3:45 AM SGT / 19:45 UTC)
-                # We check if the order happened at or after 3:45 AM SGT
+                val = float(o.filled_avg_price) * float(o.filled_qty)
                 order_time_sgt = o.filled_at.astimezone(SGT)
                 is_liq = (order_time_sgt.hour == 3 and order_time_sgt.minute >= 45) or (order_time_sgt.hour >= 4)
 
@@ -81,9 +80,15 @@ try:
                     total_buy_vol += val
                 
                 elif o.side == OrderSide.SELL:
-                    # Calculate Profit/Loss for this sell
-                    entry_p = st.session_state.entry_prices.get(o.symbol, 0.0)
-                    trade_pl = (price - entry_p) * qty if entry_p > 0 else 0.0
+                    # Find the corresponding BUY to calculate real P&L
+                    # We look for the most recent buy of this symbol
+                    entry_p = 0.0
+                    for b in buys:
+                        if b.symbol == o.symbol and b.filled_at < o.filled_at:
+                            entry_p = float(b.filled_avg_price)
+                            break 
+                    
+                    trade_pl = (float(o.filled_avg_price) - entry_p) * float(o.filled_qty) if entry_p > 0 else 0.0
                     
                     if is_liq:
                         total_liq_vol += val
@@ -94,7 +99,6 @@ try:
 
     # 3. Display Logic
     with st.expander("📊 Detailed Nightly Scorecard", expanded=True):
-        # Row 1: Trading Hours Activity
         st.subheader("🌙 Regular Trading Hours")
         col1, col2, col3 = st.columns(3)
         col1.metric("Total Buy", f"${total_buy_vol:,.2f}")
@@ -104,7 +108,6 @@ try:
         
         st.write("---")
         
-        # Row 2: Liquidation Activity
         st.subheader("🧹 3:45 AM Liquidation")
         col4, col5 = st.columns(2)
         col4.metric("Total Liquidated", f"${total_liq_vol:,.2f}")
