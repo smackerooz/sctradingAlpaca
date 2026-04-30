@@ -8,10 +8,13 @@ from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetOr
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 
 # --- 0. INITIALIZE CLIENT ---
-# Ensure your API Keys are set in Streamlit Cloud Secrets
-API_KEY = st.secrets["ALPACA_API_KEY"]
-SECRET_KEY = st.secrets["ALPACA_SECRET_KEY"]
-trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+# Uses Streamlit Secrets for security
+try:
+    API_KEY = st.secrets["ALPACA_API_KEY"]
+    SECRET_KEY = st.secrets["ALPACA_SECRET_KEY"]
+    trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
+except Exception as e:
+    st.error("Missing Alpaca API Keys in Streamlit Secrets.")
 
 # --- 1. SETUP & CONFIGURATION ---
 SGT = pytz.timezone('Asia/Singapore')
@@ -21,7 +24,7 @@ try:
     account = trading_client.get_account()
     INITIAL_EQUITY_USD = float(account.last_equity)
 except Exception:
-    INITIAL_EQUITY_USD = 100844.25 # Fallback baseline
+    INITIAL_EQUITY_USD = 100844.25 # Safety Fallback
 
 # --- 2. SIDEBAR & EMERGENCY CONTROLS ---
 st.sidebar.header("🕹️ Bot Control Panel")
@@ -39,8 +42,10 @@ if st.sidebar.button("FORCE POST-MARKET LIQUIDATION"):
             st.sidebar.success("No positions found!")
         else:
             for p in positions:
-                # Post-market requires Limit Orders and extended_hours=True
-                limit_p = float(p.current_price)
+                # FIX: Round to 2 decimal places to satisfy Alpaca pricing rules
+                # We also shave off $0.01 to "hit the bid" and ensure a faster fill
+                limit_p = round(float(p.current_price) - 0.01, 2)
+                
                 sell_req = LimitOrderRequest(
                     symbol=p.symbol,
                     qty=p.qty,
@@ -51,7 +56,7 @@ if st.sidebar.button("FORCE POST-MARKET LIQUIDATION"):
                 )
                 trading_client.submit_order(sell_req)
                 st.sidebar.write(f"✅ Sent: {p.symbol} at ${limit_p}")
-            st.sidebar.success("All orders sent. Monitor Alpaca app for fills.")
+            st.sidebar.success("All orders sent. Check Alpaca app for fills.")
     except Exception as e:
         st.sidebar.error(f"Liquidation Error: {e}")
 
@@ -63,9 +68,8 @@ try:
     current_equity = float(acc.equity)
     total_cash = float(acc.cash)
     
-    # Calculate Nightly Progress
     nightly_delta = current_equity - INITIAL_EQUITY_USD
-    nightly_pct = (nightly_delta / INITIAL_EQUITY_USD) * 100
+    nightly_pct = (nightly_delta / INITIAL_EQUITY_USD) * 100 if INITIAL_EQUITY_USD > 0 else 0
 
     col_a, col_b = st.columns(2)
     col_a.metric("Grand Total Equity", f"${current_equity:,.2f}", delta=f"${nightly_delta:,.2f}")
@@ -97,7 +101,7 @@ try:
                 if o.side == OrderSide.BUY:
                     total_buy_vol += val
                 elif o.side == OrderSide.SELL:
-                    # Match entry price for P&L
+                    # Match entry price for P&L from actual history
                     entry_p = next((float(b.filled_avg_price) for b in buys if b.symbol == o.symbol and b.filled_at < o.filled_at), 0.0)
                     trade_pl = (float(o.filled_avg_price) - entry_p) * float(o.filled_qty) if entry_p > 0 else 0.0
                     
@@ -123,44 +127,39 @@ try:
         st.metric("Final Cash Balance", f"${total_cash:,.2f}")
 
 except Exception as e:
-    st.info("Morning report will populate as trades are completed.")
+    st.info("Morning report will update as data flows in.")
 
 # --- 4. THE TRADING ENGINE (Resilient Loop) ---
 def run_trading_strategy():
     """
     PASTE YOUR 'SUPER 74' SCANNER AND BUY/SELL LOGIC HERE
-    Example: 
-    - Check prices
-    - If condition met, submit_order
     """
     pass
 
-# Main Execution
 st.write("---")
-st.write("📡 **Live Bot Status:** Active and monitoring...")
+st.write("📡 **Live Bot Status:** Monitoring Markets...")
 
-# Note: In Streamlit Cloud, the while loop runs as long as the app is awake.
-# To ensure it stays awake, keep the browser tab open or use a ping service.
+# Main Execution Loop
 while True:
     try:
         now_sgt = datetime.now(SGT)
         
-        # 1. 3:45 AM AUTOMATED LIQUIDATION
-        if now_sgt.hour == 3 and now_sgt.minute >= 45 and now_sgt.minute < 55:
+        # 1. 3:45 AM AUTOMATED LIQUIDATION (FAIL-SAFE)
+        if now_sgt.hour == 3 and 45 <= now_sgt.minute < 55:
             pos = trading_client.get_all_positions()
             for p in pos:
                 trading_client.submit_order(MarketOrderRequest(
                     symbol=p.symbol, qty=p.qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY
                 ))
             print("Liquidation triggered at 3:45 AM")
-            time.sleep(600) # Sleep 10 mins to avoid double triggering
+            time.sleep(600) # Prevents loop-triggering for 10 minutes
 
-        # 2. RUN YOUR STRATEGY
+        # 2. RUN STRATEGY
         run_trading_strategy()
         
-        # 3. HEARTBEAT / THROTTLE
+        # 3. THROTTLE
         time.sleep(15) 
 
     except Exception as e:
-        print(f"Error in main loop: {e}")
-        time.sleep(30) # Wait 30s before retry
+        print(f"Loop error: {e}")
+        time.sleep(30)
