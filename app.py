@@ -51,7 +51,11 @@ try:
     from alpaca.trading.requests import GetOrdersRequest
     from alpaca.trading.enums import QueryOrderStatus, OrderSide 
     
-    # 1. Fetch closed orders from the last 12 hours
+    # 1. Fetch live account data for the Cash Balance
+    account = trading_client.get_account()
+    total_cash_final = float(account.cash)
+    
+    # 2. Fetch closed orders from the last 12 hours
     order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500)
     all_orders = trading_client.get_orders(order_filter)
     
@@ -63,12 +67,9 @@ try:
     pl_liquidation = 0.0
 
     if all_orders:
-        # Separate buys and sells for easier matching - Only include filled orders
         buys = [o for o in all_orders if o.side == OrderSide.BUY and o.filled_avg_price and o.filled_at]
-        sells = [o for o in all_orders if o.side == OrderSide.SELL and o.filled_avg_price and o.filled_at]
-
+        
         for o in all_orders:
-            # FIX: Skip order if filled_at is None to prevent the 'NoneType' error
             if not o.filled_at:
                 continue
                 
@@ -77,6 +78,8 @@ try:
                 
                 val = float(o.filled_avg_price) * float(o.filled_qty)
                 order_time_sgt = o.filled_at.astimezone(SGT)
+                
+                # STRICT LIQUIDATION WINDOW: Today only, 3:45 AM to 4:00 AM SGT
                 is_liq = (order_time_sgt.hour == 3 and order_time_sgt.minute >= 45) and (order_time_sgt.date() == datetime.now(SGT).date())
 
                 if o.side == OrderSide.BUY:
@@ -84,7 +87,6 @@ try:
                 
                 elif o.side == OrderSide.SELL:
                     entry_p = 0.0
-                    # Look for matching BUY that happened BEFORE this sell
                     for b in buys:
                         if b.symbol == o.symbol and b.filled_at < o.filled_at:
                             entry_p = float(b.filled_avg_price)
@@ -115,15 +117,17 @@ try:
         col4.metric("Total Liquidated", f"${total_liq_vol:,.2f}")
         col5.metric("Liquidation Realized P&L", f"${pl_liquidation:,.2f}",
                    delta=f"{(pl_liquidation/total_liq_vol*100):.2f}%" if total_liq_vol > 0 else None)
-
-# NEW SECTION: Final Cash Balance
+        
+        st.write("---")
+        
+        # NEW SECTION: Final Cash Balance
         st.subheader("💰 Account Status")
         st.metric("Total Cash Balance (USD)", f"${total_cash_final:,.2f}", help="Your total settled cash in Alpaca.")
 
 except Exception as e:
-    # This error log is now more detailed to help us catch issues
     st.warning(f"⚠️ Morning Report is warming up... (System check: {e})")
 st.write("---")
+
 
 try:
     # 1. ACCOUNT OVERVIEW - FETCHING TRUTH FROM ALPACA
