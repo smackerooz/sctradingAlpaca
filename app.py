@@ -10,9 +10,17 @@ from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 
 # 1. SETUP & CONFIGURATION
-INITIAL_EQUITY_USD = 100844.25  
+try:
+    # Dynamically fetch your equity from the last market close
+    account = trading_client.get_account()
+    INITIAL_EQUITY_USD = float(account.last_equity)
+except Exception as e:
+    # Fallback to your manual number if there's a connection issue
+    INITIAL_EQUITY_USD = 100844.25
+    print(f"⚠️ Warning: Could not fetch last_equity, using fallback. Error: {e}")
+
 TRADE_LIMIT_USD = 100.0
-CASH_BUFFER_USD = 50000.0       
+CASH_BUFFER_USD = 50000.0        
 SGT = pytz.timezone('Asia/Singapore')
 
 # FETCH SECRETS
