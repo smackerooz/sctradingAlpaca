@@ -15,13 +15,12 @@ try:
 except Exception:
     st.error("Missing Alpaca API Keys in Streamlit Secrets.")
 
-# --- 1. CONFIGURATION & TRUTH ANCHORING ---
+# --- 1. CONFIGURATION ---
 SGT = pytz.timezone('Asia/Singapore')
 TARGET_PROFIT_USD = 150.0  # Approx 200 SGD
-CASH_BUFFER_USD = 90000.0  # New $90k Buffer
+CASH_BUFFER_USD = 90000.0 
 
 try:
-    # Getting the "Truth" from yesterday's close
     account = trading_client.get_account()
     PREVIOUS_CLOSE_EQUITY = float(account.last_equity)
     CURRENT_CASH = float(account.cash)
@@ -31,14 +30,10 @@ except Exception:
     CURRENT_CASH = 0.0
     CURRENT_EQUITY = 0.0
 
-# --- 2. SIDEBAR: CONTROLS & MANUAL LIQUIDATION ---
+# --- 2. SIDEBAR ---
 st.sidebar.header("🕹️ Bot Controls")
 st.sidebar.metric("Yesterday's Close (Truth)", f"${PREVIOUS_CLOSE_EQUITY:,.2f}")
-st.sidebar.write("---")
-
-# Manual Emergency Button (Extended Hours Capable)
 if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
-    st.sidebar.warning("Clearing all positions...")
     try:
         trading_client.cancel_orders()
         time.sleep(1)
@@ -49,108 +44,86 @@ if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
                 symbol=p.symbol, qty=p.qty, side=OrderSide.SELL,
                 limit_price=limit_p, time_in_force=TimeInForce.DAY, extended_hours=True
             ))
-        st.sidebar.success("Liquidation orders sent.")
+        st.sidebar.success("Orders sent.")
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
-# --- 3. LIVE SCORECARD & PROFIT TARGET ---
+# --- 3. LIVE SCORECARD ---
 st.write(f"## 🎯 Goal: ${TARGET_PROFIT_USD} USD (~200 SGD)")
 realized_pl_total = CURRENT_EQUITY - PREVIOUS_CLOSE_EQUITY
 progress_pct = min(max(realized_pl_total / TARGET_PROFIT_USD, 0.0), 1.0) if realized_pl_total > 0 else 0.0
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Total Value (Equity)", f"${CURRENT_EQUITY:,.2f}", delta=f"${realized_pl_total:,.2f}")
-col2.metric("Cash Balance", f"${CURRENT_CASH:,.2f}")
-col3.metric("Goal Progress", f"{int(progress_pct * 100)}%")
+c1, c2, c3 = st.columns(3)
+c1.metric("Total Equity", f"${CURRENT_EQUITY:,.2f}", delta=f"${realized_pl_total:,.2f}")
+c2.metric("Cash Balance", f"${CURRENT_CASH:,.2f}")
+c3.metric("Goal Progress", f"{int(progress_pct * 100)}%")
 st.progress(progress_pct)
 
-# --- 4. MORNING REPORT & REALIZED P&L ---
-with st.expander("📊 Detailed Morning Report & Realized P&L", expanded=True):
-    try:
-        order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=100)
-        closed_orders = trading_client.get_orders(order_filter)
-        if closed_orders:
-            # We filter for trades closed in the last 12 hours
-            pl_list = []
-            for o in closed_orders:
-                if o.filled_at and (datetime.now(pytz.utc) - o.filled_at).total_seconds() < 43200:
-                    pl_list.append({
-                        "Time (SGT)": o.filled_at.astimezone(SGT).strftime('%H:%M:%S'),
-                        "Symbol": o.symbol,
-                        "Side": str(o.side).split('.')[-1].upper(),
-                        "Qty": o.filled_qty,
-                        "Price": f"${float(o.filled_avg_price):.2f}",
-                        "Total Value": f"${(float(o.filled_avg_price) * float(o.filled_qty)):,.2f}"
-                    })
-            st.table(pd.DataFrame(pl_list))
-        else:
-            st.write("No trades closed this session yet.")
-    except Exception:
-        st.info("Loading trade history...")
-
-# --- 5. HOLDINGS & UNREALIZED P&L ---
+# --- 4. MORNING REPORT (SUMMARY VERSION) ---
 st.write("---")
+with st.expander("📊 Morning Report Summary", expanded=True):
+    try:
+        order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=200)
+        closed_orders = trading_client.get_orders(order_filter)
+        
+        # Filtering for trades closed today (SGT)
+        today_date = datetime.now(SGT).date()
+        daily_trades = [o for o in closed_orders if o.filled_at and o.filled_at.astimezone(SGT).date() == today_date]
+        
+        if daily_trades:
+            total_vol = sum(float(o.filled_avg_price) * float(o.filled_qty) for o in daily_trades if o.side == OrderSide.SELL)
+            trade_count = len(daily_trades)
+            
+            # Summary Metrics
+            sm1, sm2, sm3 = st.columns(3)
+            sm1.write(f"**Trades Today:** {trade_count}")
+            sm2.write(f"**Total Volume:** ${total_vol:,.2f}")
+            sm3.write(f"**Status:** {'✅ Target Met' if realized_pl_total >= TARGET_PROFIT_USD else '⏳ Trading'}")
+            
+            # Brief table of the last 5 major exits
+            st.write("**Recent Major Exits:**")
+            summary_df = pd.DataFrame([{
+                "Symbol": o.symbol, "Qty": o.filled_qty, "Value": f"${(float(o.filled_avg_price)*float(o.filled_qty)):,.2f}"
+            } for o in daily_trades[:5]])
+            st.table(summary_df)
+        else:
+            st.info("No trades completed today yet.")
+    except Exception as e:
+        st.write(f"Gathering report data... {e}")
+
+# --- 5. HOLDINGS & P&L ---
 st.write("### 📦 Live Holdings & Unrealized P&L")
 try:
     positions = trading_client.get_all_positions()
     if positions:
-        pos_df = pd.DataFrame([{
-            "Symbol": p.symbol,
-            "Qty": p.qty,
-            "Market Value": f"${float(p.market_value):,.2f}",
-            "Unrealized P&L": f"${float(p.unrealized_pl):.2f}",
-            "Change %": f"{(float(p.unrealized_plpc)*100):.2f}%"
-        } for p in positions])
-        st.table(pos_df)
+        st.table(pd.DataFrame([{
+            "Symbol": p.symbol, "Qty": p.qty, "Market Value": f"${float(p.market_value):,.2f}",
+            "Unrealized P&L": f"${float(p.unrealized_pl):.2f}"
+        } for p in positions]))
     else:
-        st.success("Account is 100% Cash. No unrealized risk.")
+        st.success("Account is 100% Cash.")
 except Exception:
-    st.info("Searching for open positions...")
+    st.info("No active positions.")
 
-# --- 6. SIGNAL MONITORING & TRADING ENGINE ---
+# --- 6. BACKGROUND LOOP ---
 def run_trading_strategy():
-    """
-    ENGINE: MONITOR SIGNALS & EXECUTE
-    """
-    try:
-        # SAFETY CHECK: Buffer of $90,000
-        if CURRENT_CASH <= CASH_BUFFER_USD:
-            # st.write("Safety Triggered: Cash below $90k buffer.")
-            return
-
-        # ---------------------------------------------------------
-        # INSERT BULLISH / BEARISH SIGNAL LOGIC HERE
-        # Example:
-        # if signal == "BULLISH":
-        #    # Submit Buy Order
-        # elif signal == "BEARISH":
-        #    # Submit Sell Order
-        # ---------------------------------------------------------
-        pass
-
-    except Exception as e:
-        print(f"Strategy Scan Error: {e}")
-
-# --- 7. BACKGROUND LOOP ---
-st.write("---")
-st.write("📡 **Live Bot Status:** Actively monitoring bullish/bearish signals...")
+    # Signal monitoring logic goes here
+    if CURRENT_CASH <= CASH_BUFFER_USD:
+        return
+    pass
 
 while True:
     try:
-        now_sgt = datetime.now(SGT)
-        
-        # AUTOMATED 3:45 AM LIQUIDATION (Truth/Safety)
-        if now_sgt.hour == 3 and 45 <= now_sgt.minute < 55:
-            pos = trading_client.get_all_positions()
-            for p in pos:
+        now = datetime.now(SGT)
+        if now.hour == 3 and 45 <= now.minute < 55:
+            p = trading_client.get_all_positions()
+            for pos in p:
                 trading_client.submit_order(MarketOrderRequest(
-                    symbol=p.symbol, qty=p.qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY
+                    symbol=pos.symbol, qty=pos.qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY
                 ))
             time.sleep(600)
             continue
-
         run_trading_strategy()
         time.sleep(15) 
-
-    except Exception as e:
+    except Exception:
         time.sleep(30)
