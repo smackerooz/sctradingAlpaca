@@ -6,22 +6,27 @@ from datetime import datetime
 import pytz
 import os
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 
 # 1. SETUP & CONFIGURATION
-# Set these to your current Alpaca USD values
-INITIAL_EQUITY_USD = 100847.64  # Total Equity (Cash + Market Value) from Alpaca
+# Your baseline for the "Nightly" calculation (Adjust as needed)
+INITIAL_EQUITY_USD = 100826.93  
 TRADE_LIMIT_USD = 100.0
-CASH_BUFFER_USD = 37037.0       # $50,000 SGD is approx $37,037 USD
-LOG_FILE = "trading_log.csv"
+# $50,000 SGD is approx $37,037 USD
+CASH_BUFFER_USD = 37037.0       
 SGT = pytz.timezone('Asia/Singapore')
 
-# FETCH SECRETS
-ALPACA_API_KEY = st.secrets["ALPACA_API_KEY"]
-ALPACA_SECRET_KEY = st.secrets["ALPACA_SECRET_KEY"]
-trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+# FETCH SECRETS FROM STREAMLIT CLOUD
+try:
+    ALPACA_API_KEY = st.secrets["ALPACA_API_KEY"]
+    ALPACA_SECRET_KEY = st.secrets["ALPACA_SECRET_KEY"]
+    trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
+except Exception as e:
+    st.error("Missing Alpaca Secrets! Please check your Streamlit Cloud Settings.")
+    st.stop()
 
+# THE SUPER 74 SHARIAH LIST (HES Removed)
 SHARIAH_STOCKS = [
     "AAPL", "MSFT", "NVDA", "GOOGL", "AVGO", "ASML", "AMD", "INTC", "ADBE", "CRM", 
     "TXN", "QCOM", "AMAT", "LRCX", "MU", "ADI", "KLAC", "SNOW", "PLTR", "PANW", 
@@ -34,39 +39,42 @@ SHARIAH_STOCKS = [
 ]
 
 # 2. SESSION INITIALIZATION
-if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = {ticker: 0.0 for ticker in SHARIAH_STOCKS}
+if 'portfolio_tracker' not in st.session_state:
+    st.session_state.portfolio_tracker = {ticker: 0.0 for ticker in SHARIAH_STOCKS}
     st.session_state.entry_prices = {ticker: 0.0 for ticker in SHARIAH_STOCKS}
-    if 'nightly_start_usd' not in st.session_state:
-        st.session_state.nightly_start_usd = INITIAL_EQUITY_USD
+    st.session_state.nightly_start_usd = INITIAL_EQUITY_USD
 
 # 3. DASHBOARD UI
-# 3. DASHBOARD UI
-st.set_page_config(page_title="AI Shariah Trader (USD)", layout="wide")
+st.set_page_config(page_title="Alpaca AI Scalper (USD)", layout="wide")
 st.title("🌙 Alpaca AI Scalper - USD Dashboard")
 
+# Global variables for the trade engine
+current_cash_usd = 0.0
+
 try:
-    # 1. ACCOUNT OVERVIEW
+    # ACCOUNT OVERVIEW - DIRECT FROM ALPACA
     account = trading_client.get_account()
-    cash_usd = float(account.cash)
+    current_cash_usd = float(account.cash)
     mkt_val_usd = float(account.long_market_value)
     total_equity_usd = float(account.equity)
     
-    if 'nightly_start_usd' not in st.session_state:
-        st.session_state.nightly_start_usd = total_equity_usd
-    
+    # Calculate Nightly Progress
     nightly_pnl = total_equity_usd - st.session_state.nightly_start_usd
     
+    # Render Metrics
     m1, m2, m3 = st.columns(3)
-    m1.metric("Alpaca Cash (USD)", f"${cash_usd:,.2f}")
+    m1.metric("Alpaca Cash (USD)", f"${current_cash_usd:,.2f}")
     m2.metric("Market Value (USD)", f"${mkt_val_usd:,.2f}")
-    m3.metric("GRAND TOTAL (USD)", f"${total_equity_usd:,.2f}", delta=f"${nightly_pnl:,.2f} Nightly")
+    m3.metric("GRAND TOTAL (USD)", f"${total_equity_usd:,.2f}", 
+              delta=f"${nightly_pnl:,.2f} Nightly Progress")
 
-    st.button("Reset Nightly Start Point", on_click=lambda: st.session_state.update({"nightly_start_usd": total_equity_usd}))
+    if st.button("Reset Nightly Start Point"):
+        st.session_state.nightly_start_usd = total_equity_usd
+        st.rerun()
 
     st.write("---")
 
-    # 2. LIVE HOLDINGS TABLE (Fetched from Alpaca, not Session State)
+    # LIVE DATA TABLES
     col_l, col_r = st.columns(2)
     with col_l:
         st.subheader("📈 Current Holdings")
@@ -77,25 +85,15 @@ try:
                 "Qty": p.qty,
                 "Avg Entry": f"${float(p.avg_entry_price):,.2f}",
                 "Current Price": f"${float(p.current_price):,.2f}",
-                "P&L": f"${float(p.unrealized_pl):,.2f}"
+                "Unrealized P&L": f"${float(p.unrealized_pl):,.2f}"
             } for p in positions])
             st.table(holdings_df)
         else:
             st.info("No active positions found in Alpaca.")
 
-    # 3. TRADE LOG TABLE (Fetched from Alpaca Orders)
     with col_r:
         st.subheader("📜 Recent Trade Activity")
-        from alpaca.trading.requests import GetOrdersRequest
-        from alpaca.trading.enums import QueryOrderStatus
-        
-        # Define the filter request
-        order_filter = GetOrdersRequest(
-            status=QueryOrderStatus.CLOSED, 
-            limit=10
-        )
-        
-        # FIX: Pass order_filter directly, NOT as filter_params
+        order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=10)
         orders = trading_client.get_orders(order_filter)
         
         if orders:
@@ -108,26 +106,82 @@ try:
             } for o in orders])
             st.dataframe(logs_df, width='stretch')
         else:
-            st.info("No recent trade logs found.")
+            st.info("No recent filled orders found.")
+
+except Exception as e:
+    st.error(f"Sync Error: {e}")
+
+st.write("---")
 
 # 4. TRADING ENGINE
 def execute_trade(ticker, action, price_usd):
     side = OrderSide.BUY if action == "BUY" else OrderSide.SELL
     qty = max(1, int(TRADE_LIMIT_USD / price_usd))
+    
     try:
-        trading_client.submit_order(MarketOrderRequest(symbol=ticker, qty=qty, side=side, time_in_force=TimeInForce.DAY))
+        order_data = MarketOrderRequest(
+            symbol=ticker,
+            qty=qty,
+            side=side,
+            time_in_force=TimeInForce.DAY
+        )
+        trading_client.submit_order(order_data=order_data)
         
-        # UI Logic
+        # Local state update for the scanner
         if action == "BUY":
-            st.session_state.portfolio[ticker] += qty
+            st.session_state.portfolio_tracker[ticker] += qty
             st.session_state.entry_prices[ticker] = price_usd
         else:
-            st.session_state.portfolio[ticker] = 0.0
+            st.session_state.portfolio_tracker[ticker] = 0.0
             st.session_state.entry_prices[ticker] = 0.0
-        
-        st.toast(f"✅ {action} {ticker}")
-        time.sleep(0.5) 
+            
+        st.toast(f"✅ {action} Order Sent: {ticker}")
+        time.sleep(0.5) # Rate Limit Safety Pause
     except Exception as e:
-        st.error(f"Alpaca Order Error: {e}")
+        st.error(f"Alpaca Order Error for {ticker}: {e}")
 
-# (Scanner Loop and Table logic remains the same, just checking CASH_BUFFER_USD)
+# 5. SCANNER LOOP
+st.subheader("📡 Live Signal Tracker")
+signal_placeholder = st.empty()
+
+while True:
+    current_signals = []
+    # Status bar to show progress in the loop
+    with st.status(f"🚀 Scanning 74 Stocks... ({datetime.now(SGT).strftime('%H:%M:%S')} SGT)", expanded=False):
+        for stock in SHARIAH_STOCKS:
+            try:
+                data = yf.download(stock, period="1d", interval="1m", progress=False)
+                
+                if not data.empty and len(data) >= 20:
+                    # Flatten columns if multi-indexed
+                    if isinstance(data.columns, pd.MultiIndex):
+                        data.columns = data.columns.get_level_values(0)
+                        
+                    curr_p = float(data['Close'].iloc[-1])
+                    s_ma = data['Close'].rolling(window=5).mean().iloc[-1]
+                    l_ma = data['Close'].rolling(window=20).mean().iloc[-1]
+                    
+                    trend = "🟢 Bullish" if s_ma > l_ma else "🔴 Bearish"
+                    current_signals.append({"Ticker": stock, "Price": round(curr_p, 2), "Trend": trend})
+
+                    # --- DECISION LOGIC ---
+                    # 1. Check if we already own it (Sell Logic)
+                    if st.session_state.portfolio_tracker[stock] > 0:
+                        entry_p = st.session_state.entry_prices[stock]
+                        # Sell if 2% profit reached OR trend flips bearish
+                        if (curr_p - entry_p) / entry_p >= 0.02 or s_ma < l_ma:
+                            execute_trade(stock, "SELL", curr_p)
+                    
+                    # 2. Check if we should buy (Buy Logic)
+                    elif s_ma > l_ma and current_cash_usd > CASH_BUFFER_USD:
+                        execute_trade(stock, "BUY", curr_p)
+            except:
+                continue
+    
+    # Update the UI with the latest scan results
+    if current_signals:
+        signal_placeholder.dataframe(pd.DataFrame(current_signals), width='stretch')
+    
+    # Wait 10 seconds before the next scan
+    time.sleep(10)
+    st.rerun()
