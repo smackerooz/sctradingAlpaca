@@ -10,7 +10,8 @@ from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
 # 1. SETUP & CONFIGURATION
-INITIAL_BALANCE_SGD = 10000.0
+# This is your absolute starting point, but the app will now auto-pivot nightly
+INITIAL_BALANCE_SGD = 136144.32  
 USD_SGD_RATE = 1.35  
 TRADE_LIMIT_USD = 100.0
 CASH_BUFFER_SGD = 5000.0 
@@ -22,7 +23,6 @@ ALPACA_API_KEY = st.secrets["ALPACA_API_KEY"]
 ALPACA_SECRET_KEY = st.secrets["ALPACA_SECRET_KEY"]
 trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
 
-# UPDATED: The "Super 74" Shariah List (HES Removed)
 SHARIAH_STOCKS = [
     "AAPL", "MSFT", "NVDA", "GOOGL", "AVGO", "ASML", "AMD", "INTC", "ADBE", "CRM", 
     "TXN", "QCOM", "AMAT", "LRCX", "MU", "ADI", "KLAC", "SNOW", "PLTR", "PANW", 
@@ -34,32 +34,26 @@ SHARIAH_STOCKS = [
     "ORLY", "NKE", "SBUX", "CMG", "EL"
 ]
 
-# Initialize Session State
+# 2. SESSION INITIALIZATION
 if 'balance' not in st.session_state:
     try:
         account = trading_client.get_account()
         st.session_state.balance = float(account.cash) * USD_SGD_RATE
-    except Exception as e:
+    except:
         st.session_state.balance = INITIAL_BALANCE_SGD
-        st.warning(f"Note: Could not fetch Alpaca Balance, using local fallback. Error: {e}")
     
     st.session_state.portfolio = {ticker: 0.0 for ticker in SHARIAH_STOCKS}
     st.session_state.entry_prices = {ticker: 0.0 for ticker in SHARIAH_STOCKS}
+    # Auto-Reset Logic: Store the date and the starting total
+    st.session_state.last_reset_date = datetime.now(SGT).date()
+    st.session_state.nightly_start_total = INITIAL_BALANCE_SGD
 
-# 2. EXECUTION LOGIC
+# 3. HELPER FUNCTIONS
 def execute_trade(ticker, action, price_usd):
     side = OrderSide.BUY if action == "BUY" else OrderSide.SELL
     qty = max(1, int(TRADE_LIMIT_USD / price_usd))
-    
-    order_data = MarketOrderRequest(
-        symbol=ticker,
-        qty=qty,
-        side=side,
-        time_in_force=TimeInForce.DAY
-    )
-    
     try:
-        trading_client.submit_order(order_data=order_data)
+        trading_client.submit_order(MarketOrderRequest(symbol=ticker, qty=qty, side=side, time_in_force=TimeInForce.DAY))
         price_sgd = price_usd * USD_SGD_RATE
         if action == "BUY":
             st.session_state.balance -= (qty * price_sgd)
@@ -70,105 +64,89 @@ def execute_trade(ticker, action, price_usd):
             st.session_state.portfolio[ticker] = 0.0
             st.session_state.entry_prices[ticker] = 0.0
         
-        log_trade(ticker, action, qty, price_usd)
+        now_sgt = datetime.now(SGT).strftime('%Y-%m-%d %H:%M:%S')
+        pd.DataFrame([[now_sgt, ticker, action, qty, price_usd, st.session_state.balance]], 
+                     columns=["Timestamp_SGT", "Stock", "Action", "Quantity", "Price_USD", "Balance_SGD"]).to_csv(LOG_FILE, mode='a', header=False, index=False)
         st.toast(f"✅ Alpaca {action}: {ticker}")
         time.sleep(0.5) 
     except Exception as e:
         st.error(f"Alpaca Order Error: {e}")
 
-def log_trade(ticker, action, qty, price):
-    now_sgt = datetime.now(SGT).strftime('%Y-%m-%d %H:%M:%S')
-    new_entry = pd.DataFrame([[now_sgt, ticker, action, qty, price, st.session_state.balance]], 
-                             columns=["Timestamp_SGT", "Stock", "Action", "Quantity", "Price_USD", "Balance_SGD"])
-    new_entry.to_csv(LOG_FILE, mode='a', header=False, index=False)
-
-# 3. DASHBOARD UI
+# 4. DASHBOARD UI
 st.set_page_config(page_title="AI Shariah Trader", layout="wide")
 st.title("🌙 Alpaca-Linked AI Scalper")
 
-# --- LIVE EQUITY CALCULATION ---
+# CALCULATE LIVE EQUITY
 holdings_value_usd = 0.0
-holdings_display_list = []
-
+holdings_display = []
 for ticker, qty in st.session_state.portfolio.items():
     if qty > 0:
         try:
-            # Use yfinance for a quick price check for the dashboard
-            h_ticker = yf.Ticker(ticker)
-            # fast_info is efficient for dashboard refreshes
-            last_p = h_ticker.fast_info['last_price']
-            market_val_usd = last_p * qty
-            holdings_value_usd += market_val_usd
-            
-            holdings_display_list.append({
-                "Stock": ticker, 
-                "Qty": round(qty, 4), 
-                "Current Price": f"${last_p:.2f}",
-                "Value (USD)": f"${market_val_usd:.2f}"
-            })
+            val = yf.Ticker(ticker).fast_info['last_price'] * qty
+            holdings_value_usd += val
+            holdings_display.append({"Stock": ticker, "Qty": round(qty, 2), "Val (USD)": f"${val:.2f}"})
         except:
-            # Fallback to entry price if Yahoo Finance blips
             holdings_value_usd += (st.session_state.entry_prices[ticker] * qty)
-            holdings_display_list.append({"Stock": ticker, "Qty": round(qty, 4), "Current Price": "Syncing..."})
 
-total_holdings_sgd = holdings_value_usd * USD_SGD_RATE
-grand_total_sgd = st.session_state.balance + total_holdings_sgd
-net_pnl_sgd = grand_total_sgd - INITIAL_BALANCE_SGD
+grand_total_sgd = st.session_state.balance + (holdings_value_usd * USD_SGD_RATE)
 
-# --- RENDER TOP METRICS ---
+# --- AUTO-RESET LOGIC ---
+today = datetime.now(SGT).date()
+# If the date changes, capture the new 'nightly start' to reset the delta to 0
+if today > st.session_state.last_reset_date:
+    st.session_state.nightly_start_total = grand_total_sgd
+    st.session_state.last_reset_date = today
+
+nightly_profit = grand_total_sgd - st.session_state.nightly_start_total
+
+# Metrics
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Alpaca Cash", f"${st.session_state.balance:,.2f} SGD")
-m2.metric("Holdings Value", f"${total_holdings_sgd:,.2f} SGD")
-m3.metric("GRAND TOTAL", f"${grand_total_sgd:,.2f} SGD", delta=f"${net_pnl_sgd:,.2f} vs Start")
-m4.metric("Active Positions", len(holdings_display_list))
+m2.metric("Holdings Value", f"${(holdings_value_usd * USD_SGD_RATE):,.2f} SGD")
+m3.metric("GRAND TOTAL", f"${grand_total_sgd:,.2f} SGD", delta=f"${nightly_profit:,.2f} Nightly")
+m4.metric("Active Positions", len(holdings_display))
+
+if st.button("Force Manual Reset for Tonight"):
+    st.session_state.nightly_start_total = grand_total_sgd
+    st.rerun()
 
 st.write("---")
-
-col_left, col_right = st.columns(2)
-with col_left:
+# (The rest of your UI: Holdings table and Recent Logs follows here...)
+col_l, col_r = st.columns(2)
+with col_l:
     st.subheader("📈 Current Holdings")
-    if holdings_display_list:
-        st.table(pd.DataFrame(holdings_display_list))
-    else:
-        st.info("No active trades. Scanning for signals...")
-
-with col_right:
+    if holdings_display: st.table(pd.DataFrame(holdings_display))
+    else: st.info("No active trades.")
+with col_r:
     st.subheader("📜 Recent Logs")
     if os.path.exists(LOG_FILE):
-        log_df = pd.read_csv(LOG_FILE).tail(10)
-        st.dataframe(log_df.iloc[::-1], width='stretch')
+        st.dataframe(pd.read_csv(LOG_FILE).tail(10).iloc[::-1], width='stretch')
 
-# 4. TRADING LOOP
+# 5. SCANNER LOOP
+st.write("---")
+st.subheader("📡 Live Signal Tracker")
+signal_placeholder = st.empty()
+
 while True:
-    current_signals = []
+    signals = []
     with st.status(f"🚀 Scanning... ({datetime.now(SGT).strftime('%H:%M:%S')} SGT)", expanded=False):
         for stock in SHARIAH_STOCKS:
             try:
                 data = yf.download(stock, period="1d", interval="1m", progress=False)
                 if not data.empty and len(data) >= 20:
-                    # Fix for Multi-index columns in newer yfinance
-                    if isinstance(data.columns, pd.MultiIndex):
-                        data.columns = data.columns.get_level_values(0)
-                        
-                    curr_p = float(data['Close'].iloc[-1])
-                    s_ma = float(data['Close'].rolling(window=5).mean().iloc[-1])
-                    l_ma = float(data['Close'].rolling(window=20).mean().iloc[-1])
-                    
-                    trend = "🟢 Bullish" if s_ma > l_ma else "🔴 Bearish"
-                    current_signals.append({"Ticker": stock, "Price": round(curr_p, 2), "Trend": trend})
+                    if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.get_level_values(0)
+                    cp = float(data['Close'].iloc[-1])
+                    s_ma = data['Close'].rolling(5).mean().iloc[-1]
+                    l_ma = data['Close'].rolling(20).mean().iloc[-1]
+                    signals.append({"Ticker": stock, "Price": round(cp, 2), "Trend": "🟢 Bull" if s_ma > l_ma else "🔴 Bear"})
 
+                    # Trade Logic
                     if st.session_state.portfolio[stock] > 0:
-                        entry_p = st.session_state.entry_prices[stock]
-                        if (curr_p - entry_p) / entry_p >= 0.02 or s_ma < l_ma:
-                            execute_trade(stock, "SELL", curr_p)
+                        if (cp - st.session_state.entry_prices[stock]) / st.session_state.entry_prices[stock] >= 0.02 or s_ma < l_ma:
+                            execute_trade(stock, "SELL", cp)
                     elif s_ma > l_ma and st.session_state.balance > CASH_BUFFER_SGD:
-                        execute_trade(stock, "BUY", curr_p)
-            except:
-                continue
-    
-    if current_signals:
-        # 2026 Syntax Update: width='stretch'
-        signal_table.dataframe(pd.DataFrame(current_signals), width='stretch')
-    
+                        execute_trade(stock, "BUY", cp)
+            except: continue
+    signal_placeholder.dataframe(pd.DataFrame(signals), width='stretch')
     time.sleep(10)
     st.rerun()
