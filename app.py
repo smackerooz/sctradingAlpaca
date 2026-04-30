@@ -52,7 +52,6 @@ try:
     from alpaca.trading.enums import QueryOrderStatus, OrderSide 
     
     # 1. Fetch closed orders from the last 12 hours
-    # We increase the limit to 500 to ensure we see the BUYs that matched the SELLs
     order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500)
     all_orders = trading_client.get_orders(order_filter)
     
@@ -64,11 +63,15 @@ try:
     pl_liquidation = 0.0
 
     if all_orders:
-        # Separate buys and sells for easier matching
-        buys = [o for o in all_orders if o.side == OrderSide.BUY and o.filled_avg_price]
-        sells = [o for o in all_orders if o.side == OrderSide.SELL and o.filled_avg_price]
+        # Separate buys and sells for easier matching - Only include filled orders
+        buys = [o for o in all_orders if o.side == OrderSide.BUY and o.filled_avg_price and o.filled_at]
+        sells = [o for o in all_orders if o.side == OrderSide.SELL and o.filled_avg_price and o.filled_at]
 
         for o in all_orders:
+            # FIX: Skip order if filled_at is None to prevent the 'NoneType' error
+            if not o.filled_at:
+                continue
+                
             time_diff = datetime.now(pytz.utc) - o.filled_at
             if time_diff.total_seconds() < 43200: # 12 hour window
                 
@@ -80,9 +83,8 @@ try:
                     total_buy_vol += val
                 
                 elif o.side == OrderSide.SELL:
-                    # Find the corresponding BUY to calculate real P&L
-                    # We look for the most recent buy of this symbol
                     entry_p = 0.0
+                    # Look for matching BUY that happened BEFORE this sell
                     for b in buys:
                         if b.symbol == o.symbol and b.filled_at < o.filled_at:
                             entry_p = float(b.filled_avg_price)
@@ -115,7 +117,8 @@ try:
                    delta=f"{(pl_liquidation/total_liq_vol*100):.2f}%" if total_liq_vol > 0 else None)
 
 except Exception as e:
-    st.warning(f"⚠️ Morning Report is warming up... (Detail: {e})")
+    # This error log is now more detailed to help us catch issues
+    st.warning(f"⚠️ Morning Report is warming up... (System check: {e})")
 st.write("---")
 
 try:
