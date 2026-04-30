@@ -116,6 +116,10 @@ try:
         col5.metric("Liquidation Realized P&L", f"${pl_liquidation:,.2f}",
                    delta=f"{(pl_liquidation/total_liq_vol*100):.2f}%" if total_liq_vol > 0 else None)
 
+# NEW SECTION: Final Cash Balance
+        st.subheader("💰 Account Status")
+        st.metric("Total Cash Balance (USD)", f"${total_cash_final:,.2f}", help="Your total settled cash in Alpaca.")
+
 except Exception as e:
     # This error log is now more detailed to help us catch issues
     st.warning(f"⚠️ Morning Report is warming up... (System check: {e})")
