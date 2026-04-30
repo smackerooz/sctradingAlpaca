@@ -55,48 +55,61 @@ try:
     order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=100)
     all_orders = trading_client.get_orders(order_filter)
     
-    liquidation_trades = []
-    total_realized_pl = 0.0
-    
+    # Initialize Buckets
+    total_buy_vol = 0.0
+    total_sell_vol = 0.0
+    total_liq_vol = 0.0
+    pl_trading = 0.0
+    pl_liquidation = 0.0
+
     if all_orders:
         for o in all_orders:
-            # Check if it was a SELL filled in the last 12 hours
-            if o.side == OrderSide.SELL and o.filled_avg_price is not None:
-                time_diff = datetime.now(pytz.utc) - o.filled_at
-                if time_diff.total_seconds() < 43200:
-                    liquidation_trades.append(o)
+            # Check if order is within the last 12 hours
+            time_diff = datetime.now(pytz.utc) - o.filled_at
+            if time_diff.total_seconds() < 43200:
+                
+                price = float(o.filled_avg_price) if o.filled_avg_price else 0.0
+                qty = float(o.filled_qty)
+                val = price * qty
+                
+                # Determine if it was during Liquidation (3:45 AM SGT / 19:45 UTC)
+                # We check if the order happened at or after 3:45 AM SGT
+                order_time_sgt = o.filled_at.astimezone(SGT)
+                is_liq = (order_time_sgt.hour == 3 and order_time_sgt.minute >= 45) or (order_time_sgt.hour >= 4)
+
+                if o.side == OrderSide.BUY:
+                    total_buy_vol += val
+                
+                elif o.side == OrderSide.SELL:
+                    # Calculate Profit/Loss for this sell
+                    entry_p = st.session_state.entry_prices.get(o.symbol, 0.0)
+                    trade_pl = (price - entry_p) * qty if entry_p > 0 else 0.0
                     
-                    # 2. CALC REALIZED P&L
-                    # We subtract the "Cost Basis" (what you paid) from the "Sale Amount"
-                    # Note: This relies on Alpaca providing the average_entry_price for the order
-                    # If not available, we use 0.0 as a fallback
-                    sale_price = float(o.filled_avg_price)
-                    qty = float(o.filled_qty)
-                    
-                    # If Alpaca doesn't send the entry price in the order object, 
-                    # we check your session state entry_prices as a backup
-                    entry_price = st.session_state.entry_prices.get(o.symbol, 0.0)
-                    
-                    if entry_price > 0:
-                        trade_pl = (sale_price - entry_price) * qty
-                        total_realized_pl += trade_pl
+                    if is_liq:
+                        total_liq_vol += val
+                        pl_liquidation += trade_pl
+                    else:
+                        total_sell_vol += val
+                        pl_trading += trade_pl
 
     # 3. Display Logic
-    if liquidation_trades:
-        total_val = sum(float(o.filled_qty) * float(o.filled_avg_price) for o in liquidation_trades)
-        with st.expander("📊 Last Night's Liquidation Report", expanded=True):
-            c1, c2, c3 = st.columns(3) # Changed to 3 columns
-            
-            c1.metric("Total Liquidated", f"${total_val:,.2f}")
-            
-            # NEW: Realized P&L Metric
-            # This will show green for profit and red for loss automatically
-            c2.metric("Realized P&L", f"${total_realized_pl:,.2f}", 
-                      delta=f"{((total_realized_pl/total_val)*100):.2f}%" if total_val > 0 else "0%")
-            
-            c3.success(f"Cleared {len(liquidation_trades)} positions.")
-    else:
-        st.info("⏱️ **Morning Report:** Liquidation trades will appear here after the 3:45 AM SGT trigger.")
+    with st.expander("📊 Detailed Nightly Scorecard", expanded=True):
+        # Row 1: Trading Hours Activity
+        st.subheader("🌙 Regular Trading Hours")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Buy", f"${total_buy_vol:,.2f}")
+        col2.metric("Total Sell", f"${total_sell_vol:,.2f}")
+        col3.metric("Trading Realized P&L", f"${pl_trading:,.2f}", 
+                   delta=f"{(pl_trading/total_sell_vol*100):.2f}%" if total_sell_vol > 0 else None)
+        
+        st.write("---")
+        
+        # Row 2: Liquidation Activity
+        st.subheader("🧹 3:45 AM Liquidation")
+        col4, col5 = st.columns(2)
+        col4.metric("Total Liquidated", f"${total_liq_vol:,.2f}")
+        col5.metric("Liquidation Realized P&L", f"${pl_liquidation:,.2f}",
+                   delta=f"{(pl_liquidation/total_liq_vol*100):.2f}%" if total_liq_vol > 0 else None)
 
 except Exception as e:
     st.warning(f"⚠️ Morning Report is warming up... (Detail: {e})")
