@@ -73,54 +73,45 @@ def execute_trade(ticker, action, price_usd):
         st.error(f"Alpaca Order Error: {e}")
 
 # 4. DASHBOARD UI
+# 3. DASHBOARD UI
 st.set_page_config(page_title="AI Shariah Trader", layout="wide")
 st.title("🌙 Alpaca-Linked AI Scalper")
 
-# CALCULATE LIVE EQUITY
-holdings_value_usd = 0.0
-holdings_display = []
-for ticker, qty in st.session_state.portfolio.items():
-    if qty > 0:
-        try:
-            val = yf.Ticker(ticker).fast_info['last_price'] * qty
-            holdings_value_usd += val
-            holdings_display.append({"Stock": ticker, "Qty": round(qty, 2), "Val (USD)": f"${val:.2f}"})
-        except:
-            holdings_value_usd += (st.session_state.entry_prices[ticker] * qty)
+try:
+    # 1. Get Live Cash & Market Value directly from Alpaca
+    account = trading_client.get_account()
+    
+    # Alpaca stores everything in USD, so we convert to SGD live
+    alpaca_cash_sgd = float(account.cash) * USD_SGD_RATE
+    alpaca_holdings_sgd = float(account.long_market_value) * USD_SGD_RATE
+    
+    # 2. Calculate Grand Total
+    grand_total_sgd = alpaca_cash_sgd + alpaca_holdings_sgd
+    
+    # 3. Handle the Nightly Reset logic
+    if 'nightly_start_total' not in st.session_state:
+        st.session_state.nightly_start_total = grand_total_sgd
+        
+    nightly_profit = grand_total_sgd - st.session_state.nightly_start_total
+except Exception as e:
+    st.error(f"Error fetching live Alpaca data: {e}")
+    alpaca_cash_sgd = alpaca_holdings_sgd = grand_total_sgd = 0.0
+    nightly_profit = 0.0
 
-grand_total_sgd = st.session_state.balance + (holdings_value_usd * USD_SGD_RATE)
+# --- RENDER THE 3 PILLARS ---
+m1, m2, m3 = st.columns(3)
 
-# --- AUTO-RESET LOGIC ---
-today = datetime.now(SGT).date()
-# If the date changes, capture the new 'nightly start' to reset the delta to 0
-if today > st.session_state.last_reset_date:
-    st.session_state.nightly_start_total = grand_total_sgd
-    st.session_state.last_reset_date = today
+# Metric 1: Live Alpaca Cash (SGD)
+m1.metric("Alpaca Cash (SGD)", f"${alpaca_cash_sgd:,.2f}")
 
-nightly_profit = grand_total_sgd - st.session_state.nightly_start_total
+# Metric 2: Live Total Holdings (SGD)
+m2.metric("Total Holdings (SGD)", f"${alpaca_holdings_sgd:,.2f}")
 
-# Metrics
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Alpaca Cash", f"${st.session_state.balance:,.2f} SGD")
-m2.metric("Holdings Value", f"${(holdings_value_usd * USD_SGD_RATE):,.2f} SGD")
-m3.metric("GRAND TOTAL", f"${grand_total_sgd:,.2f} SGD", delta=f"${nightly_profit:,.2f} Nightly")
-m4.metric("Active Positions", len(holdings_display))
-
-if st.button("Force Manual Reset for Tonight"):
-    st.session_state.nightly_start_total = grand_total_sgd
-    st.rerun()
+# Metric 3: The Grand Total
+m3.metric("GRAND TOTAL (SGD)", f"${grand_total_sgd:,.2f}", 
+          delta=f"${nightly_profit:,.2f} Nightly")
 
 st.write("---")
-# (The rest of your UI: Holdings table and Recent Logs follows here...)
-col_l, col_r = st.columns(2)
-with col_l:
-    st.subheader("📈 Current Holdings")
-    if holdings_display: st.table(pd.DataFrame(holdings_display))
-    else: st.info("No active trades.")
-with col_r:
-    st.subheader("📜 Recent Logs")
-    if os.path.exists(LOG_FILE):
-        st.dataframe(pd.read_csv(LOG_FILE).tail(10).iloc[::-1], width='stretch')
 
 # 5. SCANNER LOOP
 st.write("---")
