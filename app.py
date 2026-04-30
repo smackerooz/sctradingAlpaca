@@ -28,12 +28,18 @@ SHARIAH_STOCKS = [
 
 # Initialize Session State
 if 'balance' not in st.session_state:
-    st.session_state.balance = INITIAL_BALANCE_SGD
-    st.session_state.portfolio = {ticker: 0.0 for ticker in SHARIAH_STOCKS}
-    st.session_state.entry_prices = {ticker: 0.0 for ticker in SHARIAH_STOCKS}
-    if not os.path.exists(LOG_FILE):
-        df = pd.DataFrame(columns=["Timestamp_SGT", "Stock", "Action", "Quantity", "Price_USD", "Balance_SGD"])
-        df.to_csv(LOG_FILE, index=False)
+    try:
+        # Check if secrets exist
+        if "ALPACA_API_KEY" in st.secrets:
+            account = trading_client.get_account()
+            # Convert USD to SGD and store it
+            st.session_state.balance = float(account.cash) * USD_SGD_RATE
+        else:
+            st.session_state.balance = INITIAL_BALANCE_SGD
+            st.error("Secrets not found! Using default $10k.")
+    except Exception as e:
+        st.session_state.balance = INITIAL_BALANCE_SGD
+        st.warning(f"Could not sync with Alpaca: {e}. Using default $10k.")
 
 # 2. EXECUTION & LOGGING
 def execute_trade(ticker, action, price_usd):
