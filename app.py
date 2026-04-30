@@ -10,12 +10,10 @@ from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 
 # 1. SETUP & CONFIGURATION
-# Your baseline for the "Nightly" calculation
-INITIAL_BALANCE_SGD = 136144.32  
-USD_SGD_RATE = 1.35  
+# Set these to your current Alpaca USD values
+INITIAL_EQUITY_USD = 100847.64  # Total Equity (Cash + Market Value) from Alpaca
 TRADE_LIMIT_USD = 100.0
-# UPDATED: Buffer changed to 50,000 as requested
-CASH_BUFFER_SGD = 50000.0 
+CASH_BUFFER_USD = 37037.0       # $50,000 SGD is approx $37,037 USD
 LOG_FILE = "trading_log.csv"
 SGT = pytz.timezone('Asia/Singapore')
 
@@ -39,35 +37,37 @@ SHARIAH_STOCKS = [
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = {ticker: 0.0 for ticker in SHARIAH_STOCKS}
     st.session_state.entry_prices = {ticker: 0.0 for ticker in SHARIAH_STOCKS}
-    st.session_state.last_reset_date = datetime.now(SGT).date()
+    if 'nightly_start_usd' not in st.session_state:
+        st.session_state.nightly_start_usd = INITIAL_EQUITY_USD
 
 # 3. DASHBOARD UI
-st.set_page_config(page_title="AI Shariah Trader", layout="wide")
-st.title("🌙 Alpaca-Linked AI Scalper")
+st.set_page_config(page_title="AI Shariah Trader (USD)", layout="wide")
+st.title("🌙 Alpaca AI Scalper - USD Dashboard")
 
-# TRUTH-FIRST METRICS FROM ALPACA API
 try:
+    # THE TRUTH: Pulling directly from Alpaca in USD
     account = trading_client.get_account()
     
-    # Live data from Alpaca converted to SGD
-    alpaca_cash_sgd = float(account.cash) * USD_SGD_RATE
-    alpaca_holdings_sgd = float(account.long_market_value) * USD_SGD_RATE
-    grand_total_sgd = alpaca_cash_sgd + alpaca_holdings_sgd
+    cash_usd = float(account.cash)
+    mkt_val_usd = float(account.long_market_value)
+    total_equity_usd = float(account.equity)
     
-    # Auto-Reset Logic for Nightly Target
-    if 'nightly_start_total' not in st.session_state:
-        st.session_state.nightly_start_total = grand_total_sgd
-        
-    nightly_profit = grand_total_sgd - st.session_state.nightly_start_total
+    # Calculate Nightly Progress
+    nightly_pnl = total_equity_usd - st.session_state.nightly_start_usd
     
     # Render Metrics
     m1, m2, m3 = st.columns(3)
-    m1.metric("Alpaca Cash (SGD)", f"${alpaca_cash_sgd:,.2f}")
-    m2.metric("Total Holdings (SGD)", f"${alpaca_holdings_sgd:,.2f}")
-    m3.metric("GRAND TOTAL (SGD)", f"${grand_total_sgd:,.2f}", delta=f"${nightly_profit:,.2f} Nightly")
+    m1.metric("Alpaca Cash (USD)", f"${cash_usd:,.2f}")
+    m2.metric("Market Value (USD)", f"${mkt_val_usd:,.2f}")
+    m3.metric("GRAND TOTAL (USD)", f"${total_equity_usd:,.2f}", 
+              delta=f"${nightly_pnl:,.2f} Nightly")
 
 except Exception as e:
-    st.error(f"Alpaca API Sync Error: {e}")
+    st.error(f"Sync Error: {e}")
+
+if st.button("Reset Nightly Start Point"):
+    st.session_state.nightly_start_usd = total_equity_usd
+    st.rerun()
 
 st.write("---")
 
@@ -78,7 +78,7 @@ def execute_trade(ticker, action, price_usd):
     try:
         trading_client.submit_order(MarketOrderRequest(symbol=ticker, qty=qty, side=side, time_in_force=TimeInForce.DAY))
         
-        # Local state update for the UI tracker
+        # UI Logic
         if action == "BUY":
             st.session_state.portfolio[ticker] += qty
             st.session_state.entry_prices[ticker] = price_usd
@@ -86,13 +86,9 @@ def execute_trade(ticker, action, price_usd):
             st.session_state.portfolio[ticker] = 0.0
             st.session_state.entry_prices[ticker] = 0.0
         
-        # Log to CSV
-        now_sgt = datetime.now(SGT).strftime('%Y-%m-%d %H:%M:%S')
-        pd.DataFrame([[now_sgt, ticker, action, qty, price_usd, grand_total_sgd]], 
-                     columns=["Timestamp_SGT", "Stock", "Action", "Quantity", "Price_USD", "Grand_Total_SGD"]).to_csv(LOG_FILE, mode='a', header=False, index=False)
-        st.toast(f"✅ Alpaca {action}: {ticker}")
+        st.toast(f"✅ {action} {ticker}")
         time.sleep(0.5) 
     except Exception as e:
         st.error(f"Alpaca Order Error: {e}")
 
-# (UI for Holdings and Logs would continue here as before)
+# (Scanner Loop and Table logic remains the same, just checking CASH_BUFFER_USD)
