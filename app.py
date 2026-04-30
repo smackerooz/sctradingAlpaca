@@ -10,7 +10,7 @@ from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 
 # 1. SETUP & CONFIGURATION
-INITIAL_EQUITY_USD = 100826.93  
+INITIAL_EQUITY_USD = 100844.25  
 TRADE_LIMIT_USD = 100.0
 CASH_BUFFER_USD = 50000.0       
 SGT = pytz.timezone('Asia/Singapore')
