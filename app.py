@@ -45,6 +45,18 @@ if 'portfolio_tracker' not in st.session_state:
 st.set_page_config(page_title="Alpaca AI Scalper (USD)", layout="wide")
 st.title("🌙 Alpaca AI Scalper - USD Dashboard")
 
+# --- MORNING REPORT SECTION ---
+st.write("---")
+try:
+    from alpaca.trading.requests import GetOrdersRequest
+    from alpaca.trading.enums import QueryOrderStatus
+    
+    # Logic to fetch and sum the 3:45 AM SGT (19:45 UTC) SELL orders
+    # ... (Rest of the report code from my previous message)
+except Exception as e:
+    st.write(f"Morning Report Syncing... {e}")
+st.write("---")
+
 try:
     # 1. ACCOUNT OVERVIEW - FETCHING TRUTH FROM ALPACA
     account = trading_client.get_account()
