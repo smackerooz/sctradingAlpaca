@@ -45,28 +45,56 @@ if 'portfolio_tracker' not in st.session_state:
 st.set_page_config(page_title="Alpaca AI Scalper (USD)", layout="wide")
 st.title("🌙 Alpaca AI Scalper - USD Dashboard")
 
+# --- MORNING REPORT SECTION ---
 st.write("---") 
 try:
     from alpaca.trading.requests import GetOrdersRequest
     from alpaca.trading.enums import QueryOrderStatus, OrderSide 
     
+    # 1. Fetch closed orders from the last 12 hours
     order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=100)
     all_orders = trading_client.get_orders(order_filter)
     
     liquidation_trades = []
+    total_realized_pl = 0.0
+    
     if all_orders:
         for o in all_orders:
+            # Check if it was a SELL filled in the last 12 hours
             if o.side == OrderSide.SELL and o.filled_avg_price is not None:
                 time_diff = datetime.now(pytz.utc) - o.filled_at
                 if time_diff.total_seconds() < 43200:
                     liquidation_trades.append(o)
+                    
+                    # 2. CALC REALIZED P&L
+                    # We subtract the "Cost Basis" (what you paid) from the "Sale Amount"
+                    # Note: This relies on Alpaca providing the average_entry_price for the order
+                    # If not available, we use 0.0 as a fallback
+                    sale_price = float(o.filled_avg_price)
+                    qty = float(o.filled_qty)
+                    
+                    # If Alpaca doesn't send the entry price in the order object, 
+                    # we check your session state entry_prices as a backup
+                    entry_price = st.session_state.entry_prices.get(o.symbol, 0.0)
+                    
+                    if entry_price > 0:
+                        trade_pl = (sale_price - entry_price) * qty
+                        total_realized_pl += trade_pl
 
+    # 3. Display Logic
     if liquidation_trades:
         total_val = sum(float(o.filled_qty) * float(o.filled_avg_price) for o in liquidation_trades)
         with st.expander("📊 Last Night's Liquidation Report", expanded=True):
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3) # Changed to 3 columns
+            
             c1.metric("Total Liquidated", f"${total_val:,.2f}")
-            c2.success(f"Successfully cleared {len(liquidation_trades)} positions.")
+            
+            # NEW: Realized P&L Metric
+            # This will show green for profit and red for loss automatically
+            c2.metric("Realized P&L", f"${total_realized_pl:,.2f}", 
+                      delta=f"{((total_realized_pl/total_val)*100):.2f}%" if total_val > 0 else "0%")
+            
+            c3.success(f"Cleared {len(liquidation_trades)} positions.")
     else:
         st.info("⏱️ **Morning Report:** Liquidation trades will appear here after the 3:45 AM SGT trigger.")
 
