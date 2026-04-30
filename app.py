@@ -41,33 +41,72 @@ if 'portfolio' not in st.session_state:
         st.session_state.nightly_start_usd = INITIAL_EQUITY_USD
 
 # 3. DASHBOARD UI
+# 3. DASHBOARD UI
 st.set_page_config(page_title="AI Shariah Trader (USD)", layout="wide")
 st.title("🌙 Alpaca AI Scalper - USD Dashboard")
 
 try:
-    # THE TRUTH: Pulling directly from Alpaca in USD
+    # 1. ACCOUNT OVERVIEW
     account = trading_client.get_account()
-    
     cash_usd = float(account.cash)
     mkt_val_usd = float(account.long_market_value)
     total_equity_usd = float(account.equity)
     
-    # Calculate Nightly Progress
+    if 'nightly_start_usd' not in st.session_state:
+        st.session_state.nightly_start_usd = total_equity_usd
+    
     nightly_pnl = total_equity_usd - st.session_state.nightly_start_usd
     
-    # Render Metrics
     m1, m2, m3 = st.columns(3)
     m1.metric("Alpaca Cash (USD)", f"${cash_usd:,.2f}")
     m2.metric("Market Value (USD)", f"${mkt_val_usd:,.2f}")
-    m3.metric("GRAND TOTAL (USD)", f"${total_equity_usd:,.2f}", 
-              delta=f"${nightly_pnl:,.2f} Nightly")
+    m3.metric("GRAND TOTAL (USD)", f"${total_equity_usd:,.2f}", delta=f"${nightly_pnl:,.2f} Nightly")
+
+    st.button("Reset Nightly Start Point", on_click=lambda: st.session_state.update({"nightly_start_usd": total_equity_usd}))
+
+    st.write("---")
+
+    # 2. LIVE HOLDINGS TABLE (Fetched from Alpaca, not Session State)
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.subheader("📈 Current Holdings")
+        positions = trading_client.get_all_positions()
+        if positions:
+            holdings_df = pd.DataFrame([{
+                "Symbol": p.symbol,
+                "Qty": p.qty,
+                "Avg Entry": f"${float(p.avg_entry_price):,.2f}",
+                "Current Price": f"${float(p.current_price):,.2f}",
+                "P&L": f"${float(p.unrealized_pl):,.2f}"
+            } for p in positions])
+            st.table(holdings_df)
+        else:
+            st.info("No active positions found in Alpaca.")
+
+    # 3. TRADE LOG TABLE (Fetched from Alpaca Orders)
+    with col_r:
+        st.subheader("📜 Recent Trade Activity")
+        # Fetch last 10 filled orders
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        
+        order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=10)
+        orders = trading_client.get_orders(filter_params=order_filter)
+        
+        if orders:
+            logs_df = pd.DataFrame([{
+                "Time (UTC)": o.filled_at.strftime('%H:%M:%S') if o.filled_at else "Pending",
+                "Symbol": o.symbol,
+                "Side": o.side.value.upper(),
+                "Qty": o.filled_qty,
+                "Price": f"${float(o.filled_avg_price):,.2f}" if o.filled_avg_price else "N/A"
+            } for o in orders])
+            st.dataframe(logs_df, width='stretch')
+        else:
+            st.info("No recent trade logs found.")
 
 except Exception as e:
     st.error(f"Sync Error: {e}")
-
-if st.button("Reset Nightly Start Point"):
-    st.session_state.nightly_start_usd = total_equity_usd
-    st.rerun()
 
 st.write("---")
 
