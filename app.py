@@ -68,15 +68,17 @@ try:
     m1.metric("Alpaca Cash (USD)", f"${current_cash_usd:,.2f}")
     
     m2.metric("Market Value (USD)", f"${mkt_val_usd:,.2f}")
+
+    # GRAND TOTAL: Shows total wealth and nightly gain/loss
+    m3.metric("GRAND TOTAL (USD)", f"${total_equity_usd:,.2f}", 
+              delta=round(nightly_pnl, 2)) # Numeric delta ensures correct Red/Green color
     
     # UNREALIZED P&L: Shows paper profit/loss of current holdings
     # Passing a float to delta automatically handles the Red/Down or Green/Up coloring
-    m3.metric("Unrealized P&L", f"${total_unrealized_pl:,.2f}", 
+    m4.metric("Unrealized P&L", f"${total_unrealized_pl:,.2f}", 
               delta=f"{((total_unrealized_pl/total_equity_usd)*100):.2f}%" if total_equity_usd > 0 else "0.00%")
     
-    # GRAND TOTAL: Shows total wealth and nightly gain/loss
-    m4.metric("GRAND TOTAL (USD)", f"${total_equity_usd:,.2f}", 
-              delta=round(nightly_pnl, 2)) # Numeric delta ensures correct Red/Green color
+
 
     if st.button("Reset Nightly Start Point"):
         st.session_state.nightly_start_usd = total_equity_usd
