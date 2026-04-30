@@ -59,7 +59,7 @@ def log_trade(ticker, action, qty, price):
 
 # 3. DASHBOARD UI
 st.set_page_config(page_title="AI Shariah Trader", layout="wide")
-st.title("🌙 Shariah-Compliant AI Scalper (by Rooz)")
+st.title("🌙 Shariah-Compliant AI Trading in ALPACA (by Rooz)")
 
 # Calculate Real-Time Equity
 holdings_value_usd = 0.0
@@ -84,7 +84,7 @@ net_pnl = grand_total_sgd - INITIAL_BALANCE_SGD
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Cash Balance", f"${st.session_state.balance:,.2f} SGD")
 m2.metric("Holdings Value", f"${total_holdings_sgd:,.2f} SGD")
-m3.metric("GRAND TOTAL", f"${grand_total_sgd:,.2f} SGD", delta=f"${net_pnl:,.2f} SGT")
+m3.metric("GRAND TOTAL", f"${grand_total_sgd:,.2f} SGD", delta=f"${net_pnl:,.2f} SGD")
 m4.metric("Active Positions", len(holdings_data))
 
 st.write("---")
