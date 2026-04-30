@@ -45,19 +45,38 @@ if 'portfolio_tracker' not in st.session_state:
 st.set_page_config(page_title="Alpaca AI Scalper (USD)", layout="wide")
 st.title("🌙 Alpaca AI Scalper - USD Dashboard")
 
-current_cash_usd = 0.0
-
 try:
+    # 1. ACCOUNT OVERVIEW - FETCHING TRUTH FROM ALPACA
     account = trading_client.get_account()
     current_cash_usd = float(account.cash)
     mkt_val_usd = float(account.long_market_value)
     total_equity_usd = float(account.equity)
+    
+    # FETCH ALL POSITIONS TO CALCULATE TOTAL UNREALIZED P&L
+    positions = trading_client.get_all_positions()
+    total_unrealized_pl = sum(float(p.unrealized_pl) for p in positions) if positions else 0.0
+    
+    # NIGHTLY PROGRESS CALCULATION
+    if 'nightly_start_usd' not in st.session_state:
+        st.session_state.nightly_start_usd = total_equity_usd
+        
     nightly_pnl = total_equity_usd - st.session_state.nightly_start_usd
     
-    m1, m2, m3 = st.columns(3)
+    # 2. RENDER THE 4 METRIC PILLARS
+    m1, m2, m3, m4 = st.columns(4)
+    
     m1.metric("Alpaca Cash (USD)", f"${current_cash_usd:,.2f}")
+    
     m2.metric("Market Value (USD)", f"${mkt_val_usd:,.2f}")
-    m3.metric("GRAND TOTAL (USD)", f"${total_equity_usd:,.2f}", delta=f"${nightly_pnl:,.2f} Nightly")
+    
+    # UNREALIZED P&L: Shows paper profit/loss of current holdings
+    # Passing a float to delta automatically handles the Red/Down or Green/Up coloring
+    m3.metric("Unrealized P&L", f"${total_unrealized_pl:,.2f}", 
+              delta=f"{((total_unrealized_pl/total_equity_usd)*100):.2f}%" if total_equity_usd > 0 else "0.00%")
+    
+    # GRAND TOTAL: Shows total wealth and nightly gain/loss
+    m4.metric("GRAND TOTAL (USD)", f"${total_equity_usd:,.2f}", 
+              delta=round(nightly_pnl, 2)) # Numeric delta ensures correct Red/Green color
 
     if st.button("Reset Nightly Start Point"):
         st.session_state.nightly_start_usd = total_equity_usd
