@@ -48,48 +48,62 @@ if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
-# --- 3. THE 1-2-3-4 BALANCE SHEET ---
+# --- 3. THE 1-2-3-4 BALANCE SHEET (FINAL TRUTH VERSION) ---
 st.write(f"## 🎯 Goal: ${TARGET_PROFIT_USD} USD (~200 SGD)")
 
-# Pulling the components
+# 1. Gather the Data
 total_cash = CURRENT_CASH                                  # 1. Total Cash Balance
 holdings_val = CURRENT_EQUITY - CURRENT_CASH               # 2. Holdings Value
 grand_total = CURRENT_EQUITY                               # 3. Grand Total (1+2)
 
-# Calculating the 'Realized Truth' 
-# This is total growth minus the 'paper' fluctuations of current holdings
+# 2. Calculate the 'Truth' 
+# Difference between right now and yesterday's closing equity
 total_net_change = grand_total - PREVIOUS_CLOSE_EQUITY
+
+# Sum up the 'paper' value of what you haven't sold yet
 positions = trading_client.get_all_positions()
 unrealized_pl = sum(float(p.unrealized_pl) for p in positions) if positions else 0.0
+
+# Realized Truth = Total Change minus Paper Fluctuations
 realized_truth = total_net_change - unrealized_pl          # 4. Realized Truth
 
-# Goal Progress based ONLY on Realized Truth
+# 3. Calculate Goal Progress (Based ONLY on locked-in cash)
 progress_pct = min(max(realized_truth / TARGET_PROFIT_USD, 0.0), 1.0) if realized_truth > 0 else 0.0
+
+# --- DISPLAY SECTION ---
 
 # First Row: The 1-2-3 Components
 c1, c2, c3 = st.columns(3)
+
 with c1:
     st.metric("1) Total Cash Balance", f"${total_cash:,.2f}")
+
 with c2:
     st.metric("2) Holdings Value", f"${holdings_val:,.2f}")
+
 with c3:
-    # 1. We calculate the numeric difference first
-    total_net_change = CURRENT_EQUITY - PREVIOUS_CLOSE_EQUITY
-    
-    # 2. We use delta_color="normal" to force Red for negative and Green for positive
+    # CRITICAL FIX: We pass 'total_net_change' as a RAW NUMBER.
+    # Do not put f"${...}" in the delta. Streamlit will add the $ and handle the RED color.
     st.metric(
         label="3) Grand Total (1+2)", 
-        value=f"${CURRENT_EQUITY:,.2f}", 
-        delta=f"${total_net_change:,.2f}",
+        value=f"${grand_total:,.2f}", 
+        delta=total_net_change,
         delta_color="normal"
     )
 
-# Second Row: The Realized Truth (Your actual take-home for the night)
+# Second Row: The Realized Truth & Progress
 st.write("---")
 col_truth, col_progress = st.columns([1, 2])
+
 with col_truth:
-    st.metric("📊 4) Realized Truth", f"${realized_truth:,.2f}", 
-              help="This is the actual cash profit you have locked in today.")
+    # This shows your actual $25.33 cash gain clearly
+    st.metric(
+        label="📊 4) Realized Truth", 
+        value=f"${realized_truth:,.2f}",
+        delta=realized_truth,
+        delta_color="normal",
+        help="This is the actual cash profit you have locked in today."
+    )
 
 with col_progress:
     st.write(f"**Progress to 200 SGD Goal:** {int(progress_pct * 100)}%")
