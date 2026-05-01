@@ -48,66 +48,66 @@ if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
-# --- 3. LIVE SCORECARD ---
+# --- 3. LIVE SCORECARD & TARGET ---
 st.write(f"## 🎯 Goal: ${TARGET_PROFIT_USD} USD (~200 SGD)")
-realized_pl_total = CURRENT_EQUITY - PREVIOUS_CLOSE_EQUITY
-progress_pct = min(max(realized_pl_total / TARGET_PROFIT_USD, 0.0), 1.0) if realized_pl_total > 0 else 0.0
+total_pl = CURRENT_EQUITY - PREVIOUS_CLOSE_EQUITY
+progress_pct = min(max(total_pl / TARGET_PROFIT_USD, 0.0), 1.0) if total_pl > 0 else 0.0
 
 c1, c2, c3 = st.columns(3)
-c1.metric("Total Equity", f"${CURRENT_EQUITY:,.2f}", delta=f"${realized_pl_total:,.2f}")
+c1.metric("Total Equity", f"${CURRENT_EQUITY:,.2f}", delta=f"${total_pl:,.2f}")
 c2.metric("Cash Balance", f"${CURRENT_CASH:,.2f}")
 c3.metric("Goal Progress", f"{int(progress_pct * 100)}%")
 st.progress(progress_pct)
 
-# --- 4. MORNING REPORT (SUMMARY VERSION) ---
-st.write("---")
+# --- 4. NEW: P&L SUMMARY INFO ---
+st.write("### 💰 Profit & Loss Summary")
+try:
+    positions = trading_client.get_all_positions()
+    # Unrealized P&L is the sum of P&L from all current holdings
+    unrealized_pl = sum(float(p.unrealized_pl) for p in positions) if positions else 0.0
+    
+    # Realized P&L = Total Daily Change - Unrealized P&L
+    realized_pl = total_pl - unrealized_pl
+
+    pl_col1, pl_col2 = st.columns(2)
+    pl_col1.metric("Realized P&L (Cash)", f"${realized_pl:,.2f}", 
+                  help="Profit/Loss from stocks already sold today.")
+    pl_col2.metric("Unrealized P&L (Paper)", f"${unrealized_pl:,.2f}", 
+                  help="Profit/Loss from stocks you are still holding.")
+except Exception as e:
+    st.write("Calculating P&L metrics...")
+
+# --- 5. MORNING REPORT (SUMMARY) ---
 with st.expander("📊 Morning Report Summary", expanded=True):
     try:
         order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=200)
         closed_orders = trading_client.get_orders(order_filter)
-        
-        # Filtering for trades closed today (SGT)
         today_date = datetime.now(SGT).date()
         daily_trades = [o for o in closed_orders if o.filled_at and o.filled_at.astimezone(SGT).date() == today_date]
         
         if daily_trades:
-            total_vol = sum(float(o.filled_avg_price) * float(o.filled_qty) for o in daily_trades if o.side == OrderSide.SELL)
-            trade_count = len(daily_trades)
-            
-            # Summary Metrics
-            sm1, sm2, sm3 = st.columns(3)
-            sm1.write(f"**Trades Today:** {trade_count}")
-            sm2.write(f"**Total Volume:** ${total_vol:,.2f}")
-            sm3.write(f"**Status:** {'✅ Target Met' if realized_pl_total >= TARGET_PROFIT_USD else '⏳ Trading'}")
-            
-            # Brief table of the last 5 major exits
-            st.write("**Recent Major Exits:**")
-            summary_df = pd.DataFrame([{
+            total_vol = sum(float(o.filled_avg_price) * float(o.filled_qty) for o in daily_trades if o.side == OrderSide.BUY)
+            st.write(f"**Trades Today:** {len(daily_trades)} | **Buy Volume:** ${total_vol:,.2f}")
+            st.table(pd.DataFrame([{
                 "Symbol": o.symbol, "Qty": o.filled_qty, "Value": f"${(float(o.filled_avg_price)*float(o.filled_qty)):,.2f}"
-            } for o in daily_trades[:5]])
-            st.table(summary_df)
+            } for o in daily_trades[:5]]))
         else:
             st.info("No trades completed today yet.")
-    except Exception as e:
-        st.write(f"Gathering report data... {e}")
+    except Exception:
+        st.write("Loading trade report...")
 
-# --- 5. HOLDINGS & P&L ---
-st.write("### 📦 Live Holdings & Unrealized P&L")
-try:
-    positions = trading_client.get_all_positions()
-    if positions:
-        st.table(pd.DataFrame([{
-            "Symbol": p.symbol, "Qty": p.qty, "Market Value": f"${float(p.market_value):,.2f}",
-            "Unrealized P&L": f"${float(p.unrealized_pl):.2f}"
-        } for p in positions]))
-    else:
-        st.success("Account is 100% Cash.")
-except Exception:
-    st.info("No active positions.")
+# --- 6. LIVE HOLDINGS ---
+st.write("### 📦 Live Holdings")
+if positions:
+    st.table(pd.DataFrame([{
+        "Symbol": p.symbol, "Qty": p.qty, "Value": f"${float(p.market_value):,.2f}",
+        "P&L": f"${float(p.unrealized_pl):.2f}"
+    } for p in positions]))
+else:
+    st.success("Account is 100% Cash.")
 
-# --- 6. BACKGROUND LOOP ---
+# --- 7. BACKGROUND LOOP ---
 def run_trading_strategy():
-    # Signal monitoring logic goes here
     if CURRENT_CASH <= CASH_BUFFER_USD:
         return
     pass
