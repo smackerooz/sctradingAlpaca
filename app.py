@@ -15,21 +15,29 @@ from alpaca.data.timeframe import TimeFrame
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-st.set_page_config(page_title="Super 74 Bot V2", layout="wide")
+st.set_page_config(page_title="Super 74 Bot V2.1", layout="wide")
 
 SGT = pytz.timezone("Asia/Singapore")
 
-TARGET_PROFIT = 150
-MAX_TRADES_PER_DAY = 5
-MAX_OPEN_POSITIONS = 3
-RISK_PER_TRADE = 0.005   # 0.5%
-DAILY_STOP_LOSS = -1000
-SCAN_INTERVAL = 60
+SCAN_INTERVAL = 20
+MAX_TRADES_PER_DAY = 15
+MAX_OPEN_POSITIONS = 5
+RISK_PER_TRADE = 0.004  # slightly lower per trade
+COOLDOWN_SECONDS = 600
 
-WATCHLIST = ["AAPL","MSFT","NVDA","TSLA","META","AMZN","AMD","GOOGL","AVGO","NFLX"]
+WATCHLIST = [
+"AAPL","MSFT","NVDA","TSLA","META","AMZN","AMD","GOOGL","AVGO","NFLX",
+"INTC","QCOM","TXN","ADBE","CRM","CSCO","ASML","MU","AMAT",
+"JPM","BAC","WMT","COST","PG","V","MA","UNH","HD","DIS",
+"XOM","CVX","CAT","GE","BA","HON","MMM","UPS","FDX","LMT",
+"ABBV","PEP","KO","PFE","TMO","LLY","AZN","NKE","SBUX","T",
+"VZ","TMUS","PYPL","SQ","UBER","ABNB","SNOW","PLTR","BABA","JD",
+"PDD","SHOP","LCID","RIVN","COIN","MSTR","MARA","RIOT","DKNG","PEN",
+"ZM","ROKU","U","SNAP"
+]
 
 # ─────────────────────────────────────────────
-# INIT CLIENTS
+# INIT
 # ─────────────────────────────────────────────
 API_KEY = st.secrets["ALPACA_API_KEY"]
 SECRET_KEY = st.secrets["ALPACA_SECRET_KEY"]
@@ -40,14 +48,8 @@ data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 # ─────────────────────────────────────────────
 # SESSION STATE
 # ─────────────────────────────────────────────
-if "bot_running" not in st.session_state:
-    st.session_state.bot_running = False
-
 if "trade_count" not in st.session_state:
     st.session_state.trade_count = 0
-
-if "daily_pnl" not in st.session_state:
-    st.session_state.daily_pnl = 0
 
 if "cooldown" not in st.session_state:
     st.session_state.cooldown = {}
@@ -58,8 +60,11 @@ if "peak_prices" not in st.session_state:
 if "log" not in st.session_state:
     st.session_state.log = []
 
+# AUTO START
+st.session_state.bot_running = True
+
 # ─────────────────────────────────────────────
-# LOGGING
+# LOG
 # ─────────────────────────────────────────────
 def log(msg):
     ts = datetime.now(SGT).strftime("%H:%M:%S")
@@ -74,73 +79,54 @@ def calculate_vwap(df):
     vol = df['volume'].cumsum()
     return pv / vol
 
-def calculate_atr(df, period=14):
-    df['h-l'] = df['high'] - df['low']
-    df['h-c'] = abs(df['high'] - df['close'].shift())
-    df['l-c'] = abs(df['low'] - df['close'].shift())
-    tr = df[['h-l','h-c','l-c']].max(axis=1)
-    return tr.rolling(period).mean().iloc[-1]
-
 # ─────────────────────────────────────────────
-# MARKET FILTER (SPY)
+# TREND CHECK (FOR DASHBOARD)
 # ─────────────────────────────────────────────
-def market_is_bullish():
+def get_trend(symbol):
     try:
         bars = data_client.get_stock_bars(
             StockBarsRequest(
-                symbol_or_symbols=["SPY"],
+                symbol_or_symbols=[symbol],
                 timeframe=TimeFrame.Minute,
-                start=datetime.utcnow() - timedelta(minutes=60)
+                start=datetime.utcnow() - timedelta(minutes=30)
             )
         )
         df = bars.df
-        if df.empty or len(df) < 50:
-            return False
+        if df.empty or len(df) < 20:
+            return "Neutral"
 
-        ma20 = df['close'].tail(20).mean()
-        ma50 = df['close'].tail(50).mean()
+        ma_short = df['close'].tail(10).mean()
+        ma_long = df['close'].tail(20).mean()
 
-        return ma20 > ma50
+        return "Bullish" if ma_short > ma_long else "Bearish"
     except:
-        return False
+        return "N/A"
 
 # ─────────────────────────────────────────────
-# STRATEGY
+# BOT
 # ─────────────────────────────────────────────
 def run_bot():
-
-    # Stop if hit daily loss
-    if st.session_state.daily_pnl <= DAILY_STOP_LOSS:
-        log("🛑 Daily loss hit. Stopping trading.")
-        return
-
-    # Market filter
-    if not market_is_bullish():
-        log("⏸ Market not bullish. Skipping trades.")
-        return
 
     account = trading_client.get_account()
     equity = float(account.equity)
 
     positions = trading_client.get_all_positions()
-    if len(positions) >= MAX_OPEN_POSITIONS:
-        return
-
     open_orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
     open_symbols = {o.symbol for o in open_orders}
 
     for symbol in WATCHLIST:
 
-        # Limits
+        if len(positions) >= MAX_OPEN_POSITIONS:
+            break
+
         if st.session_state.trade_count >= MAX_TRADES_PER_DAY:
-            return
+            break
 
         if symbol in open_symbols:
             continue
 
-        # Cooldown check
         last_trade = st.session_state.cooldown.get(symbol)
-        if last_trade and (datetime.now(SGT) - last_trade).seconds < 1800:
+        if last_trade and (datetime.now(SGT) - last_trade).seconds < COOLDOWN_SECONDS:
             continue
 
         try:
@@ -148,37 +134,28 @@ def run_bot():
                 StockBarsRequest(
                     symbol_or_symbols=[symbol],
                     timeframe=TimeFrame.Minute,
-                    start=datetime.utcnow() - timedelta(minutes=30)
+                    start=datetime.utcnow() - timedelta(minutes=20)
                 )
             )
-            df = bars.df
 
-            if df.empty or len(df) < 20:
+            df = bars.df
+            if df.empty or len(df) < 10:
                 continue
 
             df['vwap'] = calculate_vwap(df)
 
             curr = df['close'].iloc[-1]
-            prev1 = df['close'].iloc[-2]
-            prev2 = df['close'].iloc[-3]
+            prev = df['close'].iloc[-2]
 
             vol = df['volume'].iloc[-1]
             avg_vol = df['volume'].mean()
 
-            atr = calculate_atr(df)
+            # ⚡ SCALPING ENTRY (LESS STRICT)
+            if curr > prev and curr > df['vwap'].iloc[-1] * 0.998:
 
-            # ENTRY CONDITIONS
-            if (
-                curr > df['vwap'].iloc[-1]
-                and prev1 > prev2
-                and curr > prev1
-                and vol > avg_vol * 1.5
-            ):
+                risk = equity * RISK_PER_TRADE
+                qty = int(risk / (curr * 0.005))
 
-                stop_loss = curr - (1.2 * atr)
-                risk_per_trade = equity * RISK_PER_TRADE
-
-                qty = int(risk_per_trade / (curr - stop_loss))
                 if qty <= 0:
                     continue
 
@@ -195,24 +172,21 @@ def run_bot():
                 st.session_state.cooldown[symbol] = datetime.now(SGT)
                 st.session_state.peak_prices[symbol] = curr
 
-                log(f"🟢 BUY {symbol} qty={qty}")
+                log(f"🟢 BUY {symbol}")
 
-        except Exception as e:
+        except:
             continue
 
-    # MANAGE POSITIONS
+    # TRAILING EXIT
     for p in positions:
         symbol = p.symbol
-        entry = float(p.avg_entry_price)
         curr = float(p.current_price)
+        entry = float(p.avg_entry_price)
 
         peak = max(st.session_state.peak_prices.get(symbol, entry), curr)
         st.session_state.peak_prices[symbol] = peak
 
-        # ATR-based trailing (approx)
-        trail_price = peak * 0.98
-
-        if curr < trail_price:
+        if curr < peak * 0.995:
             trading_client.submit_order(
                 MarketOrderRequest(
                     symbol=symbol,
@@ -221,38 +195,30 @@ def run_bot():
                     time_in_force=TimeInForce.DAY
                 )
             )
-
-            pnl = (curr - entry) * float(p.qty)
-            st.session_state.daily_pnl += pnl
-
-            log(f"📉 SELL {symbol} PnL={pnl:.2f}")
+            log(f"📉 SELL {symbol}")
 
 # ─────────────────────────────────────────────
 # UI
 # ─────────────────────────────────────────────
-st.title("🚀 Super 74 Bot V2")
+st.title("🚀 Super 74 Bot V2.1 (Scalping Mode)")
 
-col1, col2, col3 = st.columns(3)
+# 📊 TREND DASHBOARD
+st.write("## 📊 Market Trend (74 Stocks)")
 
-account = trading_client.get_account()
+trend_data = []
+for s in WATCHLIST:
+    trend = get_trend(s)
+    trend_data.append({"Symbol": s, "Trend": trend})
 
-col1.metric("Equity", f"${float(account.equity):,.2f}")
-col2.metric("Daily PnL", f"${st.session_state.daily_pnl:,.2f}")
-col3.metric("Trades Today", st.session_state.trade_count)
+df_trend = pd.DataFrame(trend_data)
 
-if st.sidebar.button("Start"):
-    st.session_state.bot_running = True
+def color_trend(val):
+    if val == "Bullish":
+        return "color: green"
+    elif val == "Bearish":
+        return "color: red"
+    return ""
 
-if st.sidebar.button("Stop"):
-    st.session_state.bot_running = False
+st.dataframe(df_trend.style.map(color_trend, subset=["Trend"]), height=400)
 
-# Logs
-st.write("### Logs")
-for l in st.session_state.log:
-    st.text(l)
-
-# RUN LOOP
-if st.session_state.bot_running:
-    run_bot()
-    time.sleep(SCAN_INTERVAL)
-    st.rerun()
+# 📋 LOG
