@@ -48,30 +48,28 @@ if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
-# --- 3. LIVE SCORECARD & TARGET ---
-# --- 3. LIVE SCORECARD & TARGET (FIXED DELTA) ---
+# --- 3. THE 1-2-3 BALANCE SHEET ---
 st.write(f"## 🎯 Goal: ${TARGET_PROFIT_USD} USD (~200 SGD)")
 
-# 1. Calculate the 'Truth' metrics
-total_net_change = CURRENT_EQUITY - PREVIOUS_CLOSE_EQUITY
-positions = trading_client.get_all_positions()
-unrealized_pl = sum(float(p.unrealized_pl) for p in positions) if positions else 0.0
-realized_pl = total_net_change - unrealized_pl
+# Pulling the 1-2-3 components
+total_cash = CURRENT_CASH                                  # 1. Total Cash
+holdings_val = CURRENT_EQUITY - CURRENT_CASH               # 2. Holdings Value
+grand_total = CURRENT_EQUITY                               # 3. Grand Total (1+2)
 
-# 2. Goal Progress based ONLY on Realized Cash
-progress_pct = min(max(realized_pl / TARGET_PROFIT_USD, 0.0), 1.0) if realized_pl > 0 else 0.0
+# Calculate Daily Profit (The "Truth" against yesterday's close)
+daily_profit = grand_total - PREVIOUS_CLOSE_EQUITY
 
 c1, c2, c3 = st.columns(3)
 
-# We set the delta to 'realized_pl' so the green number represents CASH profit
-c1.metric("Total Equity", 
-          f"${CURRENT_EQUITY:,.2f}", 
-          delta=f"${realized_pl:,.2f} Realized")
+with c1:
+    st.metric("1) Total Cash Balance", f"${total_cash:,.2f}")
+with c2:
+    st.metric("2) Holdings Value", f"${holdings_val:,.2f}")
+with c3:
+    # This highlights your progress toward the $200 SGD goal
+    st.metric("3) Grand Total (1+2)", f"${grand_total:,.2f}", delta=f"${daily_profit:,.2f}")
 
-c2.metric("Cash Balance", f"${CURRENT_CASH:,.2f}")
-
-c3.metric("Goal Progress", f"{int(progress_pct * 100)}%")
-st.progress(progress_pct)
+st.progress(min(max(daily_profit / TARGET_PROFIT_USD, 0.0), 1.0) if daily_profit > 0 else 0.0)
 
 # --- 4. NEW: P&L SUMMARY INFO ---
 st.write("### 💰 Profit & Loss Summary")
