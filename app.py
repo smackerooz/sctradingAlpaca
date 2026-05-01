@@ -15,19 +15,22 @@ from alpaca.data.timeframe import TimeFrame
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-st.set_page_config(page_title="Super 74 Bot V2.1", layout="wide")
+st.set_page_config(page_title="Super 74 Bot V3", layout="wide")
 
 SGT = pytz.timezone("Asia/Singapore")
 
 SCAN_INTERVAL = 20
 MAX_TRADES_PER_DAY = 15
 MAX_OPEN_POSITIONS = 5
-RISK_PER_TRADE = 0.004  # slightly lower per trade
+RISK_PER_TRADE = 0.004
 COOLDOWN_SECONDS = 600
 
+# ─────────────────────────────────────────────
+# WATCHLIST (74)
+# ─────────────────────────────────────────────
 WATCHLIST = [
-"AAPL","MSFT","NVDA","TSLA","META","AMZN","AMD","GOOGL","AVGO","NFLX",
-"INTC","QCOM","TXN","ADBE","CRM","CSCO","ASML","MU","AMAT",
+"AAPL","MSFT","NVDA","TSLA","META","AMZN","AMD","GOOGL","AVGO","ORCL",
+"INTC","QCOM","TXN","ADBE","CRM","NFLX","CSCO","ASML","MU","AMAT",
 "JPM","BAC","WMT","COST","PG","V","MA","UNH","HD","DIS",
 "XOM","CVX","CAT","GE","BA","HON","MMM","UPS","FDX","LMT",
 "ABBV","PEP","KO","PFE","TMO","LLY","AZN","NKE","SBUX","T",
@@ -60,6 +63,9 @@ if "peak_prices" not in st.session_state:
 if "log" not in st.session_state:
     st.session_state.log = []
 
+if "daily_baseline" not in st.session_state:
+    st.session_state.daily_baseline = float(trading_client.get_account().equity)
+
 # AUTO START
 st.session_state.bot_running = True
 
@@ -72,6 +78,19 @@ def log(msg):
     st.session_state.log = st.session_state.log[:50]
 
 # ─────────────────────────────────────────────
+# RESET DAILY BASELINE
+# ─────────────────────────────────────────────
+def reset_daily_baseline():
+    clock = trading_client.get_clock()
+
+    if clock.is_open and not st.session_state.get("baseline_reset_done", False):
+        st.session_state.daily_baseline = float(trading_client.get_account().equity)
+        st.session_state.baseline_reset_done = True
+
+    if not clock.is_open:
+        st.session_state.baseline_reset_done = False
+
+# ─────────────────────────────────────────────
 # INDICATORS
 # ─────────────────────────────────────────────
 def calculate_vwap(df):
@@ -80,145 +99,67 @@ def calculate_vwap(df):
     return pv / vol
 
 # ─────────────────────────────────────────────
-# TREND CHECK (FOR DASHBOARD)
+# TREND SCORING SYSTEM
 # ─────────────────────────────────────────────
-def get_trend(symbol):
+def get_trend_score(symbol):
     try:
         bars = data_client.get_stock_bars(
             StockBarsRequest(
                 symbol_or_symbols=[symbol],
                 timeframe=TimeFrame.Minute,
-                start=datetime.utcnow() - timedelta(minutes=30)
+                start=datetime.utcnow() - timedelta(minutes=60)
             )
         )
+
         df = bars.df
-        if df.empty or len(df) < 20:
-            return "Neutral"
 
-        ma_short = df['close'].tail(10).mean()
-        ma_long = df['close'].tail(20).mean()
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.xs(symbol)
 
-        return "Bullish" if ma_short > ma_long else "Bearish"
+        if df.empty or len(df) < 40:
+            return 0, "N/A"
+
+        df['vwap'] = calculate_vwap(df)
+
+        curr = df['close'].iloc[-1]
+        ma_short = df['close'].tail(15).mean()
+        ma_long = df['close'].tail(40).mean()
+
+        score = 0
+
+        # MA Trend (30)
+        if ma_short > ma_long:
+            score += 30
+
+        # VWAP (25)
+        if curr > df['vwap'].iloc[-1]:
+            score += 25
+
+        # Momentum (25)
+        if df['close'].iloc[-1] > df['close'].iloc[-2] > df['close'].iloc[-3]:
+            score += 25
+
+        # Volume (20)
+        if df['volume'].iloc[-1] > df['volume'].mean():
+            score += 20
+
+        # LABEL
+        if score >= 80:
+            label = "Strong Bullish"
+        elif score >= 60:
+            label = "Bullish"
+        elif score >= 40:
+            label = "Neutral"
+        elif score >= 20:
+            label = "Bearish"
+        else:
+            label = "Strong Bearish"
+
+        return score, label
+
     except:
-        return "N/A"
+        return 0, "N/A"
 
 # ─────────────────────────────────────────────
 # BOT
-# ─────────────────────────────────────────────
-def run_bot():
-
-    account = trading_client.get_account()
-    equity = float(account.equity)
-
-    positions = trading_client.get_all_positions()
-    open_orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
-    open_symbols = {o.symbol for o in open_orders}
-
-    for symbol in WATCHLIST:
-
-        if len(positions) >= MAX_OPEN_POSITIONS:
-            break
-
-        if st.session_state.trade_count >= MAX_TRADES_PER_DAY:
-            break
-
-        if symbol in open_symbols:
-            continue
-
-        last_trade = st.session_state.cooldown.get(symbol)
-        if last_trade and (datetime.now(SGT) - last_trade).seconds < COOLDOWN_SECONDS:
-            continue
-
-        try:
-            bars = data_client.get_stock_bars(
-                StockBarsRequest(
-                    symbol_or_symbols=[symbol],
-                    timeframe=TimeFrame.Minute,
-                    start=datetime.utcnow() - timedelta(minutes=20)
-                )
-            )
-
-            df = bars.df
-            if df.empty or len(df) < 10:
-                continue
-
-            df['vwap'] = calculate_vwap(df)
-
-            curr = df['close'].iloc[-1]
-            prev = df['close'].iloc[-2]
-
-            vol = df['volume'].iloc[-1]
-            avg_vol = df['volume'].mean()
-
-            # ⚡ SCALPING ENTRY (LESS STRICT)
-            if curr > prev and curr > df['vwap'].iloc[-1] * 0.998:
-
-                risk = equity * RISK_PER_TRADE
-                qty = int(risk / (curr * 0.005))
-
-                if qty <= 0:
-                    continue
-
-                trading_client.submit_order(
-                    MarketOrderRequest(
-                        symbol=symbol,
-                        qty=qty,
-                        side=OrderSide.BUY,
-                        time_in_force=TimeInForce.DAY
-                    )
-                )
-
-                st.session_state.trade_count += 1
-                st.session_state.cooldown[symbol] = datetime.now(SGT)
-                st.session_state.peak_prices[symbol] = curr
-
-                log(f"🟢 BUY {symbol}")
-
-        except:
-            continue
-
-    # TRAILING EXIT
-    for p in positions:
-        symbol = p.symbol
-        curr = float(p.current_price)
-        entry = float(p.avg_entry_price)
-
-        peak = max(st.session_state.peak_prices.get(symbol, entry), curr)
-        st.session_state.peak_prices[symbol] = peak
-
-        if curr < peak * 0.995:
-            trading_client.submit_order(
-                MarketOrderRequest(
-                    symbol=symbol,
-                    qty=p.qty,
-                    side=OrderSide.SELL,
-                    time_in_force=TimeInForce.DAY
-                )
-            )
-            log(f"📉 SELL {symbol}")
-
-# ─────────────────────────────────────────────
-# UI
-# ─────────────────────────────────────────────
-st.title("🚀 Super 74 Bot V2.1 (Scalping Mode)")
-
-# 📊 TREND DASHBOARD
-st.write("## 📊 Market Trend (74 Stocks)")
-
-trend_data = []
-for s in WATCHLIST:
-    trend = get_trend(s)
-    trend_data.append({"Symbol": s, "Trend": trend})
-
-df_trend = pd.DataFrame(trend_data)
-
-def color_trend(val):
-    if val == "Bullish":
-        return "color: green"
-    elif val == "Bearish":
-        return "color: red"
-    return ""
-
-st.dataframe(df_trend.style.map(color_trend, subset=["Trend"]), height=400)
-
-# 📋 LOG
+# ─
