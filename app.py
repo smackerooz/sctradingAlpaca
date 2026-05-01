@@ -49,13 +49,27 @@ if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
         st.sidebar.error(f"Error: {e}")
 
 # --- 3. LIVE SCORECARD & TARGET ---
+# --- 3. LIVE SCORECARD & TARGET (FIXED DELTA) ---
 st.write(f"## 🎯 Goal: ${TARGET_PROFIT_USD} USD (~200 SGD)")
-total_pl = CURRENT_EQUITY - PREVIOUS_CLOSE_EQUITY
-progress_pct = min(max(total_pl / TARGET_PROFIT_USD, 0.0), 1.0) if total_pl > 0 else 0.0
+
+# 1. Calculate the 'Truth' metrics
+total_net_change = CURRENT_EQUITY - PREVIOUS_CLOSE_EQUITY
+positions = trading_client.get_all_positions()
+unrealized_pl = sum(float(p.unrealized_pl) for p in positions) if positions else 0.0
+realized_pl = total_net_change - unrealized_pl
+
+# 2. Goal Progress based ONLY on Realized Cash
+progress_pct = min(max(realized_pl / TARGET_PROFIT_USD, 0.0), 1.0) if realized_pl > 0 else 0.0
 
 c1, c2, c3 = st.columns(3)
-c1.metric("Total Equity", f"${CURRENT_EQUITY:,.2f}", delta=f"${total_pl:,.2f}")
+
+# We set the delta to 'realized_pl' so the green number represents CASH profit
+c1.metric("Total Equity", 
+          f"${CURRENT_EQUITY:,.2f}", 
+          delta=f"${realized_pl:,.2f} Realized")
+
 c2.metric("Cash Balance", f"${CURRENT_CASH:,.2f}")
+
 c3.metric("Goal Progress", f"{int(progress_pct * 100)}%")
 st.progress(progress_pct)
 
