@@ -48,26 +48,25 @@ if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
-# --- 3. THE 1-2-3-4 BALANCE SHEET (FINAL TRUTH VERSION) ---
+# --- 3. THE 1-2-3-4 BALANCE SHEET (CLEAN VERSION) ---
 st.write(f"## 🎯 Goal: ${TARGET_PROFIT_USD} USD (~200 SGD)")
 
 # 1. Gather the Data
-total_cash = CURRENT_CASH                                  # 1. Total Cash Balance
-holdings_val = CURRENT_EQUITY - CURRENT_CASH               # 2. Holdings Value
-grand_total = CURRENT_EQUITY                               # 3. Grand Total (1+2)
+total_cash = CURRENT_CASH                                  
+holdings_val = CURRENT_EQUITY - CURRENT_CASH               
+grand_total = CURRENT_EQUITY                               
 
 # 2. Calculate the 'Truth' 
-# Difference between right now and yesterday's closing equity
 total_net_change = grand_total - PREVIOUS_CLOSE_EQUITY
 
-# Sum up the 'paper' value of what you haven't sold yet
+# Sum up the 'paper' value of current holdings
 positions = trading_client.get_all_positions()
 unrealized_pl = sum(float(p.unrealized_pl) for p in positions) if positions else 0.0
 
-# Realized Truth = Total Change minus Paper Fluctuations
-realized_truth = total_net_change - unrealized_pl          # 4. Realized Truth
+# Realized Truth (Cash Profit) rounded to 2 decimals
+realized_truth = round(total_net_change - unrealized_pl, 2)
 
-# 3. Calculate Goal Progress (Based ONLY on locked-in cash)
+# 3. Calculate Goal Progress
 progress_pct = min(max(realized_truth / TARGET_PROFIT_USD, 0.0), 1.0) if realized_truth > 0 else 0.0
 
 # --- DISPLAY SECTION ---
@@ -82,12 +81,12 @@ with c2:
     st.metric("2) Holdings Value", f"${holdings_val:,.2f}")
 
 with c3:
-    # CRITICAL FIX: We pass 'total_net_change' as a RAW NUMBER.
-    # Do not put f"${...}" in the delta. Streamlit will add the $ and handle the RED color.
+    # PASSING RAW NUMBER TO DELTA: This ensures it turns RED if negative
+    # Rounding to 2 decimal places for a clean look
     st.metric(
         label="3) Grand Total (1+2)", 
         value=f"${grand_total:,.2f}", 
-        delta=total_net_change,
+        delta=round(total_net_change, 2),
         delta_color="normal"
     )
 
@@ -96,7 +95,6 @@ st.write("---")
 col_truth, col_progress = st.columns([1, 2])
 
 with col_truth:
-    # This shows your actual $25.33 cash gain clearly
     st.metric(
         label="📊 4) Realized Truth", 
         value=f"${realized_truth:,.2f}",
@@ -108,6 +106,7 @@ with col_truth:
 with col_progress:
     st.write(f"**Progress to 200 SGD Goal:** {int(progress_pct * 100)}%")
     st.progress(progress_pct)
+
 # --- 4. NEW: P&L SUMMARY INFO ---
 st.write("### 💰 Profit & Loss Summary")
 try:
