@@ -73,8 +73,13 @@ with c1:
 with c2:
     st.metric("2) Holdings Value", f"${holdings_val:,.2f}")
 with c3:
-    # Delta logic: Red arrow down if negative, Green arrow up if positive
-    st.metric("3) Grand Total (1+2)", f"${grand_total:,.2f}", delta=f"${total_net_change:,.2f}")
+    # Adding 'delta_color="normal"' ensures negative numbers turn RED automatically
+    st.metric(
+        label="3) Grand Total (1+2)", 
+        value=f"${grand_total:,.2f}", 
+        delta=f"${total_net_change:,.2f}",
+        delta_color="normal" 
+    )
 
 # Second Row: The Realized Truth (Your actual take-home for the night)
 st.write("---")
