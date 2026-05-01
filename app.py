@@ -31,6 +31,7 @@ except Exception:
     CURRENT_CASH = 0.0
     CURRENT_EQUITY = 0.0
 
+# Nightly Baseline Logic
 if 'nightly_baseline' not in st.session_state:
     st.session_state.nightly_baseline = PREVIOUS_CLOSE_EQUITY
 
@@ -55,22 +56,30 @@ if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
-# --- 3. LIVE SCORECARD & TARGET (COLOR CALIBRATED) ---
+# --- 3. LIVE SCORECARD & TARGET (FIXED PRECISION) ---
 st.write(f"## 🎯 Goal: ${TARGET_PROFIT_USD} USD (~200 SGD)")
 
-total_net_change = CURRENT_EQUITY - st.session_state.nightly_baseline
+# Rounding applied to all P&L math
+total_net_change = round(CURRENT_EQUITY - st.session_state.nightly_baseline, 2)
 
 try:
     positions = trading_client.get_all_positions()
-    unrealized_pl = sum(float(p.unrealized_pl) for p in positions) if positions else 0.0
+    unrealized_pl = round(sum(float(p.unrealized_pl) for p in positions), 2) if positions else 0.0
 except:
     unrealized_pl = 0.0
 
-realized_pl = total_net_change - unrealized_pl
+realized_pl = round(total_net_change - unrealized_pl, 2)
 progress_pct = min(max(realized_pl / TARGET_PROFIT_USD, 0.0), 1.0) if realized_pl > 0 else 0.0
 
 c1, c2, c3 = st.columns(3)
-c1.metric(label="Total Equity", value=f"${CURRENT_EQUITY:,.2f}", delta=float(realized_pl))
+
+# Force the delta to be a clean float rounded to 2 decimals
+c1.metric(
+    label="Total Equity", 
+    value=f"${CURRENT_EQUITY:,.2f}", 
+    delta=float(realized_pl), # Passing raw float for color logic
+    delta_color="normal" 
+)
 c2.metric("Cash Balance", f"${CURRENT_CASH:,.2f}")
 c3.metric("Goal Progress", f"{int(progress_pct * 100)}%")
 st.progress(progress_pct)
@@ -78,6 +87,7 @@ st.progress(progress_pct)
 # --- 4. P&L SUMMARY INFO ---
 st.write("### 💰 Profit & Loss Summary")
 pl_col1, pl_col2 = st.columns(2)
+# Explicit formatting to 2 decimal places in display
 pl_col1.metric("Realized P&L (Cash)", f"${realized_pl:,.2f}")
 pl_col2.metric("Unrealized P&L (Paper)", f"${unrealized_pl:,.2f}")
 
@@ -100,10 +110,9 @@ with st.expander("📊 Morning Report Summary", expanded=True):
     except Exception:
         st.write("Loading report...")
 
-# --- 6. LIVE HOLDINGS WITH SCROLLBAR & TREND ---
+# --- 6. LIVE HOLDINGS & TREND ---
 st.write("### 📦 Live Holdings & Trend Analysis")
 if positions:
-    # Prepare data with Trend % (Change from entry)
     pos_data = []
     for p in positions:
         trend_pct = (float(p.unrealized_plpc) * 100)
@@ -115,12 +124,7 @@ if positions:
             "Trend (%)": f"{trend_pct:+.2f}%"
         })
     
-    # Using st.dataframe with a fixed height creates the requested scrollbar
-    st.dataframe(
-        pd.DataFrame(pos_data), 
-        use_container_width=True, 
-        height=300 # Fixed height to trigger vertical scrollbar
-    )
+    st.dataframe(pd.DataFrame(pos_data), use_container_width=True, height=300)
 else:
     st.success("Account is 100% Cash.")
 
@@ -131,7 +135,7 @@ def run_trading_strategy():
     pass
 
 st.write("---")
-st.write("📡 **Live Bot Status:** Actively monitoring bullish/bearish signals...")
+st.write("📡 **Live Bot Status:** Actively monitoring signals...")
 
 while True:
     try:
