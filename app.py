@@ -48,29 +48,44 @@ if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
-# --- 3. THE 1-2-3 BALANCE SHEET ---
+# --- 3. THE 1-2-3-4 BALANCE SHEET ---
 st.write(f"## 🎯 Goal: ${TARGET_PROFIT_USD} USD (~200 SGD)")
 
-# Pulling the 1-2-3 components
-total_cash = CURRENT_CASH                                  # 1. Total Cash
+# Pulling the components
+total_cash = CURRENT_CASH                                  # 1. Total Cash Balance
 holdings_val = CURRENT_EQUITY - CURRENT_CASH               # 2. Holdings Value
 grand_total = CURRENT_EQUITY                               # 3. Grand Total (1+2)
 
-# Calculate Daily Profit (The "Truth" against yesterday's close)
-daily_profit = grand_total - PREVIOUS_CLOSE_EQUITY
+# Calculating the 'Realized Truth' 
+# This is total growth minus the 'paper' fluctuations of current holdings
+total_net_change = grand_total - PREVIOUS_CLOSE_EQUITY
+positions = trading_client.get_all_positions()
+unrealized_pl = sum(float(p.unrealized_pl) for p in positions) if positions else 0.0
+realized_truth = total_net_change - unrealized_pl          # 4. Realized Truth
 
+# Goal Progress based ONLY on Realized Truth
+progress_pct = min(max(realized_truth / TARGET_PROFIT_USD, 0.0), 1.0) if realized_truth > 0 else 0.0
+
+# First Row: The 1-2-3 Components
 c1, c2, c3 = st.columns(3)
-
 with c1:
     st.metric("1) Total Cash Balance", f"${total_cash:,.2f}")
 with c2:
     st.metric("2) Holdings Value", f"${holdings_val:,.2f}")
 with c3:
-    # This highlights your progress toward the $200 SGD goal
-    st.metric("3) Grand Total (1+2)", f"${grand_total:,.2f}", delta=f"${daily_profit:,.2f}")
+    # Delta logic: Red arrow down if negative, Green arrow up if positive
+    st.metric("3) Grand Total (1+2)", f"${grand_total:,.2f}", delta=f"${total_net_change:,.2f}")
 
-st.progress(min(max(daily_profit / TARGET_PROFIT_USD, 0.0), 1.0) if daily_profit > 0 else 0.0)
+# Second Row: The Realized Truth (Your actual take-home for the night)
+st.write("---")
+col_truth, col_progress = st.columns([1, 2])
+with col_truth:
+    st.metric("📊 4) Realized Truth", f"${realized_truth:,.2f}", 
+              help="This is the actual cash profit you have locked in today.")
 
+with col_progress:
+    st.write(f"**Progress to 200 SGD Goal:** {int(progress_pct * 100)}%")
+    st.progress(progress_pct)
 # --- 4. NEW: P&L SUMMARY INFO ---
 st.write("### 💰 Profit & Loss Summary")
 try:
