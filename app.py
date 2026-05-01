@@ -31,16 +31,17 @@ except Exception:
     CURRENT_CASH = 0.0
     CURRENT_EQUITY = 0.0
 
-# Nightly Baseline Logic
+# Initialize Baseline
 if 'nightly_baseline' not in st.session_state:
     st.session_state.nightly_baseline = PREVIOUS_CLOSE_EQUITY
 
+# 9:30 PM RESET TRIGGER: Wipes the whiteboard for the new session
 if now.hour == 21 and now.minute == 30:
     st.session_state.nightly_baseline = CURRENT_EQUITY
 
 # --- 2. SIDEBAR CONTROLS ---
 st.sidebar.header("🕹️ Bot Controls")
-st.sidebar.metric("Reference Baseline", f"${st.session_state.nightly_baseline:,.2f}")
+st.sidebar.metric("Session Baseline", f"${st.session_state.nightly_baseline:,.2f}")
 if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
     try:
         trading_client.cancel_orders()
@@ -52,15 +53,15 @@ if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
                 symbol=p.symbol, qty=p.qty, side=OrderSide.SELL,
                 limit_price=limit_p, time_in_force=TimeInForce.DAY, extended_hours=True
             ))
-        st.sidebar.success("Orders sent.")
+        st.sidebar.success("Liquidation orders sent.")
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
-# --- 3. LIVE SCORECARD & TARGET (FIXED PRECISION) ---
+# --- 3. LIVE SCORECARD & TARGET (COMBINED DELTA) ---
 st.write(f"## 🎯 Goal: ${TARGET_PROFIT_USD} USD (~200 SGD)")
 
-# Rounding applied to all P&L math
-total_net_change = round(CURRENT_EQUITY - st.session_state.nightly_baseline, 2)
+# Session Math
+total_net_performance = round(CURRENT_EQUITY - st.session_state.nightly_baseline, 2)
 
 try:
     positions = trading_client.get_all_positions()
@@ -68,17 +69,19 @@ try:
 except:
     unrealized_pl = 0.0
 
-realized_pl = round(total_net_change - unrealized_pl, 2)
+# Realized P&L calculation
+realized_pl = round(total_net_performance - unrealized_pl, 2)
 progress_pct = min(max(realized_pl / TARGET_PROFIT_USD, 0.0), 1.0) if realized_pl > 0 else 0.0
 
-c1, c2, c3 = st.columns(3)
+# Combined Delta Logic: Unrealized + Realized
+combined_delta = round(unrealized_pl + realized_pl, 2)
 
-# Force the delta to be a clean float rounded to 2 decimals
+c1, c2, c3 = st.columns(3)
 c1.metric(
     label="Total Equity", 
     value=f"${CURRENT_EQUITY:,.2f}", 
-    delta=float(realized_pl), # Passing raw float for color logic
-    delta_color="normal" 
+    delta=float(combined_delta), # Ensuring float for color arrow
+    delta_color="normal"
 )
 c2.metric("Cash Balance", f"${CURRENT_CASH:,.2f}")
 c3.metric("Goal Progress", f"{int(progress_pct * 100)}%")
@@ -87,7 +90,6 @@ st.progress(progress_pct)
 # --- 4. P&L SUMMARY INFO ---
 st.write("### 💰 Profit & Loss Summary")
 pl_col1, pl_col2 = st.columns(2)
-# Explicit formatting to 2 decimal places in display
 pl_col1.metric("Realized P&L (Cash)", f"${realized_pl:,.2f}")
 pl_col2.metric("Unrealized P&L (Paper)", f"${unrealized_pl:,.2f}")
 
@@ -108,9 +110,9 @@ with st.expander("📊 Morning Report Summary", expanded=True):
         else:
             st.info("No trades completed today yet.")
     except Exception:
-        st.write("Loading report...")
+        st.write("Refreshing data...")
 
-# --- 6. LIVE HOLDINGS & TREND ---
+# --- 6. LIVE HOLDINGS & TREND (SCROLLABLE) ---
 st.write("### 📦 Live Holdings & Trend Analysis")
 if positions:
     pos_data = []
@@ -124,14 +126,17 @@ if positions:
             "Trend (%)": f"{trend_pct:+.2f}%"
         })
     
+    # Fixed height 300px for the scrollbar
     st.dataframe(pd.DataFrame(pos_data), use_container_width=True, height=300)
 else:
     st.success("Account is 100% Cash.")
 
 # --- 7. BACKGROUND LOOP ---
 def run_trading_strategy():
+    # Only trade if cash is above the $90,000 buffer
     if CURRENT_CASH <= CASH_BUFFER_USD:
         return
+    # [Insert buy/sell signal logic here]
     pass
 
 st.write("---")
@@ -140,6 +145,7 @@ st.write("📡 **Live Bot Status:** Actively monitoring signals...")
 while True:
     try:
         now_sgt = datetime.now(SGT)
+        # Automated 3:45 AM Liquidation
         if now_sgt.hour == 3 and 45 <= now_sgt.minute < 55:
             p = trading_client.get_all_positions()
             for pos in p:
