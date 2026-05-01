@@ -4,9 +4,11 @@ import time
 import pandas as pd
 from datetime import datetime, timedelta
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetOrdersRequest, GetBarsRequest
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, AssetClass
+# CORRECTED IMPORTS BELOW
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 # --- 0. INITIALIZE CLIENTS ---
@@ -18,20 +20,23 @@ try:
 except Exception:
     st.error("Missing Alpaca API Keys in Streamlit Secrets.")
 
-# --- 1. CONFIGURATION ---
+# --- 1. CONFIGURATION & RESET LOGIC ---
 SGT = pytz.timezone('Asia/Singapore')
-TARGET_PROFIT_USD = 150.0  
+TARGET_PROFIT_USD = 150.0  # Approx 200 SGD
 CASH_BUFFER_USD = 90000.0 
-WATCHLIST = ["AAPL", "TSLA", "NVDA", "MSFT", "AMD", "META", "GOOGL", "AMZN"] # Core Super 74 Assets
+WATCHLIST = ["AAPL", "TSLA", "NVDA", "MSFT", "AMD", "META", "GOOGL", "AMZN"] 
 
 now = datetime.now(SGT)
 if 'nightly_baseline' not in st.session_state:
-    st.session_state.nightly_baseline = float(trading_client.get_account().last_equity)
+    try:
+        st.session_state.nightly_baseline = float(trading_client.get_account().last_equity)
+    except:
+        st.session_state.nightly_baseline = 100000.0
 
 if now.hour == 21 and now.minute == 30:
     st.session_state.nightly_baseline = float(trading_client.get_account().equity)
 
-# --- 2. SIDEBAR & MANUAL CONTROLS ---
+# --- 2. SIDEBAR CONTROLS ---
 st.sidebar.header("🕹️ Bot Controls")
 st.sidebar.metric("Session Baseline", f"${st.session_state.nightly_baseline:,.2f}")
 if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
@@ -71,26 +76,27 @@ c2.metric("Cash Balance", f"${CURRENT_CASH:,.2f}")
 c3.metric("Goal Progress", f"{int(progress_pct * 100)}%")
 st.progress(progress_pct)
 
-# --- 4. P&L SUMMARY ---
+# --- 4. P&L SUMMARY INFO ---
 st.write("### 💰 Profit & Loss Summary")
 pl_col1, pl_col2 = st.columns(2)
 pl_col1.metric("Realized P&L (Cash)", f"${realized_pl:,.2f}")
 pl_col2.metric("Unrealized P&L (Paper)", f"${unrealized_pl:,.2f}")
 
-# --- 5. MORNING REPORT ---
+# --- 5. MORNING REPORT (SUMMARY) ---
 with st.expander("📊 Morning Report Summary", expanded=True):
     try:
         order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=200)
         closed_orders = trading_client.get_orders(order_filter)
-        today_trades = [o for o in closed_orders if o.filled_at and o.filled_at.astimezone(SGT).date() == now.date()]
-        if today_trades:
-            total_vol = sum(float(o.filled_avg_price) * float(o.filled_qty) for o in today_trades if o.side == OrderSide.BUY)
-            st.write(f"**Trades Today:** {len(today_trades)} | **Buy Volume:** ${total_vol:,.2f}")
-            st.table(pd.DataFrame([{"Symbol": o.symbol, "Qty": o.filled_qty, "Value": f"${(float(o.filled_avg_price)*float(o.filled_qty)):,.2f}"} for o in today_trades[:5]]))
+        today_date = now.date()
+        daily_trades = [o for o in closed_orders if o.filled_at and o.filled_at.astimezone(SGT).date() == today_date]
+        if daily_trades:
+            total_vol = sum(float(o.filled_avg_price) * float(o.filled_qty) for o in daily_trades if o.side == OrderSide.BUY)
+            st.write(f"**Trades Today:** {len(daily_trades)} | **Buy Volume:** ${total_vol:,.2f}")
+            st.table(pd.DataFrame([{"Symbol": o.symbol, "Qty": o.filled_qty, "Value": f"${(float(o.filled_avg_price)*float(o.filled_qty)):,.2f}"} for o in daily_trades[:5]]))
         else: st.info("No trades completed today yet.")
-    except: st.write("Refreshing...")
+    except: st.write("Refreshing data...")
 
-# --- 6. HOLDINGS (SCROLLABLE) ---
+# --- 6. LIVE HOLDINGS & TREND (SCROLLABLE) ---
 st.write("### 📦 Live Holdings & Trend Analysis")
 if positions:
     pos_data = [{"Symbol": p.symbol, "Qty": p.qty, "Value": f"${float(p.market_value):,.2f}", "P&L ($)": f"${float(p.unrealized_pl):.2f}", "Trend (%)": f"{(float(p.unrealized_plpc)*100):+.2f}%"} for p in positions]
@@ -99,48 +105,46 @@ else: st.success("Account is 100% Cash.")
 
 # --- 7. AUTOMATED STRATEGY ENGINE ---
 def run_trading_strategy():
-    # A. Safety Check
     if CURRENT_CASH <= CASH_BUFFER_USD:
         return
 
-    # B. Trend Analysis & Execution
     for symbol in WATCHLIST:
         try:
-            # Get last 15 mins of data
-            bars = data_client.get_stock_bars(GetBarsRequest(symbol_set=[symbol], timeframe=TimeFrame.Minute, start=datetime.now() - timedelta(minutes=20)))
+            # CORRECTED REQUEST CALL
+            request_params = StockBarsRequest(
+                symbol_or_symbols=[symbol],
+                timeframe=TimeFrame.Minute,
+                start=datetime.now() - timedelta(minutes=20)
+            )
+            bars = data_client.get_stock_bars(request_params)
             df = bars.df
             avg_price = df['close'].mean()
             current_p = df['close'].iloc[-1]
 
-            # Logic: If price is 0.5% above average, it's a trend -> BUY
-            if current_p > (avg_price * 1.005):
-                # Check if we already own it
+            if current_p > (avg_price * 1.005): # Trend logic
                 if not any(p.symbol == symbol for p in positions):
                     trading_client.submit_order(MarketOrderRequest(
                         symbol=symbol, qty=5, side=OrderSide.BUY, time_in_force=TimeInForce.DAY
                     ))
-        except:
-            continue
+        except: continue
 
 # --- 8. BACKGROUND LOOP ---
 st.write("---")
-st.write("📡 **Live Bot Status:** Actively monitoring trends...")
+st.write("📡 **Live Bot Status:** Actively monitoring signals...")
 
-# Logic to run strategy in background if needed (Simplified for Streamlit)
 if st.button("▶️ Run Strategy Scan Now"):
     run_trading_strategy()
     st.rerun()
 
 while True:
     try:
-        now_s = datetime.now(SGT)
-        if now_s.hour == 3 and 45 <= now_s.minute < 55:
-            p_list = trading_client.get_all_positions()
-            for pos in p_list:
+        now_sgt = datetime.now(SGT)
+        if now_sgt.hour == 3 and 45 <= now_sgt.minute < 55:
+            p = trading_client.get_all_positions()
+            for pos in p:
                 trading_client.submit_order(MarketOrderRequest(symbol=pos.symbol, qty=pos.qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY))
             time.sleep(600)
             continue
         time.sleep(15) 
-        break # Breaking for Streamlit refresh logic
-    except:
-        time.sleep(30)
+        break 
+    except: time.sleep(30)
