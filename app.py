@@ -73,12 +73,15 @@ with c1:
 with c2:
     st.metric("2) Holdings Value", f"${holdings_val:,.2f}")
 with c3:
-    # Adding 'delta_color="normal"' ensures negative numbers turn RED automatically
+    # 1. We calculate the numeric difference first
+    total_net_change = CURRENT_EQUITY - PREVIOUS_CLOSE_EQUITY
+    
+    # 2. We use delta_color="normal" to force Red for negative and Green for positive
     st.metric(
         label="3) Grand Total (1+2)", 
-        value=f"${grand_total:,.2f}", 
+        value=f"${CURRENT_EQUITY:,.2f}", 
         delta=f"${total_net_change:,.2f}",
-        delta_color="normal" 
+        delta_color="normal"
     )
 
 # Second Row: The Realized Truth (Your actual take-home for the night)
