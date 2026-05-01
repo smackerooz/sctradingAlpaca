@@ -15,10 +15,11 @@ try:
 except Exception:
     st.error("Missing Alpaca API Keys in Streamlit Secrets.")
 
-# --- 1. CONFIGURATION ---
+# --- 1. CONFIGURATION & RESET LOGIC ---
 SGT = pytz.timezone('Asia/Singapore')
 TARGET_PROFIT_USD = 150.0  # Approx 200 SGD
 CASH_BUFFER_USD = 90000.0 
+now = datetime.now(SGT)
 
 try:
     account = trading_client.get_account()
@@ -30,9 +31,20 @@ except Exception:
     CURRENT_CASH = 0.0
     CURRENT_EQUITY = 0.0
 
-# --- 2. SIDEBAR ---
+# TRUTH RESET LOGIC: 
+# This ensures that at 9:30 PM SGT, your goal resets to 0% for the new session.
+if 'nightly_baseline' not in st.session_state:
+    st.session_state.nightly_baseline = PREVIOUS_CLOSE_EQUITY
+
+# If it is exactly 9:30 PM SGT (or the first time the app runs after 9:30 PM), 
+# we lock in the current equity as the new 'Zero' point.
+if now.hour == 21 and now.minute == 30:
+    st.session_state.nightly_baseline = CURRENT_EQUITY
+    st.sidebar.success("Opening Bell Reset: Goal is now $0.00")
+
+# --- 2. SIDEBAR CONTROLS ---
 st.sidebar.header("🕹️ Bot Controls")
-st.sidebar.metric("Yesterday's Close (Truth)", f"${PREVIOUS_CLOSE_EQUITY:,.2f}")
+st.sidebar.metric("Reference Baseline", f"${st.session_state.nightly_baseline:,.2f}")
 if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
     try:
         trading_client.cancel_orders()
@@ -48,80 +60,30 @@ if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
-# --- 3. THE 1-2-3-4 USD BALANCE SHEET ---
-# Explicitly stating the goal in both currencies for clarity
+# --- 3. LIVE SCORECARD & TARGET ---
 st.write(f"## 🎯 Goal: ${TARGET_PROFIT_USD} USD (~200 SGD)")
 
-# 1. Gather Data (All natively in USD from Alpaca)
-total_cash_usd = CURRENT_CASH                                  
-holdings_val_usd = CURRENT_EQUITY - CURRENT_CASH               
-grand_total_usd = CURRENT_EQUITY                               
-
-# 2. Calculate the 'Truth' (USD)
-total_net_change_usd = grand_total_usd - PREVIOUS_CLOSE_EQUITY
-
-# Sum up paper value of holdings
-positions = trading_client.get_all_positions()
-unrealized_pl_usd = sum(float(p.unrealized_pl) for p in positions) if positions else 0.0
-
-# Realized Truth (Actual Cash Profit)
-realized_truth_usd = round(total_net_change_usd - unrealized_pl_usd, 2)
-
-# 3. Calculate Goal Progress
-progress_pct = min(max(realized_truth_usd / TARGET_PROFIT_USD, 0.0), 1.0) if realized_truth_usd > 0 else 0.0
-
-# --- DISPLAY SECTION (All labels now specify USD) ---
+# Use the session-aware baseline for P&L
+total_pl = CURRENT_EQUITY - st.session_state.nightly_baseline
+progress_pct = min(max(total_pl / TARGET_PROFIT_USD, 0.0), 1.0) if total_pl > 0 else 0.0
 
 c1, c2, c3 = st.columns(3)
+c1.metric("Total Equity", f"${CURRENT_EQUITY:,.2f}", delta=f"${total_pl:,.2f}")
+c2.metric("Cash Balance", f"${CURRENT_CASH:,.2f}")
+c3.metric("Goal Progress", f"{int(progress_pct * 100)}%")
+st.progress(progress_pct)
 
-with c1:
-    st.metric("1) Total Cash (USD)", f"${total_cash_usd:,.2f}")
-
-with c2:
-    st.metric("2) Holdings Value (USD)", f"${holdings_val_usd:,.2f}")
-
-with c3:
-    # Forces RED if negative, GREEN if positive
-    st.metric(
-        label="3) Grand Total (USD)", 
-        value=f"${grand_total_usd:,.2f}", 
-        delta=round(total_net_change_usd, 2),
-        delta_color="normal"
-    )
-
-st.write("---")
-col_truth, col_progress = st.columns([1, 2])
-
-with col_truth:
-    st.metric(
-        label="📊 4) Realized Truth (USD)", 
-        value=f"${realized_truth_usd:,.2f}",
-        delta=realized_truth_usd,
-        delta_color="normal",
-        help="This is your locked-in cash profit in US Dollars."
-    )
-
-with col_progress:
-    # Updated text to show you are tracking the USD equivalent of your SGD goal
-    st.write(f"**Progress to $150 USD Goal (~200 SGD):** {int(progress_pct * 100)}%")
-    st.progress(progress_pct)
-
-# --- 4. NEW: P&L SUMMARY INFO ---
+# --- 4. P&L SUMMARY INFO ---
 st.write("### 💰 Profit & Loss Summary")
 try:
     positions = trading_client.get_all_positions()
-    # Unrealized P&L is the sum of P&L from all current holdings
     unrealized_pl = sum(float(p.unrealized_pl) for p in positions) if positions else 0.0
-    
-    # Realized P&L = Total Daily Change - Unrealized P&L
     realized_pl = total_pl - unrealized_pl
 
     pl_col1, pl_col2 = st.columns(2)
-    pl_col1.metric("Realized P&L (Cash)", f"${realized_pl:,.2f}", 
-                  help="Profit/Loss from stocks already sold today.")
-    pl_col2.metric("Unrealized P&L (Paper)", f"${unrealized_pl:,.2f}", 
-                  help="Profit/Loss from stocks you are still holding.")
-except Exception as e:
+    pl_col1.metric("Realized P&L (Cash)", f"${realized_pl:,.2f}")
+    pl_col2.metric("Unrealized P&L (Paper)", f"${unrealized_pl:,.2f}")
+except Exception:
     st.write("Calculating P&L metrics...")
 
 # --- 5. MORNING REPORT (SUMMARY) ---
@@ -129,7 +91,7 @@ with st.expander("📊 Morning Report Summary", expanded=True):
     try:
         order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=200)
         closed_orders = trading_client.get_orders(order_filter)
-        today_date = datetime.now(SGT).date()
+        today_date = now.date()
         daily_trades = [o for o in closed_orders if o.filled_at and o.filled_at.astimezone(SGT).date() == today_date]
         
         if daily_trades:
@@ -155,14 +117,17 @@ else:
 
 # --- 7. BACKGROUND LOOP ---
 def run_trading_strategy():
+    # Only trade if we have cash above the $90,000 buffer
     if CURRENT_CASH <= CASH_BUFFER_USD:
         return
+    # INSERT SIGNAL LOGIC HERE
     pass
 
 while True:
     try:
-        now = datetime.now(SGT)
-        if now.hour == 3 and 45 <= now.minute < 55:
+        now_sgt = datetime.now(SGT)
+        # Automated 3:45 AM Liquidation
+        if now_sgt.hour == 3 and 45 <= now_sgt.minute < 55:
             p = trading_client.get_all_positions()
             for pos in p:
                 trading_client.submit_order(MarketOrderRequest(
