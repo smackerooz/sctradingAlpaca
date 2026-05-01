@@ -48,63 +48,62 @@ if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
-# --- 3. THE 1-2-3-4 BALANCE SHEET (CLEAN VERSION) ---
+# --- 3. THE 1-2-3-4 USD BALANCE SHEET ---
+# Explicitly stating the goal in both currencies for clarity
 st.write(f"## 🎯 Goal: ${TARGET_PROFIT_USD} USD (~200 SGD)")
 
-# 1. Gather the Data
-total_cash = CURRENT_CASH                                  
-holdings_val = CURRENT_EQUITY - CURRENT_CASH               
-grand_total = CURRENT_EQUITY                               
+# 1. Gather Data (All natively in USD from Alpaca)
+total_cash_usd = CURRENT_CASH                                  
+holdings_val_usd = CURRENT_EQUITY - CURRENT_CASH               
+grand_total_usd = CURRENT_EQUITY                               
 
-# 2. Calculate the 'Truth' 
-total_net_change = grand_total - PREVIOUS_CLOSE_EQUITY
+# 2. Calculate the 'Truth' (USD)
+total_net_change_usd = grand_total_usd - PREVIOUS_CLOSE_EQUITY
 
-# Sum up the 'paper' value of current holdings
+# Sum up paper value of holdings
 positions = trading_client.get_all_positions()
-unrealized_pl = sum(float(p.unrealized_pl) for p in positions) if positions else 0.0
+unrealized_pl_usd = sum(float(p.unrealized_pl) for p in positions) if positions else 0.0
 
-# Realized Truth (Cash Profit) rounded to 2 decimals
-realized_truth = round(total_net_change - unrealized_pl, 2)
+# Realized Truth (Actual Cash Profit)
+realized_truth_usd = round(total_net_change_usd - unrealized_pl_usd, 2)
 
 # 3. Calculate Goal Progress
-progress_pct = min(max(realized_truth / TARGET_PROFIT_USD, 0.0), 1.0) if realized_truth > 0 else 0.0
+progress_pct = min(max(realized_truth_usd / TARGET_PROFIT_USD, 0.0), 1.0) if realized_truth_usd > 0 else 0.0
 
-# --- DISPLAY SECTION ---
+# --- DISPLAY SECTION (All labels now specify USD) ---
 
-# First Row: The 1-2-3 Components
 c1, c2, c3 = st.columns(3)
 
 with c1:
-    st.metric("1) Total Cash Balance", f"${total_cash:,.2f}")
+    st.metric("1) Total Cash (USD)", f"${total_cash_usd:,.2f}")
 
 with c2:
-    st.metric("2) Holdings Value", f"${holdings_val:,.2f}")
+    st.metric("2) Holdings Value (USD)", f"${holdings_val_usd:,.2f}")
 
 with c3:
-    # PASSING RAW NUMBER TO DELTA: This ensures it turns RED if negative
-    # Rounding to 2 decimal places for a clean look
+    # Forces RED if negative, GREEN if positive
     st.metric(
-        label="3) Grand Total (1+2)", 
-        value=f"${grand_total:,.2f}", 
-        delta=round(total_net_change, 2),
+        label="3) Grand Total (USD)", 
+        value=f"${grand_total_usd:,.2f}", 
+        delta=round(total_net_change_usd, 2),
         delta_color="normal"
     )
 
-# Second Row: The Realized Truth & Progress
 st.write("---")
 col_truth, col_progress = st.columns([1, 2])
 
 with col_truth:
     st.metric(
-        label="📊 4) Realized Truth", 
-        value=f"${realized_truth:,.2f}",
-        delta=realized_truth,
+        label="📊 4) Realized Truth (USD)", 
+        value=f"${realized_truth_usd:,.2f}",
+        delta=realized_truth_usd,
         delta_color="normal",
-        help="This is the actual cash profit you have locked in today."
+        help="This is your locked-in cash profit in US Dollars."
     )
 
 with col_progress:
-    st.write(f"**Progress to 200 SGD Goal:** {int(progress_pct * 100)}%")
+    # Updated text to show you are tracking the USD equivalent of your SGD goal
+    st.write(f"**Progress to $150 USD Goal (~200 SGD):** {int(progress_pct * 100)}%")
     st.progress(progress_pct)
 
 # --- 4. NEW: P&L SUMMARY INFO ---
