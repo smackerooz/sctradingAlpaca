@@ -5,146 +5,287 @@ import pandas as pd
 from datetime import datetime, timedelta
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetOrdersRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, AssetClass
-# CORRECTED IMPORTS BELOW
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
-# --- 0. INITIALIZE CLIENTS ---
+# ─────────────────────────────────────────────
+# 0. PAGE CONFIG
+# ─────────────────────────────────────────────
+st.set_page_config(page_title="Trading Bot", page_icon="📈", layout="wide")
+
+# ─────────────────────────────────────────────
+# 1. INITIALIZE CLIENTS
+# ─────────────────────────────────────────────
 try:
-    API_KEY = st.secrets["ALPACA_API_KEY"]
+    API_KEY    = st.secrets["ALPACA_API_KEY"]
     SECRET_KEY = st.secrets["ALPACA_SECRET_KEY"]
     trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
-    data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
-except Exception:
-    st.error("Missing Alpaca API Keys in Streamlit Secrets.")
+    data_client    = StockHistoricalDataClient(API_KEY, SECRET_KEY)
+except Exception as e:
+    st.error(f"Missing or invalid Alpaca API Keys in Streamlit Secrets: {e}")
+    st.stop()
 
-# --- 1. CONFIGURATION & RESET LOGIC ---
-SGT = pytz.timezone('Asia/Singapore')
-TARGET_PROFIT_USD = 150.0  # Approx 200 SGD
-CASH_BUFFER_USD = 90000.0 
-WATCHLIST = ["AAPL", "TSLA", "NVDA", "MSFT", "AMD", "META", "GOOGL", "AMZN"] 
+# ─────────────────────────────────────────────
+# 2. CONSTANTS & CONFIG
+# ─────────────────────────────────────────────
+SGT              = pytz.timezone('Asia/Singapore')
+TARGET_PROFIT    = 150.0     # USD (~200 SGD)
+CASH_BUFFER      = 90_000.0  # Min cash before buying
+WATCHLIST        = ["AAPL", "TSLA", "NVDA", "MSFT", "AMD", "META", "GOOGL", "AMZN"]
+SCAN_INTERVAL    = 30        # seconds between auto-scans
+TAKE_PROFIT_PCT  = 0.012     # +1.2% → sell for profit
+STOP_LOSS_PCT    = 0.007     # -0.7% → cut loss
+BUY_TREND_PCT    = 0.005     # price must be 0.5% above avg to trigger buy
+BUY_QTY          = 5         # shares per order
 
-now = datetime.now(SGT)
-if 'nightly_baseline' not in st.session_state:
+# ─────────────────────────────────────────────
+# 3. SESSION STATE INIT
+# ─────────────────────────────────────────────
+if "nightly_baseline" not in st.session_state:
     try:
         st.session_state.nightly_baseline = float(trading_client.get_account().last_equity)
     except:
-        st.session_state.nightly_baseline = 100000.0
+        st.session_state.nightly_baseline = 100_000.0
 
-if now.hour == 21 and now.minute == 30:
-    st.session_state.nightly_baseline = float(trading_client.get_account().equity)
+if "bot_running" not in st.session_state:
+    st.session_state.bot_running = False
 
-# --- 2. SIDEBAR CONTROLS ---
-st.sidebar.header("🕹️ Bot Controls")
-st.sidebar.metric("Session Baseline", f"${st.session_state.nightly_baseline:,.2f}")
-if st.sidebar.button("🧹 MANUAL LIQUIDATION (EXTENDED)"):
+if "last_scan" not in st.session_state:
+    st.session_state.last_scan = None
+
+if "scan_log" not in st.session_state:
+    st.session_state.scan_log = []
+
+# ─────────────────────────────────────────────
+# 4. HELPERS
+# ─────────────────────────────────────────────
+def log(msg: str):
+    ts  = datetime.now(SGT).strftime("%H:%M:%S")
+    entry = f"[{ts}] {msg}"
+    st.session_state.scan_log.insert(0, entry)
+    st.session_state.scan_log = st.session_state.scan_log[:50]  # keep last 50
+
+def get_bars(symbol: str, minutes: int = 20):
+    req = StockBarsRequest(
+        symbol_or_symbols=[symbol],
+        timeframe=TimeFrame.Minute,
+        start=datetime.now() - timedelta(minutes=minutes),
+    )
+    bars = data_client.get_stock_bars(req)
+    return bars.df
+
+def is_eod_window():
+    """True during 03:45–03:55 SGT (US market close area)."""
+    now = datetime.now(SGT)
+    return now.hour == 3 and 45 <= now.minute < 55
+
+def reset_baseline_at_930():
+    """Reset baseline at 21:30 SGT (US pre-market open)."""
+    now = datetime.now(SGT)
+    if now.hour == 21 and now.minute == 30:
+        st.session_state.nightly_baseline = float(trading_client.get_account().equity)
+        log("🔄 Baseline reset at 21:30 SGT")
+
+# ─────────────────────────────────────────────
+# 5. STRATEGY ENGINE
+# ─────────────────────────────────────────────
+def run_strategy():
+    reset_baseline_at_930()
+
     try:
-        trading_client.cancel_orders()
-        time.sleep(1)
+        account   = trading_client.get_account()
+        cash      = float(account.cash)
         positions = trading_client.get_all_positions()
-        for p in positions:
-            limit_p = round(float(p.current_price) - 0.03, 2)
-            trading_client.submit_order(LimitOrderRequest(
-                symbol=p.symbol, qty=p.qty, side=OrderSide.SELL,
-                limit_price=limit_p, time_in_force=TimeInForce.DAY, extended_hours=True
-            ))
-        st.sidebar.success("Liquidation orders sent.")
+        held      = {p.symbol: p for p in positions}
     except Exception as e:
-        st.sidebar.error(f"Error: {e}")
+        log(f"⚠️ Account fetch error: {e}")
+        return
 
-# --- 3. LIVE SCORECARD (COMBINED DELTA) ---
-try:
-    account = trading_client.get_account()
-    CURRENT_CASH = float(account.cash)
-    CURRENT_EQUITY = float(account.equity)
-    positions = trading_client.get_all_positions()
-    unrealized_pl = round(sum(float(p.unrealized_pl) for p in positions), 2) if positions else 0.0
-except:
-    CURRENT_CASH, CURRENT_EQUITY, unrealized_pl = 0.0, 0.0, 0.0
+    # ── End-of-day flat liquidation ──
+    if is_eod_window():
+        for p in positions:
+            try:
+                trading_client.submit_order(MarketOrderRequest(
+                    symbol=p.symbol, qty=p.qty,
+                    side=OrderSide.SELL, time_in_force=TimeInForce.DAY
+                ))
+                log(f"🔔 EOD liquidation: SELL {p.qty} {p.symbol}")
+            except Exception as e:
+                log(f"⚠️ EOD sell error {p.symbol}: {e}")
+        return
 
-total_net_performance = round(CURRENT_EQUITY - st.session_state.nightly_baseline, 2)
-realized_pl = round(total_net_performance - unrealized_pl, 2)
-progress_pct = min(max(realized_pl / TARGET_PROFIT_USD, 0.0), 1.0) if realized_pl > 0 else 0.0
-combined_delta = round(unrealized_pl + realized_pl, 2)
+    # ── Intraday sell logic (TP / SL) ──
+    for sym, p in held.items():
+        pl_pct = float(p.unrealized_plpc)
+        try:
+            if pl_pct >= TAKE_PROFIT_PCT:
+                trading_client.submit_order(MarketOrderRequest(
+                    symbol=sym, qty=p.qty,
+                    side=OrderSide.SELL, time_in_force=TimeInForce.DAY
+                ))
+                log(f"✅ TAKE PROFIT: SELL {p.qty} {sym} @ +{pl_pct*100:.2f}%")
 
-st.write(f"## 🎯 Goal: ${TARGET_PROFIT_USD} USD (~200 SGD)")
-c1, c2, c3 = st.columns(3)
-c1.metric(label="Total Equity", value=f"${CURRENT_EQUITY:,.2f}", delta=float(combined_delta))
-c2.metric("Cash Balance", f"${CURRENT_CASH:,.2f}")
-c3.metric("Goal Progress", f"{int(progress_pct * 100)}%")
-st.progress(progress_pct)
+            elif pl_pct <= -STOP_LOSS_PCT:
+                trading_client.submit_order(MarketOrderRequest(
+                    symbol=sym, qty=p.qty,
+                    side=OrderSide.SELL, time_in_force=TimeInForce.DAY
+                ))
+                log(f"🛑 STOP LOSS: SELL {p.qty} {sym} @ {pl_pct*100:.2f}%")
+        except Exception as e:
+            log(f"⚠️ Sell error {sym}: {e}")
 
-# --- 4. P&L SUMMARY INFO ---
-st.write("### 💰 Profit & Loss Summary")
-pl_col1, pl_col2 = st.columns(2)
-pl_col1.metric("Realized P&L (Cash)", f"${realized_pl:,.2f}")
-pl_col2.metric("Unrealized P&L (Paper)", f"${unrealized_pl:,.2f}")
-
-# --- 5. MORNING REPORT (SUMMARY) ---
-with st.expander("📊 Morning Report Summary", expanded=True):
-    try:
-        order_filter = GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=200)
-        closed_orders = trading_client.get_orders(order_filter)
-        today_date = now.date()
-        daily_trades = [o for o in closed_orders if o.filled_at and o.filled_at.astimezone(SGT).date() == today_date]
-        if daily_trades:
-            total_vol = sum(float(o.filled_avg_price) * float(o.filled_qty) for o in daily_trades if o.side == OrderSide.BUY)
-            st.write(f"**Trades Today:** {len(daily_trades)} | **Buy Volume:** ${total_vol:,.2f}")
-            st.table(pd.DataFrame([{"Symbol": o.symbol, "Qty": o.filled_qty, "Value": f"${(float(o.filled_avg_price)*float(o.filled_qty)):,.2f}"} for o in daily_trades[:5]]))
-        else: st.info("No trades completed today yet.")
-    except: st.write("Refreshing data...")
-
-# --- 6. LIVE HOLDINGS & TREND (SCROLLABLE) ---
-st.write("### 📦 Live Holdings & Trend Analysis")
-if positions:
-    pos_data = [{"Symbol": p.symbol, "Qty": p.qty, "Value": f"${float(p.market_value):,.2f}", "P&L ($)": f"${float(p.unrealized_pl):.2f}", "Trend (%)": f"{(float(p.unrealized_plpc)*100):+.2f}%"} for p in positions]
-    st.dataframe(pd.DataFrame(pos_data), use_container_width=True, height=300)
-else: st.success("Account is 100% Cash.")
-
-# --- 7. AUTOMATED STRATEGY ENGINE ---
-def run_trading_strategy():
-    if CURRENT_CASH <= CASH_BUFFER_USD:
+    # ── Buy logic ──
+    if cash <= CASH_BUFFER:
+        log("💤 Cash below buffer — skipping buy scan")
         return
 
     for symbol in WATCHLIST:
+        if symbol in held:
+            continue  # already holding
         try:
-            # CORRECTED REQUEST CALL
-            request_params = StockBarsRequest(
-                symbol_or_symbols=[symbol],
-                timeframe=TimeFrame.Minute,
-                start=datetime.now() - timedelta(minutes=20)
-            )
-            bars = data_client.get_stock_bars(request_params)
-            df = bars.df
-            avg_price = df['close'].mean()
-            current_p = df['close'].iloc[-1]
+            df          = get_bars(symbol)
+            if df.empty:
+                continue
+            avg_price   = df["close"].mean()
+            current_p   = df["close"].iloc[-1]
 
-            if current_p > (avg_price * 1.005): # Trend logic
-                if not any(p.symbol == symbol for p in positions):
-                    trading_client.submit_order(MarketOrderRequest(
-                        symbol=symbol, qty=5, side=OrderSide.BUY, time_in_force=TimeInForce.DAY
-                    ))
-        except: continue
+            if current_p > avg_price * (1 + BUY_TREND_PCT):
+                trading_client.submit_order(MarketOrderRequest(
+                    symbol=symbol, qty=BUY_QTY,
+                    side=OrderSide.BUY, time_in_force=TimeInForce.DAY
+                ))
+                log(f"🟢 BUY {BUY_QTY} {symbol} | price ${current_p:.2f} vs avg ${avg_price:.2f}")
+        except Exception as e:
+            log(f"⚠️ Buy scan error {symbol}: {e}")
 
-# --- 8. BACKGROUND LOOP ---
-st.write("---")
-st.write("📡 **Live Bot Status:** Actively monitoring signals...")
+    st.session_state.last_scan = datetime.now(SGT)
 
-if st.button("▶️ Run Strategy Scan Now"):
-    run_trading_strategy()
-    st.rerun()
+# ─────────────────────────────────────────────
+# 6. FETCH LIVE ACCOUNT DATA
+# ─────────────────────────────────────────────
+try:
+    account      = trading_client.get_account()
+    CASH         = float(account.cash)
+    EQUITY       = float(account.equity)
+    positions    = trading_client.get_all_positions()
+    unrealized   = round(sum(float(p.unrealized_pl) for p in positions), 2)
+except:
+    CASH, EQUITY, unrealized, positions = 0.0, 0.0, 0.0, []
 
-while True:
+total_delta  = round(EQUITY - st.session_state.nightly_baseline, 2)
+realized     = round(total_delta - unrealized, 2)
+progress_pct = min(max(realized / TARGET_PROFIT, 0.0), 1.0) if realized > 0 else 0.0
+combined     = round(unrealized + realized, 2)
+
+# ─────────────────────────────────────────────
+# 7. SIDEBAR
+# ─────────────────────────────────────────────
+with st.sidebar:
+    st.header("🕹️ Bot Controls")
+    st.metric("Session Baseline", f"${st.session_state.nightly_baseline:,.2f}")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("▶️ Start", use_container_width=True, disabled=st.session_state.bot_running):
+            st.session_state.bot_running = True
+            log("🤖 Bot STARTED")
+    with col_b:
+        if st.button("⏹ Stop", use_container_width=True, disabled=not st.session_state.bot_running):
+            st.session_state.bot_running = False
+            log("🛑 Bot STOPPED")
+
+    st.divider()
+    if st.button("▶️ Run Single Scan", use_container_width=True):
+        run_strategy()
+        st.rerun()
+
+    st.divider()
+    if st.button("🧹 Manual Liquidation", use_container_width=True):
+        try:
+            trading_client.cancel_orders()
+            time.sleep(1)
+            for p in trading_client.get_all_positions():
+                lp = round(float(p.current_price) - 0.03, 2)
+                trading_client.submit_order(LimitOrderRequest(
+                    symbol=p.symbol, qty=p.qty, side=OrderSide.SELL,
+                    limit_price=lp, time_in_force=TimeInForce.DAY,
+                    extended_hours=True
+                ))
+            log("🧹 Manual liquidation sent")
+            st.sidebar.success("Liquidation orders sent.")
+        except Exception as e:
+            st.sidebar.error(f"Error: {e}")
+
+    st.divider()
+    status_color = "🟢" if st.session_state.bot_running else "🔴"
+    st.write(f"**Status:** {status_color} {'RUNNING' if st.session_state.bot_running else 'STOPPED'}")
+    if st.session_state.last_scan:
+        st.write(f"**Last scan:** {st.session_state.last_scan.strftime('%H:%M:%S')} SGT")
+    st.write(f"**Scan interval:** {SCAN_INTERVAL}s")
+    st.write(f"**TP:** +{TAKE_PROFIT_PCT*100:.1f}% | **SL:** -{STOP_LOSS_PCT*100:.1f}%")
+
+# ─────────────────────────────────────────────
+# 8. MAIN DASHBOARD
+# ─────────────────────────────────────────────
+st.title("📈 Auto Trading Bot")
+st.write(f"## 🎯 Goal: ${TARGET_PROFIT:.0f} USD (~200 SGD)")
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Total Equity",    f"${EQUITY:,.2f}",   delta=float(combined))
+c2.metric("Cash Balance",    f"${CASH:,.2f}")
+c3.metric("Realized P&L",    f"${realized:,.2f}")
+c4.metric("Unrealized P&L",  f"${unrealized:,.2f}")
+st.progress(progress_pct, text=f"Goal Progress: {int(progress_pct*100)}%")
+
+# ── Holdings ──
+st.write("### 📦 Live Holdings")
+if positions:
+    pos_data = [{
+        "Symbol":    p.symbol,
+        "Qty":       p.qty,
+        "Avg Cost":  f"${float(p.avg_entry_price):.2f}",
+        "Current":   f"${float(p.current_price):.2f}",
+        "Value":     f"${float(p.market_value):,.2f}",
+        "P&L ($)":   f"${float(p.unrealized_pl):.2f}",
+        "P&L (%)":   f"{float(p.unrealized_plpc)*100:+.2f}%",
+    } for p in positions]
+    st.dataframe(pd.DataFrame(pos_data), use_container_width=True, height=280)
+else:
+    st.success("✅ Account is 100% Cash.")
+
+# ── Today's trades ──
+with st.expander("📊 Today's Completed Trades", expanded=False):
     try:
-        now_sgt = datetime.now(SGT)
-        if now_sgt.hour == 3 and 45 <= now_sgt.minute < 55:
-            p = trading_client.get_all_positions()
-            for pos in p:
-                trading_client.submit_order(MarketOrderRequest(symbol=pos.symbol, qty=pos.qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY))
-            time.sleep(600)
-            continue
-        time.sleep(15) 
-        break 
-    except: time.sleep(30)
+        orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=200))
+        today  = datetime.now(SGT).date()
+        daily  = [o for o in orders if o.filled_at and o.filled_at.astimezone(SGT).date() == today]
+        if daily:
+            vol = sum(float(o.filled_avg_price)*float(o.filled_qty) for o in daily if o.side == OrderSide.BUY)
+            st.write(f"**Trades today:** {len(daily)} | **Buy volume:** ${vol:,.2f}")
+            rows = [{"Symbol": o.symbol, "Side": o.side.value, "Qty": o.filled_qty,
+                     "Price": f"${float(o.filled_avg_price):.2f}",
+                     "Value": f"${float(o.filled_avg_price)*float(o.filled_qty):,.2f}",
+                     "Time":  o.filled_at.astimezone(SGT).strftime("%H:%M:%S")} for o in daily]
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        else:
+            st.info("No trades completed today yet.")
+    except:
+        st.write("Refreshing data...")
+
+# ── Activity log ──
+with st.expander("📋 Activity Log", expanded=True):
+    if st.session_state.scan_log:
+        for entry in st.session_state.scan_log:
+            st.text(entry)
+    else:
+        st.info("No activity yet. Start the bot or run a scan.")
+
+# ─────────────────────────────────────────────
+# 9. AUTO-RERUN LOOP (THE KEY FIX)
+# ─────────────────────────────────────────────
+if st.session_state.bot_running:
+    run_strategy()
+    time.sleep(SCAN_INTERVAL)
+    st.rerun()
