@@ -97,7 +97,7 @@ except Exception as e:
 SGT             = pytz.timezone('Asia/Singapore')
 TARGET_PROFIT   = 200.0      # USD — weekly target
 CASH_BUFFER     = 95_000.0    # Min cash before buying (keep ~50% of $10k as buffer)
-SCAN_INTERVAL   = 30         # seconds between auto-scans
+SCAN_INTERVAL   = 10         # seconds between auto-scans
 MAX_TRADE_USD   = 300.0      # max dollars to spend per trade
 
 # ── Per-stock volatility profiles ──────────────────────────────────────────
@@ -192,16 +192,8 @@ STOCK_PROFILES = {
     "DKNG"  : (0.018, 0.010, 0.008),   # DraftKings
 }
 
-# ── Recommended 20-stock watchlist (balanced across volatility tiers) ──────
-WATCHLIST = [
-    # Low Volatility
-    "AAPL", "MSFT", "GOOGL", "JPM", "V",
-    "PG", "WMT", "KO", "UNH", "HD",
-    # Mid Volatility
-    "AMZN", "META", "AVGO", "DIS", "GS",
-    # High Volatility
-    "NVDA", "TSLA", "AMD", "NFLX", "COIN",
-]
+# ── Full watchlist — all stocks from STOCK_PROFILES ──────────────────────
+WATCHLIST = list(STOCK_PROFILES.keys())
 
 # ─────────────────────────────────────────────
 # 3. SESSION STATE INIT
@@ -556,15 +548,11 @@ def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy
         # ── Buy logic ──
         elif position == 0:
             if price > avg_20 * (1 + buy_trend):
-                # RSI/MACD confirmation: use data up to current bar
-                df_slice = df.iloc[:i+1]
-                if not rsi_macd_confirmed_buy(df_slice):
-                    continue
                 qty  = round(max_trade_usd / price, 6)  # fractional shares supported
                 cost = qty * price
                 if qty <= 0 or cash < cost:
                     continue
-                # Compute RSI/MACD values for trade log
+                df_slice = df.iloc[:i+1]
                 rsi_s = calc_rsi(df_slice["close"])
                 rsi_at_buy = round(rsi_s.iloc[-1], 1) if not rsi_s.empty else None
                 _, _, hist_s = calc_macd(df_slice["close"])
@@ -1372,10 +1360,6 @@ with tab_portfolio:
                         _, _, buy_trend = profile(sym) if p_use_profile else (p_hard_sl, p_trail, p_trend)
 
                         if price > avg20 * (1 + buy_trend):
-                            # RSI/MACD confirmation
-                            df_slice_p = all_data[sym].loc[:ts]
-                            if not rsi_macd_confirmed_buy(df_slice_p):
-                                continue
                             qty  = round(p_max_trade / price, 6)
                             cost = qty * price
                             if qty <= 0 or cash < cost:
@@ -1525,3 +1509,5 @@ if st.session_state.bot_running:
     run_strategy()
     time.sleep(SCAN_INTERVAL)
     st.rerun()
+
+this is the current app.py
