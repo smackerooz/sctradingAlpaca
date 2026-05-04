@@ -48,15 +48,88 @@ BUY_QTY       = 5          # shares per order
 #  buy_trend_pct      : price must be this % above 20-min avg to trigger a buy
 # ───────────────────────────────────────────────────────────────────────────
 STOCK_PROFILES = {
-    "AAPL"  : (0.010, 0.006, 0.004),   # low volatility
-    "MSFT"  : (0.010, 0.006, 0.004),   # low volatility
-    "GOOGL" : (0.010, 0.006, 0.004),   # low volatility
-    "AMZN"  : (0.012, 0.007, 0.005),   # low-mid volatility
-    "META"  : (0.013, 0.008, 0.006),   # mid volatility
-    "AMD"   : (0.015, 0.009, 0.007),   # mid-high volatility
-    "NVDA"  : (0.018, 0.010, 0.008),   # high volatility
-    "TSLA"  : (0.020, 0.012, 0.009),   # high volatility
+    # ── 🔵 Low Volatility (Beta < 0.8) ───────────────────────────
+    # (hard_sl, trail, buy_trend)
+    "AAPL"  : (0.010, 0.006, 0.004),   # Apple
+    "MSFT"  : (0.010, 0.006, 0.004),   # Microsoft
+    "GOOGL" : (0.010, 0.006, 0.004),   # Alphabet
+    "JPM"   : (0.010, 0.006, 0.004),   # JPMorgan Chase
+    "V"     : (0.010, 0.006, 0.004),   # Visa
+    "MA"    : (0.010, 0.006, 0.004),   # Mastercard
+    "PG"    : (0.010, 0.006, 0.004),   # Procter & Gamble
+    "WMT"   : (0.010, 0.006, 0.004),   # Walmart
+    "COST"  : (0.010, 0.006, 0.004),   # Costco
+    "KO"    : (0.010, 0.006, 0.004),   # Coca-Cola
+    "PEP"   : (0.010, 0.006, 0.004),   # PepsiCo
+    "PFE"   : (0.010, 0.006, 0.004),   # Pfizer
+    "UNH"   : (0.010, 0.006, 0.004),   # UnitedHealth
+    "HD"    : (0.010, 0.006, 0.004),   # Home Depot
+    "CSCO"  : (0.010, 0.006, 0.004),   # Cisco
+    "ORCL"  : (0.010, 0.006, 0.004),   # Oracle
+    "TXN"   : (0.010, 0.006, 0.004),   # Texas Instruments
+    "HON"   : (0.010, 0.006, 0.004),   # Honeywell
+    "MMM"   : (0.010, 0.006, 0.004),   # 3M
+    "T"     : (0.010, 0.006, 0.004),   # AT&T
+    "VZ"    : (0.010, 0.006, 0.004),   # Verizon
+    "TMUS"  : (0.010, 0.006, 0.004),   # T-Mobile
+    "ABBV"  : (0.010, 0.006, 0.004),   # AbbVie
+    "LOW"   : (0.010, 0.006, 0.004),   # Lowe's
+    "UPS"   : (0.010, 0.006, 0.004),   # UPS
+
+    # ── 🟡 Mid Volatility (Beta 0.8 – 1.2) ───────────────────────
+    "AMZN"  : (0.013, 0.008, 0.006),   # Amazon
+    "META"  : (0.013, 0.008, 0.006),   # Meta Platforms
+    "AVGO"  : (0.013, 0.008, 0.006),   # Broadcom
+    "ADBE"  : (0.013, 0.008, 0.006),   # Adobe
+    "CRM"   : (0.013, 0.008, 0.006),   # Salesforce
+    "INTC"  : (0.013, 0.008, 0.006),   # Intel
+    "QCOM"  : (0.013, 0.008, 0.006),   # Qualcomm
+    "AMAT"  : (0.013, 0.008, 0.006),   # Applied Materials
+    "ASML"  : (0.013, 0.008, 0.006),   # ASML Holding
+    "DIS"   : (0.013, 0.008, 0.006),   # Disney
+    "XOM"   : (0.013, 0.008, 0.006),   # ExxonMobil
+    "CVX"   : (0.013, 0.008, 0.006),   # Chevron
+    "CAT"   : (0.013, 0.008, 0.006),   # Caterpillar
+    "GE"    : (0.013, 0.008, 0.006),   # General Electric
+    "FDX"   : (0.013, 0.008, 0.006),   # FedEx
+    "LMT"   : (0.013, 0.008, 0.006),   # Lockheed Martin
+    "TMO"   : (0.013, 0.008, 0.006),   # Thermo Fisher
+    "AZN"   : (0.013, 0.008, 0.006),   # AstraZeneca
+    "NKE"   : (0.013, 0.008, 0.006),   # Nike
+    "SBUX"  : (0.013, 0.008, 0.006),   # Starbucks
+    "ZM"    : (0.013, 0.008, 0.006),   # Zoom
+    "IBM"   : (0.013, 0.008, 0.006),   # IBM
+    "DE"    : (0.013, 0.008, 0.006),   # John Deere
+    "GS"    : (0.013, 0.008, 0.006),   # Goldman Sachs
+    "BLK"   : (0.013, 0.008, 0.006),   # BlackRock
+
+    # ── 🔴 High Volatility (Beta > 1.2) ──────────────────────────
+    "NVDA"  : (0.018, 0.010, 0.008),   # Nvidia
+    "TSLA"  : (0.020, 0.012, 0.009),   # Tesla
+    "AMD"   : (0.015, 0.009, 0.007),   # AMD
+    "NFLX"  : (0.015, 0.009, 0.007),   # Netflix
+    "MU"    : (0.015, 0.009, 0.007),   # Micron
+    "BA"    : (0.015, 0.009, 0.007),   # Boeing
+    "LLY"   : (0.015, 0.009, 0.007),   # Eli Lilly
+    "PYPL"  : (0.015, 0.009, 0.007),   # PayPal
+    "SQ"    : (0.018, 0.010, 0.008),   # Block
+    "UBER"  : (0.018, 0.010, 0.008),   # Uber
+    "ABNB"  : (0.018, 0.010, 0.008),   # Airbnb
+    "SNOW"  : (0.018, 0.010, 0.008),   # Snowflake
+    "PLTR"  : (0.018, 0.010, 0.008),   # Palantir
+    "BABA"  : (0.018, 0.010, 0.008),   # Alibaba
+    "JD"    : (0.018, 0.010, 0.008),   # JD.com
+    "PDD"   : (0.020, 0.012, 0.009),   # Pinduoduo
+    "SHOP"  : (0.018, 0.010, 0.008),   # Shopify
+    "LCID"  : (0.020, 0.012, 0.009),   # Lucid
+    "RIVN"  : (0.020, 0.012, 0.009),   # Rivian
+    "COIN"  : (0.020, 0.012, 0.009),   # Coinbase
+    "MSTR"  : (0.020, 0.012, 0.009),   # MicroStrategy
+    "MARA"  : (0.020, 0.012, 0.009),   # Marathon Digital
+    "RIOT"  : (0.020, 0.012, 0.009),   # Riot Platforms
+    "DKNG"  : (0.018, 0.010, 0.008),   # DraftKings
 }
+
 WATCHLIST = list(STOCK_PROFILES.keys())
 
 # ─────────────────────────────────────────────
@@ -457,95 +530,215 @@ with tab_live:
 # ════════════════════════════════════════════
 with tab_backtest:
     st.write("## 🧪 Backtest Strategy on Yahoo Finance Data")
-    st.write("Simulates the trailing stop strategy on historical hourly data.")
+    st.write("Simulates the trailing stop + hard stop strategy on historical hourly data.")
 
-    col1, col2 = st.columns([1, 2])
+    # ── Mode toggle ──
+    bt_mode = st.radio("Mode", ["📊 All Stocks (Leaderboard)", "🔍 Single Stock (Deep Dive)"],
+                       horizontal=True)
 
-    with col1:
-        st.write("### ⚙️ Backtest Settings")
-        bt_symbol   = st.selectbox("Symbol",  WATCHLIST, index=0)
-        bt_period   = st.selectbox("Period",  ["1mo", "3mo", "6mo", "1y", "2y"], index=1)
-        bt_qty      = st.number_input("Qty per trade", min_value=1, max_value=100, value=5)
+    st.divider()
 
-        hard_sl_d, trail_d, trend_d = profile(bt_symbol)
-        st.write("**Strategy params** (from per-stock profile — editable):")
-        bt_hard_sl  = st.slider("Hard Stop Loss %",   0.005, 0.05, hard_sl_d, 0.001, format="%.3f")
-        bt_trail    = st.slider("Trailing Stop %",    0.005, 0.05, trail_d,   0.001, format="%.3f")
-        bt_trend    = st.slider("Buy Trend Signal %", 0.001, 0.02, trend_d,   0.001, format="%.3f")
+    # ── Shared settings ──
+    cfg1, cfg2, cfg3 = st.columns(3)
+    with cfg1:
+        bt_period = st.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y"], index=1)
+    with cfg2:
+        bt_qty = st.number_input("Qty per trade", min_value=1, max_value=100, value=5)
+    with cfg3:
+        use_profile = st.checkbox("Use per-stock profiles", value=True,
+                                  help="Uncheck to apply the same params to all stocks")
 
-        run_bt = st.button("▶️ Run Backtest", use_container_width=True, type="primary")
+    # Override sliders shown only when per-stock profiles are OFF
+    if not use_profile:
+        ov1, ov2, ov3 = st.columns(3)
+        with ov1:
+            ov_hard_sl = st.slider("Hard Stop Loss %",   0.005, 0.05, 0.013, 0.001, format="%.3f")
+        with ov2:
+            ov_trail   = st.slider("Trailing Stop %",    0.005, 0.05, 0.008, 0.001, format="%.3f")
+        with ov3:
+            ov_trend   = st.slider("Buy Trend Signal %", 0.001, 0.02, 0.006, 0.001, format="%.3f")
 
-    with col2:
-        if run_bt:
-            with st.spinner(f"Downloading {bt_symbol} data and simulating..."):
-                results, trade_log = run_backtest(
-                    bt_symbol, bt_period, bt_hard_sl, bt_trail, bt_trend, bt_qty
-                )
+    # ── Single stock: symbol + param overrides ──
+    if bt_mode == "🔍 Single Stock (Deep Dive)":
+        ss1, ss2 = st.columns([1, 3])
+        with ss1:
+            bt_symbol = st.selectbox("Symbol", WATCHLIST, index=0)
+            if use_profile:
+                hard_sl_d, trail_d, trend_d = profile(bt_symbol)
+                st.caption(f"Profile: SL -{hard_sl_d*100:.1f}% | Trail -{trail_d*100:.1f}% | Trend +{trend_d*100:.1f}%")
 
-            if results is None:
-                st.error("No data returned from Yahoo Finance. Try a different symbol or period.")
-            else:
-                # ── Summary metrics ──
-                st.write("### 📊 Results")
-                m1, m2, m3, m4 = st.columns(4)
-                pl_color = "normal" if results["total_pl"] >= 0 else "inverse"
-                m1.metric("Final Equity",  f"${results['final_equity']:,.2f}",
-                          delta=f"${results['total_pl']:+,.2f}")
-                m2.metric("Total Trades",  results["total_trades"])
-                m3.metric("Win Rate",      f"{results['win_rate']}%")
-                m4.metric("Avg Win / Loss",
-                          f"${results['avg_win']:+,.2f} / ${results['avg_loss']:,.2f}")
+    run_bt = st.button("▶️ Run Backtest", type="primary", use_container_width=True)
 
-                w2, w3 = st.columns(2)
-                w2.metric("Winning Trades", results["wins"])
-                w3.metric("Losing Trades",  results["losses"])
+    # ════════════════════════════════
+    # ALL-STOCKS LEADERBOARD
+    # ════════════════════════════════
+    if run_bt and bt_mode == "📊 All Stocks (Leaderboard)":
+        all_results = []
+        all_trades  = {}
 
-                # ── Price chart with buy/sell markers ──
-                st.write("### 📈 Price Chart with Trades")
-                df_chart = results["df"].copy()
+        progress_bar = st.progress(0, text="Starting...")
+        for idx, sym in enumerate(WATCHLIST):
+            progress_bar.progress((idx) / len(WATCHLIST),
+                                  text=f"Running {sym} ({idx+1}/{len(WATCHLIST)})...")
+            hard_sl, trail, trend = profile(sym) if use_profile else (ov_hard_sl, ov_trail, ov_trend)
+            res, tlog = run_backtest(sym, bt_period, hard_sl, trail, trend, bt_qty)
+            if res:
+                all_results.append(res)
+                all_trades[sym] = tlog
+        progress_bar.progress(1.0, text="✅ All done!")
 
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=df_chart.index, y=df_chart["close"],
-                    mode="lines", name="Price",
-                    line=dict(color="#4f8ef7", width=1.5)
-                ))
-                fig.add_trace(go.Scatter(
-                    x=df_chart.index, y=df_chart["avg_20"],
-                    mode="lines", name="20-bar Avg",
-                    line=dict(color="#f0a500", width=1, dash="dot")
-                ))
-
-                if trade_log is not None and not trade_log.empty:
-                    buys  = trade_log[trade_log["Action"] == "BUY"]
-                    sells = trade_log[trade_log["Action"].str.contains("SELL")]
-
-                    fig.add_trace(go.Scatter(
-                        x=pd.to_datetime(buys["Date"]), y=buys["Price"],
-                        mode="markers", name="Buy",
-                        marker=dict(color="lime", size=9, symbol="triangle-up")
-                    ))
-                    fig.add_trace(go.Scatter(
-                        x=pd.to_datetime(sells["Date"]), y=sells["Price"],
-                        mode="markers", name="Sell",
-                        marker=dict(color="red", size=9, symbol="triangle-down")
-                    ))
-
-                fig.update_layout(
-                    height=380, template="plotly_dark",
-                    margin=dict(l=0, r=0, t=30, b=0),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02)
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-                # ── Trade log ──
-                with st.expander("📋 Full Trade Log", expanded=False):
-                    if trade_log is not None and not trade_log.empty:
-                        st.dataframe(trade_log, use_container_width=True)
-                    else:
-                        st.info("No trades were triggered in this period.")
+        if not all_results:
+            st.error("No data returned for any symbol. Check your internet connection.")
         else:
-            st.info("👈 Configure settings and click **Run Backtest** to simulate the strategy.")
+            # ── Aggregate header metrics ──
+            st.write("### 🏆 Portfolio Summary")
+            total_combined_pl = sum(r["total_pl"] for r in all_results)
+            all_wins          = sum(r["wins"]     for r in all_results)
+            all_trades_count  = sum(r["total_trades"] for r in all_results)
+            overall_wr        = round(all_wins / all_trades_count * 100, 1) if all_trades_count else 0
+            best              = max(all_results, key=lambda r: r["total_pl"])
+            worst             = min(all_results, key=lambda r: r["total_pl"])
+
+            h1, h2, h3, h4, h5 = st.columns(5)
+            h1.metric("Combined P&L",   f"${total_combined_pl:+,.2f}")
+            h2.metric("Total Trades",   all_trades_count)
+            h3.metric("Overall Win Rate", f"{overall_wr}%")
+            h4.metric("🥇 Best Stock",  best["symbol"],  delta=f"${best['total_pl']:+,.2f}")
+            h5.metric("🥀 Worst Stock", worst["symbol"], delta=f"${worst['total_pl']:+,.2f}")
+
+            # ── Leaderboard table ──
+            st.write("### 📋 Leaderboard (ranked by P&L)")
+            lb_rows = sorted(all_results, key=lambda r: r["total_pl"], reverse=True)
+            lb_df   = pd.DataFrame([{
+                "Rank":          i + 1,
+                "Symbol":        r["symbol"],
+                "Total P&L ($)": f"${r['total_pl']:+,.2f}",
+                "Final Equity":  f"${r['final_equity']:,.2f}",
+                "Trades":        r["total_trades"],
+                "Wins":          r["wins"],
+                "Losses":        r["losses"],
+                "Win Rate":      f"{r['win_rate']}%",
+                "Avg Win ($)":   f"${r['avg_win']:+,.2f}",
+                "Avg Loss ($)":  f"${r['avg_loss']:,.2f}",
+            } for i, r in enumerate(lb_rows)])
+            st.dataframe(lb_df, use_container_width=True, hide_index=True)
+
+            # ── P&L bar chart across all stocks ──
+            st.write("### 📊 P&L Comparison Chart")
+            sorted_syms = [r["symbol"]   for r in lb_rows]
+            sorted_pls  = [r["total_pl"] for r in lb_rows]
+            bar_colors  = ["#26a65b" if v >= 0 else "#e74c3c" for v in sorted_pls]
+
+            fig_bar = go.Figure(go.Bar(
+                x=sorted_syms, y=sorted_pls,
+                marker_color=bar_colors,
+                text=[f"${v:+,.0f}" for v in sorted_pls],
+                textposition="outside",
+            ))
+            fig_bar.update_layout(
+                height=350, template="plotly_dark",
+                yaxis_title="Total P&L (USD)",
+                margin=dict(l=0, r=0, t=30, b=0),
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+            # ── Win rate comparison ──
+            st.write("### 🎯 Win Rate by Stock")
+            wr_syms   = [r["symbol"]   for r in lb_rows]
+            wr_vals   = [r["win_rate"] for r in lb_rows]
+            wr_colors = ["#26a65b" if v >= 50 else "#e74c3c" for v in wr_vals]
+
+            fig_wr = go.Figure(go.Bar(
+                x=wr_syms, y=wr_vals,
+                marker_color=wr_colors,
+                text=[f"{v}%" for v in wr_vals],
+                textposition="outside",
+            ))
+            fig_wr.add_hline(y=50, line_dash="dot", line_color="white",
+                             annotation_text="50% break-even line")
+            fig_wr.update_layout(
+                height=320, template="plotly_dark",
+                yaxis_title="Win Rate (%)", yaxis_range=[0, 105],
+                margin=dict(l=0, r=0, t=30, b=0),
+            )
+            st.plotly_chart(fig_wr, use_container_width=True)
+
+            # ── Per-stock drill-down expanders ──
+            st.write("### 🔎 Per-Stock Trade Logs")
+            for r in lb_rows:
+                sym  = r["symbol"]
+                tlog = all_trades.get(sym)
+                label = f"{'🟢' if r['total_pl'] >= 0 else '🔴'} {sym}  |  P&L: ${r['total_pl']:+,.2f}  |  Trades: {r['total_trades']}  |  Win rate: {r['win_rate']}%"
+                with st.expander(label, expanded=False):
+                    if tlog is not None and not tlog.empty:
+                        st.dataframe(tlog, use_container_width=True)
+                    else:
+                        st.info("No trades triggered.")
+
+    # ════════════════════════════════
+    # SINGLE STOCK DEEP DIVE
+    # ════════════════════════════════
+    elif run_bt and bt_mode == "🔍 Single Stock (Deep Dive)":
+        hard_sl, trail, trend = profile(bt_symbol) if use_profile else (ov_hard_sl, ov_trail, ov_trend)
+
+        with st.spinner(f"Downloading {bt_symbol} data and simulating..."):
+            results, trade_log = run_backtest(bt_symbol, bt_period, hard_sl, trail, trend, bt_qty)
+
+        if results is None:
+            st.error("No data returned from Yahoo Finance. Try a different symbol or period.")
+        else:
+            st.write(f"### 📊 Results — {bt_symbol}")
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            m1.metric("Final Equity",   f"${results['final_equity']:,.2f}",
+                      delta=f"${results['total_pl']:+,.2f}")
+            m2.metric("Total Trades",   results["total_trades"])
+            m3.metric("Win Rate",       f"{results['win_rate']}%")
+            m4.metric("Avg Win",        f"${results['avg_win']:+,.2f}")
+            m5.metric("Avg Loss",       f"${results['avg_loss']:,.2f}")
+            m6.metric("Wins / Losses",  f"{results['wins']} / {results['losses']}")
+
+            # ── Price chart with trade markers ──
+            st.write("### 📈 Price Chart with Trades")
+            df_chart = results["df"].copy()
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=df_chart.index, y=df_chart["close"],
+                mode="lines", name="Price",
+                line=dict(color="#4f8ef7", width=1.5)
+            ))
+            fig.add_trace(go.Scatter(
+                x=df_chart.index, y=df_chart["avg_20"],
+                mode="lines", name="20-bar Avg",
+                line=dict(color="#f0a500", width=1, dash="dot")
+            ))
+            if trade_log is not None and not trade_log.empty:
+                buys  = trade_log[trade_log["Action"] == "BUY"]
+                sells = trade_log[trade_log["Action"].str.contains("SELL")]
+                fig.add_trace(go.Scatter(
+                    x=pd.to_datetime(buys["Date"]),  y=buys["Price"],
+                    mode="markers", name="Buy",
+                    marker=dict(color="lime", size=9, symbol="triangle-up")
+                ))
+                fig.add_trace(go.Scatter(
+                    x=pd.to_datetime(sells["Date"]), y=sells["Price"],
+                    mode="markers", name="Sell",
+                    marker=dict(color="red", size=9, symbol="triangle-down")
+                ))
+            fig.update_layout(
+                height=400, template="plotly_dark",
+                margin=dict(l=0, r=0, t=30, b=0),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            with st.expander("📋 Full Trade Log", expanded=False):
+                if trade_log is not None and not trade_log.empty:
+                    st.dataframe(trade_log, use_container_width=True)
+                else:
+                    st.info("No trades were triggered in this period.")
+
+    elif not run_bt:
+        st.info("👆 Choose a mode, configure settings, then click **Run Backtest**.")
 
 # ─────────────────────────────────────────────
 # 10. AUTO-RERUN LOOP (bot runs automatically on page load)
