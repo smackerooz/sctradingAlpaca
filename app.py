@@ -465,7 +465,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 st.title("📈 Auto Trading Bot")
 
-tab_live, tab_backtest = st.tabs(["🔴 Live Trading", "🧪 Backtesting"])
+tab_live, tab_backtest, tab_portfolio = st.tabs(["🔴 Live Trading", "🧪 Backtesting", "📂 Portfolio Backtest"])
 
 # ════════════════════════════════════════════
 # TAB 1 — LIVE TRADING
@@ -752,6 +752,311 @@ with tab_backtest:
 
     elif not run_bt:
         st.info("👆 Choose a mode, configure settings, then click **Run Backtest**.")
+
+
+# ════════════════════════════════════════════
+# TAB 3 — PORTFOLIO BACKTEST
+# ════════════════════════════════════════════
+with tab_portfolio:
+    st.write("## 📂 Portfolio Backtest — Shared Capital Simulation")
+    st.write(
+        "Simulates **all stocks trading simultaneously** from a single shared capital pool. "
+        "This mirrors how your real app works — stocks compete for the same cash, "
+        "and new buys are skipped when funds run out."
+    )
+
+    st.info(
+        "**How it works:** At each hourly bar, the engine checks every stock in the watchlist. "
+        "It sells positions that hit their trailing/hard stop, then uses freed cash to buy new signals — "
+        "all from the same shared $10,000 pool."
+    )
+
+    # ── Settings ──
+    pcfg1, pcfg2, pcfg3, pcfg4 = st.columns(4)
+    with pcfg1:
+        p_period     = st.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y"], index=1,
+                                    key="p_period")
+    with pcfg2:
+        p_capital    = st.number_input("Starting Capital ($)", min_value=1000, max_value=100000,
+                                       value=10000, step=1000, key="p_capital")
+    with pcfg3:
+        p_max_trade  = st.number_input("Max $ per trade", min_value=50, max_value=10000,
+                                       value=100, step=50, key="p_max_trade",
+                                       help="Max dollars allocated per position")
+    with pcfg4:
+        p_use_profile = st.checkbox("Use per-stock profiles", value=True, key="p_use_profile",
+                                    help="Uncheck to use same params for all stocks")
+
+    if not p_use_profile:
+        pov1, pov2, pov3 = st.columns(3)
+        with pov1:
+            p_hard_sl = st.slider("Hard Stop Loss %", 0.005, 0.05, 0.013, 0.001,
+                                  format="%.3f", key="p_hard_sl")
+        with pov2:
+            p_trail   = st.slider("Trailing Stop %",  0.005, 0.05, 0.008, 0.001,
+                                  format="%.3f", key="p_trail")
+        with pov3:
+            p_trend   = st.slider("Buy Trend %",      0.001, 0.02, 0.006, 0.001,
+                                  format="%.3f", key="p_trend")
+
+    run_portfolio = st.button("▶️ Run Portfolio Backtest", type="primary",
+                              use_container_width=True, key="run_portfolio")
+
+    if run_portfolio:
+
+        # ── Download all data first ──────────────────────────────────────
+        with st.spinner("📥 Downloading data for all stocks..."):
+            all_data = {}
+            dl_bar = st.progress(0, text="Downloading...")
+            for idx, sym in enumerate(WATCHLIST):
+                dl_bar.progress(idx / len(WATCHLIST), text=f"Downloading {sym}...")
+                try:
+                    df_raw = yf.download(sym, period=p_period, interval="1h", progress=False)
+                    if df_raw.empty:
+                        continue
+                    df_raw = df_raw[["Close"]].copy()
+                    df_raw.columns = ["close"]
+                    df_raw["avg_20"] = df_raw["close"].rolling(20).mean()
+                    df_raw.dropna(inplace=True)
+                    all_data[sym] = df_raw
+                except:
+                    continue
+            dl_bar.progress(1.0, text=f"✅ Downloaded {len(all_data)}/{len(WATCHLIST)} stocks")
+
+        if not all_data:
+            st.error("No data downloaded. Check your internet connection.")
+        else:
+            # ── Build unified timeline ────────────────────────────────────
+            # Align all stocks to a common set of timestamps
+            all_timestamps = sorted(set(
+                ts for df in all_data.values() for ts in df.index
+            ))
+
+            # ── Portfolio simulation ──────────────────────────────────────
+            with st.spinner("⚙️ Simulating portfolio..."):
+                cash          = float(p_capital)
+                positions     = {}   # { symbol: {qty, entry_price, peak_price} }
+                trade_log     = []   # all trades across all stocks
+                equity_curve  = []   # (timestamp, equity) for chart
+                sym_pl        = {sym: 0.0 for sym in all_data}  # per-symbol realized P&L
+
+                for ts in all_timestamps:
+                    # Current market value of all open positions
+                    holdings_value = 0.0
+                    for sym, pos in positions.items():
+                        if ts in all_data[sym].index:
+                            holdings_value += all_data[sym].loc[ts, "close"] * pos["qty"]
+                        else:
+                            holdings_value += pos["entry_price"] * pos["qty"]
+
+                    equity_curve.append({
+                        "timestamp": ts,
+                        "equity":    round(cash + holdings_value, 2),
+                        "cash":      round(cash, 2),
+                        "positions": len(positions),
+                    })
+
+                    # ── SELL pass: check all open positions ──────────────
+                    to_close = []
+                    for sym, pos in positions.items():
+                        if ts not in all_data[sym].index:
+                            continue
+                        price           = float(all_data[sym].loc[ts, "close"])
+                        hard_sl, trail_pct, _ = profile(sym) if p_use_profile else (p_hard_sl, p_trail, p_trend)
+                        entry           = pos["entry_price"]
+                        peak            = pos["peak_price"]
+
+                        # Update peak
+                        peak = max(peak, price)
+                        positions[sym]["peak_price"] = peak
+
+                        gain_from_entry  = (peak - entry) / entry
+                        trail_active     = gain_from_entry >= (trail_pct * 0.5)
+                        trail_stop_price = peak * (1 - trail_pct)
+                        trail_hit        = trail_active and (price <= trail_stop_price)
+                        pl_pct           = (price - entry) / entry
+                        hard_hit         = pl_pct <= -hard_sl
+
+                        if hard_hit or trail_hit:
+                            reason   = "HARD SL" if hard_hit else "TRAIL STOP"
+                            pl_usd   = round((price - entry) * pos["qty"], 4)
+                            proceeds = price * pos["qty"]
+                            sym_pl[sym] += pl_usd
+                            to_close.append((sym, price, pos["qty"], reason, pl_usd, pl_pct, proceeds))
+
+                    for sym, price, qty, reason, pl_usd, pl_pct, proceeds in to_close:
+                        cash += proceeds
+                        del positions[sym]
+                        trade_log.append({
+                            "Timestamp":  str(ts)[:16],
+                            "Symbol":     sym,
+                            "Action":     f"SELL ({reason})",
+                            "Price":      round(price, 4),
+                            "Qty":        round(qty, 6),
+                            "Cost/Proceeds": round(proceeds, 2),
+                            "P&L ($)":    pl_usd,
+                            "P&L (%)":    f"{pl_pct*100:+.2f}%",
+                            "Cash After": round(cash, 2),
+                        })
+
+                    # ── BUY pass: scan watchlist for signals ─────────────
+                    for sym in WATCHLIST:
+                        if sym in positions:
+                            continue   # already holding
+                        if sym not in all_data:
+                            continue
+                        if ts not in all_data[sym].index:
+                            continue
+                        row   = all_data[sym].loc[ts]
+                        price = float(row["close"])
+                        avg20 = float(row["avg_20"]) if not pd.isna(row["avg_20"]) else None
+                        if avg20 is None:
+                            continue
+
+                        _, _, buy_trend = profile(sym) if p_use_profile else (p_hard_sl, p_trail, p_trend)
+
+                        if price > avg20 * (1 + buy_trend):
+                            qty  = round(p_max_trade / price, 6)
+                            cost = qty * price
+                            if qty <= 0 or cash < cost:
+                                continue   # not enough cash — skip
+                            cash -= cost
+                            positions[sym] = {
+                                "qty":         qty,
+                                "entry_price": price,
+                                "peak_price":  price,
+                            }
+                            trade_log.append({
+                                "Timestamp":     str(ts)[:16],
+                                "Symbol":        sym,
+                                "Action":        "BUY",
+                                "Price":         round(price, 4),
+                                "Qty":           round(qty, 6),
+                                "Cost/Proceeds": round(cost, 2),
+                                "P&L ($)":       0.0,
+                                "P&L (%)":       "0.00%",
+                                "Cash After":    round(cash, 2),
+                            })
+
+                # ── Close any remaining open positions at last known price ──
+                for sym, pos in positions.items():
+                    last_price = float(all_data[sym]["close"].iloc[-1]) if sym in all_data else pos["entry_price"]
+                    pl_usd     = round((last_price - pos["entry_price"]) * pos["qty"], 4)
+                    proceeds   = last_price * pos["qty"]
+                    pl_pct     = (last_price - pos["entry_price"]) / pos["entry_price"]
+                    sym_pl[sym] += pl_usd
+                    cash       += proceeds
+                    trade_log.append({
+                        "Timestamp":     str(all_timestamps[-1])[:16],
+                        "Symbol":        sym,
+                        "Action":        "SELL (END)",
+                        "Price":         round(last_price, 4),
+                        "Qty":           round(pos["qty"], 6),
+                        "Cost/Proceeds": round(proceeds, 2),
+                        "P&L ($)":       pl_usd,
+                        "P&L (%)":       f"{pl_pct*100:+.2f}%",
+                        "Cash After":    round(cash, 2),
+                    })
+
+                final_equity = cash
+                total_pl     = round(final_equity - p_capital, 2)
+                total_return = round(total_pl / p_capital * 100, 2)
+                df_trades    = pd.DataFrame(trade_log)
+                df_equity    = pd.DataFrame(equity_curve)
+
+                sells_all  = [t for t in trade_log if "SELL" in t["Action"]]
+                wins_all   = [t for t in sells_all if t["P&L ($)"] > 0]
+                losses_all = [t for t in sells_all if t["P&L ($)"] <= 0]
+                win_rate   = round(len(wins_all) / len(sells_all) * 100, 1) if sells_all else 0
+                avg_win    = round(sum(t["P&L ($)"] for t in wins_all)   / len(wins_all),   2) if wins_all   else 0
+                avg_loss   = round(sum(t["P&L ($)"] for t in losses_all) / len(losses_all), 2) if losses_all else 0
+
+                # Max drawdown
+                eq_vals  = df_equity["equity"].values
+                peak_eq  = eq_vals[0]
+                max_dd   = 0.0
+                for eq in eq_vals:
+                    peak_eq = max(peak_eq, eq)
+                    dd      = (peak_eq - eq) / peak_eq * 100
+                    max_dd  = max(max_dd, dd)
+
+            # ── Results ───────────────────────────────────────────────────
+            st.write("### 🏆 Portfolio Results")
+            r1, r2, r3, r4, r5, r6 = st.columns(6)
+            r1.metric("Final Equity",   f"${final_equity:,.2f}",
+                      delta=f"${total_pl:+,.2f}")
+            r2.metric("Total Return",   f"{total_return:+.2f}%")
+            r3.metric("Win Rate",       f"{win_rate}%")
+            r4.metric("Max Drawdown",   f"-{max_dd:.2f}%")
+            r5.metric("Avg Win",        f"${avg_win:+.2f}")
+            r6.metric("Avg Loss",       f"${avg_loss:.2f}")
+
+            r7, r8, r9 = st.columns(3)
+            r7.metric("Total Trades",   len(sells_all))
+            r8.metric("Wins",           len(wins_all))
+            r9.metric("Losses",         len(losses_all))
+
+            # ── Equity curve ─────────────────────────────────────────────
+            st.write("### 📈 Portfolio Equity Curve")
+            fig_eq = go.Figure()
+            fig_eq.add_trace(go.Scatter(
+                x=df_equity["timestamp"], y=df_equity["equity"],
+                mode="lines", name="Portfolio Equity",
+                line=dict(color="#4f8ef7", width=2),
+                fill="tozeroy", fillcolor="rgba(79,142,247,0.08)"
+            ))
+            fig_eq.add_hline(y=p_capital, line_dash="dot", line_color="gray",
+                             annotation_text=f"Start: ${p_capital:,}")
+            fig_eq.update_layout(
+                height=380, template="plotly_dark",
+                yaxis_title="Portfolio Value ($)",
+                margin=dict(l=0, r=0, t=30, b=0),
+            )
+            st.plotly_chart(fig_eq, use_container_width=True)
+
+            # ── Cash + position count over time ──────────────────────────
+            st.write("### 💵 Cash & Open Positions Over Time")
+            fig_cash = go.Figure()
+            fig_cash.add_trace(go.Scatter(
+                x=df_equity["timestamp"], y=df_equity["cash"],
+                mode="lines", name="Cash",
+                line=dict(color="#f0a500", width=1.5)
+            ))
+            fig_cash.add_trace(go.Bar(
+                x=df_equity["timestamp"], y=df_equity["positions"],
+                name="Open Positions", yaxis="y2",
+                marker_color="rgba(100,200,100,0.3)"
+            ))
+            fig_cash.update_layout(
+                height=280, template="plotly_dark",
+                margin=dict(l=0, r=0, t=30, b=0),
+                yaxis=dict(title="Cash ($)"),
+                yaxis2=dict(title="# Positions", overlaying="y", side="right",
+                            showgrid=False),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02)
+            )
+            st.plotly_chart(fig_cash, use_container_width=True)
+
+            # ── Per-symbol P&L leaderboard ───────────────────────────────
+            st.write("### 📋 Per-Symbol P&L (Shared Capital)")
+            sym_rows = sorted(
+                [{"Symbol": s, "Realized P&L ($)": round(v, 2),
+                  "Result": "🟢 Profit" if v > 0 else ("🔴 Loss" if v < 0 else "⚪ Flat")}
+                 for s, v in sym_pl.items() if v != 0.0],
+                key=lambda x: x["Realized P&L ($)"], reverse=True
+            )
+            if sym_rows:
+                st.dataframe(pd.DataFrame(sym_rows), use_container_width=True, hide_index=True)
+
+            # ── Full trade log ────────────────────────────────────────────
+            with st.expander("📋 Full Portfolio Trade Log", expanded=False):
+                if not df_trades.empty:
+                    st.dataframe(df_trades, use_container_width=True)
+                else:
+                    st.info("No trades executed.")
+
+    elif not run_portfolio:
+        st.info("👆 Configure settings above and click **Run Portfolio Backtest**.")
 
 # ─────────────────────────────────────────────
 # 10. AUTO-RERUN LOOP (bot runs automatically on page load)
