@@ -178,6 +178,154 @@ def reset_baseline_if_needed():
 def profile(symbol: str):
     return STOCK_PROFILES.get(symbol, (0.013, 0.008, 0.006))
 
+# ── Technical indicator helpers ──────────────────────────────────────────────
+def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta  = series.diff()
+    gain   = delta.clip(lower=0)
+    loss   = -delta.clip(upper=0)
+    avg_g  = gain.ewm(com=period - 1, min_periods=period).mean()
+    avg_l  = loss.ewm(com=period - 1, min_periods=period).mean()
+    rs     = avg_g / avg_l.replace(0, float("nan"))
+    return 100 - (100 / (1 + rs))
+
+def calc_macd(series: pd.Series, fast=12, slow=26, signal=9):
+    ema_fast   = series.ewm(span=fast, adjust=False).mean()
+    ema_slow   = series.ewm(span=slow, adjust=False).mean()
+    macd_line  = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram  = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+def compute_signal_score(df: pd.DataFrame) -> dict:
+    """
+    Score a stock 1-100 based on multiple technical factors.
+    Returns dict with score, direction, RSI, MACD histogram, and component scores.
+    Higher score = stronger bullish signal; lower = stronger bearish.
+    50 = neutral.
+    """
+    if df is None or len(df) < 30:
+        return {"score": 50, "direction": "⚪ Neutral", "rsi": None,
+                "macd_hist": None, "trend_score": 0, "rsi_score": 0,
+                "macd_score": 0, "momentum_score": 0}
+
+    close = df["close"] if "close" in df.columns else df["Close"]
+    close = close.dropna()
+    if len(close) < 30:
+        return {"score": 50, "direction": "⚪ Neutral", "rsi": None,
+                "macd_hist": None, "trend_score": 0, "rsi_score": 0,
+                "macd_score": 0, "momentum_score": 0}
+
+    # ── Trend component (0-25 pts) ──────────────────────────────────────
+    sma20  = close.rolling(20).mean().iloc[-1]
+    sma50  = close.rolling(min(50, len(close))).mean().iloc[-1]
+    price  = close.iloc[-1]
+    trend_score = 12  # neutral
+    if price > sma20 > sma50:
+        trend_score = 25   # strong uptrend
+    elif price > sma20:
+        trend_score = 19
+    elif price < sma20 < sma50:
+        trend_score = 0    # strong downtrend
+    elif price < sma20:
+        trend_score = 6
+
+    # ── RSI component (0-25 pts) ─────────────────────────────────────────
+    rsi_series = calc_rsi(close)
+    rsi_val    = rsi_series.iloc[-1] if not rsi_series.empty else 50.0
+    if pd.isna(rsi_val):
+        rsi_val = 50.0
+    # RSI 30-70 is normal; >70 overbought (bearish), <30 oversold (bullish bounce)
+    if rsi_val < 30:
+        rsi_score = 22   # oversold — potential bullish reversal
+    elif rsi_val < 45:
+        rsi_score = 18
+    elif rsi_val < 55:
+        rsi_score = 12   # neutral
+    elif rsi_val < 70:
+        rsi_score = 17   # bullish momentum
+    else:
+        rsi_score = 8    # overbought — caution
+
+    # ── MACD component (0-25 pts) ────────────────────────────────────────
+    macd_line, signal_line, histogram = calc_macd(close)
+    hist_val   = histogram.iloc[-1]  if not histogram.empty   else 0.0
+    macd_val   = macd_line.iloc[-1]  if not macd_line.empty   else 0.0
+    sig_val    = signal_line.iloc[-1] if not signal_line.empty else 0.0
+    if pd.isna(hist_val): hist_val = 0.0
+    if pd.isna(macd_val): macd_val = 0.0
+    if pd.isna(sig_val):  sig_val  = 0.0
+
+    # MACD above signal + positive histogram = bullish
+    if macd_val > sig_val and hist_val > 0:
+        # Check if histogram is growing (accelerating)
+        prev_hist = histogram.iloc[-2] if len(histogram) > 1 else hist_val
+        macd_score = 25 if (not pd.isna(prev_hist) and hist_val > prev_hist) else 20
+    elif macd_val > sig_val:
+        macd_score = 15
+    elif macd_val < sig_val and hist_val < 0:
+        prev_hist = histogram.iloc[-2] if len(histogram) > 1 else hist_val
+        macd_score = 0 if (not pd.isna(prev_hist) and hist_val < prev_hist) else 5
+    else:
+        macd_score = 10
+
+    # ── Momentum component (0-25 pts) ────────────────────────────────────
+    # Short-term price momentum: compare last close to 5-bar ago
+    if len(close) >= 6:
+        mom_pct = (close.iloc[-1] - close.iloc[-6]) / close.iloc[-6]
+    else:
+        mom_pct = 0.0
+    if pd.isna(mom_pct): mom_pct = 0.0
+    if mom_pct > 0.03:
+        momentum_score = 25
+    elif mom_pct > 0.01:
+        momentum_score = 20
+    elif mom_pct > 0:
+        momentum_score = 15
+    elif mom_pct > -0.01:
+        momentum_score = 10
+    elif mom_pct > -0.03:
+        momentum_score = 5
+    else:
+        momentum_score = 0
+
+    total = trend_score + rsi_score + macd_score + momentum_score  # 0-100
+
+    if total >= 70:
+        direction = "🟢 Bullish"
+    elif total >= 55:
+        direction = "🟡 Mild Bullish"
+    elif total >= 45:
+        direction = "⚪ Neutral"
+    elif total >= 30:
+        direction = "🟠 Mild Bearish"
+    else:
+        direction = "🔴 Bearish"
+
+    return {
+        "score":          total,
+        "direction":      direction,
+        "rsi":            round(rsi_val, 1),
+        "macd_hist":      round(hist_val, 4),
+        "trend_score":    trend_score,
+        "rsi_score":      rsi_score,
+        "macd_score":     macd_score,
+        "momentum_score": momentum_score,
+    }
+
+def rsi_macd_confirmed_buy(df: pd.DataFrame) -> bool:
+    """Returns True if RSI < 70 (not overbought) AND MACD histogram is positive."""
+    if df is None or len(df) < 30:
+        return True   # not enough data — don't block the trade
+    close = df["close"] if "close" in df.columns else df["Close"]
+    close = close.dropna()
+    rsi_series = calc_rsi(close)
+    rsi_val    = rsi_series.iloc[-1] if not rsi_series.empty else 50.0
+    _, _, histogram = calc_macd(close)
+    hist_val = histogram.iloc[-1] if not histogram.empty else 0.0
+    if pd.isna(rsi_val):  rsi_val  = 50.0
+    if pd.isna(hist_val): hist_val = 0.0
+    return (rsi_val < 70) and (hist_val > 0)
+
 def sell_limit(symbol: str, qty, current_price: float, reason: str):
     limit_p = round(current_price - 0.05, 2)
     trading_client.submit_order(LimitOrderRequest(
@@ -267,6 +415,10 @@ def run_strategy():
             current_p = df["close"].iloc[-1]
 
             if current_p > avg_price * (1 + buy_trend):
+                # RSI/MACD confirmation filter
+                if not rsi_macd_confirmed_buy(df):
+                    log(f"⛔ SKIP {symbol} — RSI/MACD confirmation failed (overbought or MACD negative)")
+                    continue
                 # Dollar-based sizing: buy as many whole shares as fit in MAX_TRADE_USD
                 qty = round(MAX_TRADE_USD / current_p, 6)  # fractional shares supported
                 if qty <= 0:
@@ -341,10 +493,19 @@ def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy
         # ── Buy logic ──
         elif position == 0:
             if price > avg_20 * (1 + buy_trend):
+                # RSI/MACD confirmation: use data up to current bar
+                df_slice = df.iloc[:i+1]
+                if not rsi_macd_confirmed_buy(df_slice):
+                    continue
                 qty  = round(max_trade_usd / price, 6)  # fractional shares supported
                 cost = qty * price
                 if qty <= 0 or cash < cost:
                     continue
+                # Compute RSI/MACD values for trade log
+                rsi_s = calc_rsi(df_slice["close"])
+                rsi_at_buy = round(rsi_s.iloc[-1], 1) if not rsi_s.empty else None
+                _, _, hist_s = calc_macd(df_slice["close"])
+                hist_at_buy = round(hist_s.iloc[-1], 4) if not hist_s.empty else None
                 cash        -= cost
                 position     = qty
                 entry_price  = price
@@ -355,6 +516,8 @@ def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy
                     "Price":      round(price, 2),
                     "Qty":        qty,
                     "Cost ($)":   round(cost, 2),
+                    "RSI":        rsi_at_buy,
+                    "MACD Hist":  hist_at_buy,
                     "P&L ($)":    0.0,
                     "P&L (%)":    "0.00%",
                     "Cash":       round(cash, 2),
@@ -465,7 +628,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 st.title("📈 Auto Trading Bot")
 
-tab_live, tab_backtest, tab_portfolio = st.tabs(["🔴 Live Trading", "🧪 Backtesting", "📂 Portfolio Backtest"])
+tab_live, tab_signals, tab_backtest, tab_portfolio = st.tabs(["🔴 Live Trading", "📡 Signal Scanner", "🧪 Backtesting", "📂 Portfolio Backtest"])
 
 # ════════════════════════════════════════════
 # TAB 1 — LIVE TRADING
@@ -537,7 +700,149 @@ with tab_live:
             st.info("No activity yet. Bot is auto-running every 30s.")
 
 # ════════════════════════════════════════════
-# TAB 2 — BACKTESTING
+# TAB 2 — SIGNAL SCANNER
+# ════════════════════════════════════════════
+with tab_signals:
+    st.write("## 📡 Signal Scanner — Bullish/Bearish Rankings (1–100)")
+    st.write(
+        "Scores each stock from **1 (strongly bearish)** to **100 (strongly bullish)** "
+        "using 4 components: **Trend** (SMA20/50), **RSI**, **MACD**, and **Momentum**."
+    )
+
+    sig_col1, sig_col2 = st.columns([2, 1])
+    with sig_col1:
+        sig_period = st.selectbox("Data period", ["5d", "1mo", "3mo"], index=1, key="sig_period")
+    with sig_col2:
+        run_scanner = st.button("🔍 Run Signal Scan", type="primary", use_container_width=True)
+
+    if "signal_results" not in st.session_state:
+        st.session_state.signal_results = None
+
+    if run_scanner:
+        scan_rows = []
+        scan_bar  = st.progress(0, text="Scanning...")
+        for idx, sym in enumerate(WATCHLIST):
+            scan_bar.progress(idx / len(WATCHLIST), text=f"Scanning {sym} ({idx+1}/{len(WATCHLIST)})...")
+            try:
+                df_sig = yf.download(sym, period=sig_period, interval="1h", progress=False)
+                if df_sig.empty:
+                    continue
+                df_sig = df_sig[["Close"]].copy()
+                df_sig.columns = ["close"]
+                sig = compute_signal_score(df_sig)
+                hard_sl, trail_pct, buy_trend = profile(sym)
+                scan_rows.append({
+                    "Symbol":        sym,
+                    "Score":         sig["score"],
+                    "Signal":        sig["direction"],
+                    "RSI":           sig["rsi"],
+                    "MACD Hist":     sig["macd_hist"],
+                    "Trend Pts":     sig["trend_score"],
+                    "RSI Pts":       sig["rsi_score"],
+                    "MACD Pts":      sig["macd_score"],
+                    "Momentum Pts":  sig["momentum_score"],
+                    "Hard SL":       f"-{hard_sl*100:.1f}%",
+                    "Trail Stop":    f"-{trail_pct*100:.1f}%",
+                    "Buy Trend":     f"+{buy_trend*100:.1f}%",
+                })
+            except Exception as e:
+                scan_rows.append({
+                    "Symbol": sym, "Score": 50, "Signal": "⚪ N/A",
+                    "RSI": None, "MACD Hist": None,
+                    "Trend Pts": 0, "RSI Pts": 0, "MACD Pts": 0, "Momentum Pts": 0,
+                    "Hard SL": "-", "Trail Stop": "-", "Buy Trend": "-",
+                })
+        scan_bar.progress(1.0, text="✅ Scan complete!")
+        df_signals = pd.DataFrame(scan_rows).sort_values("Score", ascending=False).reset_index(drop=True)
+        df_signals.insert(0, "Rank", range(1, len(df_signals) + 1))
+        st.session_state.signal_results = df_signals
+
+    if st.session_state.signal_results is not None:
+        df_sig_display = st.session_state.signal_results.copy()
+
+        # ── Summary metrics ──
+        bullish_count  = len(df_sig_display[df_sig_display["Score"] >= 55])
+        bearish_count  = len(df_sig_display[df_sig_display["Score"] <= 45])
+        neutral_count  = len(df_sig_display) - bullish_count - bearish_count
+        top_bull       = df_sig_display.iloc[0]["Symbol"]  if len(df_sig_display) > 0 else "—"
+        top_bear       = df_sig_display.iloc[-1]["Symbol"] if len(df_sig_display) > 0 else "—"
+
+        sm1, sm2, sm3, sm4, sm5 = st.columns(5)
+        sm1.metric("🟢 Bullish",  bullish_count)
+        sm2.metric("⚪ Neutral",  neutral_count)
+        sm3.metric("🔴 Bearish",  bearish_count)
+        sm4.metric("🥇 Top Bull", top_bull,
+                   delta=f"Score {df_sig_display.iloc[0]['Score']}" if len(df_sig_display) > 0 else "")
+        sm5.metric("🥀 Top Bear", top_bear,
+                   delta=f"Score {df_sig_display.iloc[-1]['Score']}" if len(df_sig_display) > 0 else "")
+
+        # ── Ranked table ──
+        st.write("### 📋 Full Rankings Table")
+        st.dataframe(df_sig_display, use_container_width=True, hide_index=True, height=500)
+
+        # ── Score bar chart ──
+        st.write("### 📊 Signal Score Chart (1–100)")
+        bar_syms   = df_sig_display["Symbol"].tolist()
+        bar_scores = df_sig_display["Score"].tolist()
+        bar_cols   = []
+        for s in bar_scores:
+            if s >= 70:   bar_cols.append("#26a65b")
+            elif s >= 55: bar_cols.append("#82c91e")
+            elif s >= 45: bar_cols.append("#868e96")
+            elif s >= 30: bar_cols.append("#fd7e14")
+            else:         bar_cols.append("#e74c3c")
+
+        fig_sig = go.Figure(go.Bar(
+            x=bar_syms, y=bar_scores,
+            marker_color=bar_cols,
+            text=[str(s) for s in bar_scores],
+            textposition="outside",
+        ))
+        fig_sig.add_hline(y=70, line_dash="dot", line_color="#26a65b",
+                          annotation_text="Bullish threshold (70)")
+        fig_sig.add_hline(y=50, line_dash="dot", line_color="gray",
+                          annotation_text="Neutral (50)")
+        fig_sig.add_hline(y=30, line_dash="dot", line_color="#e74c3c",
+                          annotation_text="Bearish threshold (30)")
+        fig_sig.update_layout(
+            height=400, template="plotly_dark",
+            yaxis_title="Signal Score", yaxis_range=[0, 110],
+            margin=dict(l=0, r=0, t=30, b=0),
+        )
+        st.plotly_chart(fig_sig, use_container_width=True)
+
+        # ── RSI scatter ──
+        st.write("### 🔵 RSI vs Score Scatter")
+        df_rsi_plot = df_sig_display.dropna(subset=["RSI"])
+        fig_rsi = go.Figure(go.Scatter(
+            x=df_rsi_plot["RSI"], y=df_rsi_plot["Score"],
+            mode="markers+text",
+            text=df_rsi_plot["Symbol"],
+            textposition="top center",
+            marker=dict(
+                color=df_rsi_plot["Score"],
+                colorscale="RdYlGn",
+                size=10,
+                showscale=True,
+                colorbar=dict(title="Score"),
+            )
+        ))
+        fig_rsi.add_vline(x=30, line_dash="dot", line_color="#26a65b",
+                          annotation_text="RSI 30 (oversold)")
+        fig_rsi.add_vline(x=70, line_dash="dot", line_color="#e74c3c",
+                          annotation_text="RSI 70 (overbought)")
+        fig_rsi.update_layout(
+            height=400, template="plotly_dark",
+            xaxis_title="RSI", yaxis_title="Signal Score",
+            margin=dict(l=0, r=0, t=30, b=0),
+        )
+        st.plotly_chart(fig_rsi, use_container_width=True)
+
+    else:
+        st.info("👆 Click **Run Signal Scan** to score all 74 stocks.")
+
+# ════════════════════════════════════════════
+# TAB 3 — BACKTESTING
 # ════════════════════════════════════════════
 with tab_backtest:
     st.write("## 🧪 Backtest Strategy on Yahoo Finance Data")
@@ -916,6 +1221,10 @@ with tab_portfolio:
                         _, _, buy_trend = profile(sym) if p_use_profile else (p_hard_sl, p_trail, p_trend)
 
                         if price > avg20 * (1 + buy_trend):
+                            # RSI/MACD confirmation
+                            df_slice_p = all_data[sym].loc[:ts]
+                            if not rsi_macd_confirmed_buy(df_slice_p):
+                                continue
                             qty  = round(p_max_trade / price, 6)
                             cost = qty * price
                             if qty <= 0 or cash < cost:
