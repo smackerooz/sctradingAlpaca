@@ -398,16 +398,14 @@ def rsi_macd_confirmed_buy(df: pd.DataFrame) -> bool:
     return (rsi_val < 70) and (hist_val > 0)
 
 def sell_limit(symbol: str, qty, current_price: float, reason: str):
-    limit_p = round(current_price - 0.05, 2)
-    trading_client.submit_order(LimitOrderRequest(
+    trading_client.submit_order(MarketOrderRequest(
         symbol=symbol,
         qty=qty,
         side=OrderSide.SELL,
-        limit_price=limit_p,
         time_in_force=TimeInForce.DAY,
     ))
     st.session_state.peak_prices.pop(symbol, None)
-    log(f"{reason} | SELL {qty} {symbol} @ limit ${limit_p:.2f}")
+    log(f"{reason} | SELL {qty} {symbol} @ MARKET (last ${current_price:.2f})")
 
 # ─────────────────────────────────────────────
 # 5. STRATEGY ENGINE
@@ -480,10 +478,14 @@ def run_strategy():
                     log(f"⚠️ SKIP {symbol} — could not calculate valid qty")
                     continue
                 actual_cost = round(qty * curr_p, 2)
+                if cash - actual_cost < CASH_BUFFER:
+                    log(f"💤 SKIP {symbol} — buying would breach cash buffer (${cash:.2f} - ${actual_cost:.2f} < ${CASH_BUFFER:,.0f})")
+                    continue
                 trading_client.submit_order(MarketOrderRequest(
                     symbol=symbol, qty=qty,
                     side=OrderSide.BUY, time_in_force=TimeInForce.DAY
                 ))
+                cash -= actual_cost
                 st.session_state.peak_prices[symbol] = curr_p
                 log(f"🟢 BUY {qty} {symbol} @ ${curr_p:.2f} = ${actual_cost:.2f} (SMA5 > SMA20)")
         except Exception as e:
