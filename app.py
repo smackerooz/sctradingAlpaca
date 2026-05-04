@@ -18,6 +18,22 @@ from alpaca.data.timeframe import TimeFrame
 st.set_page_config(page_title="Trading Bot", page_icon="📈", layout="wide")
 
 # ─────────────────────────────────────────────
+# KEEPALIVE — Prevents Streamlit Cloud from sleeping
+# ─────────────────────────────────────────────
+import streamlit.components.v1 as components
+components.html(
+    """
+    <script>
+    // Ping the server every 5 minutes to prevent Streamlit Cloud sleep
+    setInterval(function() {
+        fetch(window.location.href);
+    }, 300000);
+    </script>
+    """,
+    height=0,
+)
+
+# ─────────────────────────────────────────────
 # 1. INITIALIZE CLIENTS
 # ─────────────────────────────────────────────
 try:
@@ -142,10 +158,12 @@ if "nightly_baseline" not in st.session_state:
         st.session_state.nightly_baseline = 100_000.0
 
 # ── Auto-start: bot is RUNNING by default ──
-if "bot_running"  not in st.session_state: st.session_state.bot_running  = True
-if "last_scan"    not in st.session_state: st.session_state.last_scan    = None
-if "scan_log"     not in st.session_state: st.session_state.scan_log     = []
-if "peak_prices"  not in st.session_state: st.session_state.peak_prices  = {}
+if "bot_running"      not in st.session_state: st.session_state.bot_running      = True
+if "last_scan"        not in st.session_state: st.session_state.last_scan        = None
+if "scan_log"         not in st.session_state: st.session_state.scan_log         = []
+if "peak_prices"      not in st.session_state: st.session_state.peak_prices      = {}
+if "signal_results"   not in st.session_state: st.session_state.signal_results   = None
+if "live_signal_time" not in st.session_state: st.session_state.live_signal_time = None
 
 # ─────────────────────────────────────────────
 # 4. HELPERS
@@ -671,6 +689,94 @@ with tab_live:
         st.caption(f"📊 Total holdings value: **${total_holdings:,.2f}** across {len(positions)} position(s)")
     else:
         st.success("✅ Account is 100% Cash.")
+
+    # ── Signal Rankings Widget ───────────────────────────────────────────
+    st.write("### 📡 Live Signal Rankings")
+    lsr_col1, lsr_col2 = st.columns([3, 1])
+    with lsr_col2:
+        run_live_signals = st.button("🔄 Refresh Rankings", use_container_width=True, key="live_sig_btn")
+
+    if run_live_signals:
+        live_scan_rows = []
+        live_bar = st.progress(0, text="Scanning signals...")
+        for idx, sym in enumerate(WATCHLIST):
+            live_bar.progress(idx / len(WATCHLIST), text=f"Scanning {sym}...")
+            try:
+                df_ls = yf.download(sym, period="1mo", interval="1h", progress=False)
+                if df_ls.empty:
+                    continue
+                df_ls = df_ls[["Close"]].copy()
+                df_ls.columns = ["close"]
+                sig = compute_signal_score(df_ls)
+                live_scan_rows.append({
+                    "Symbol":   sym,
+                    "Score":    sig["score"],
+                    "Signal":   sig["direction"],
+                    "RSI":      sig["rsi"],
+                    "MACD Hist": sig["macd_hist"],
+                })
+            except:
+                pass
+        live_bar.progress(1.0, text="✅ Done!")
+        df_live_sig = pd.DataFrame(live_scan_rows).sort_values("Score", ascending=False).reset_index(drop=True)
+        df_live_sig.insert(0, "Rank", range(1, len(df_live_sig) + 1))
+        st.session_state.signal_results   = df_live_sig
+        st.session_state.live_signal_time = datetime.now(SGT)
+
+    if st.session_state.signal_results is not None:
+        df_ls_display = st.session_state.signal_results.copy()
+        ts_label = st.session_state.live_signal_time.strftime("%H:%M:%S SGT") if st.session_state.live_signal_time else "—"
+
+        with lsr_col1:
+            bull_n = len(df_ls_display[df_ls_display["Score"] >= 55])
+            bear_n = len(df_ls_display[df_ls_display["Score"] <= 45])
+            neut_n = len(df_ls_display) - bull_n - bear_n
+            st.caption(f"Last updated: **{ts_label}** | 🟢 Bullish: {bull_n} | ⚪ Neutral: {neut_n} | 🔴 Bearish: {bear_n}")
+
+        # ── Top 10 Bullish & Top 10 Bearish side by side ──
+        top_bull_df = df_ls_display.head(10)[["Rank", "Symbol", "Score", "Signal", "RSI", "MACD Hist"]]
+        top_bear_df = df_ls_display.tail(10).sort_values("Score")[["Rank", "Symbol", "Score", "Signal", "RSI", "MACD Hist"]]
+
+        bull_col, bear_col = st.columns(2)
+        with bull_col:
+            st.markdown("**🟢 Top 10 Bullish**")
+            st.dataframe(top_bull_df, use_container_width=True, hide_index=True, height=370)
+        with bear_col:
+            st.markdown("**🔴 Top 10 Bearish**")
+            st.dataframe(top_bear_df, use_container_width=True, hide_index=True, height=370)
+
+        # ── Signal score mini bar chart ──
+        bar_syms_l   = df_ls_display["Symbol"].tolist()
+        bar_scores_l = df_ls_display["Score"].tolist()
+        bar_cols_l   = ["#26a65b" if s >= 55 else ("#e74c3c" if s <= 45 else "#868e96") for s in bar_scores_l]
+        fig_ls = go.Figure(go.Bar(
+            x=bar_syms_l, y=bar_scores_l,
+            marker_color=bar_cols_l,
+            text=[str(s) for s in bar_scores_l],
+            textposition="outside",
+        ))
+        fig_ls.add_hline(y=55, line_dash="dot", line_color="#26a65b", annotation_text="Bullish (55)")
+        fig_ls.add_hline(y=45, line_dash="dot", line_color="#e74c3c", annotation_text="Bearish (45)")
+        fig_ls.update_layout(
+            height=300, template="plotly_dark",
+            yaxis_title="Signal Score", yaxis_range=[0, 115],
+            margin=dict(l=0, r=0, t=20, b=0),
+        )
+        st.plotly_chart(fig_ls, use_container_width=True)
+
+        # ── Holdings signal overlay: show score for currently held stocks ──
+        if positions:
+            held_syms = [p.symbol for p in positions]
+            held_sigs = df_ls_display[df_ls_display["Symbol"].isin(held_syms)][
+                ["Symbol", "Rank", "Score", "Signal", "RSI", "MACD Hist"]
+            ]
+            if not held_sigs.empty:
+                st.markdown("**📦 Signal Scores for Current Holdings**")
+                st.dataframe(held_sigs, use_container_width=True, hide_index=True)
+    else:
+        st.info("👆 Click **Refresh Rankings** to load signal scores for all 74 stocks.")
+
+    st.divider()
 
     # ── Today's trades ──
     with st.expander("📊 Today's Completed Trades", expanded=False):
