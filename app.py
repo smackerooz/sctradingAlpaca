@@ -268,9 +268,9 @@ def run_strategy():
 
             if current_p > avg_price * (1 + buy_trend):
                 # Dollar-based sizing: buy as many whole shares as fit in MAX_TRADE_USD
-                qty = int(MAX_TRADE_USD // current_p)
-                if qty < 1:
-                    log(f"⚠️ SKIP {symbol} — price ${current_p:.2f} exceeds trade budget ${MAX_TRADE_USD:.0f}")
+                qty = round(MAX_TRADE_USD / current_p, 6)  # fractional shares supported
+                if qty <= 0:
+                    log(f"⚠️ SKIP {symbol} — could not calculate valid qty")
                     continue
                 actual_cost = round(qty * current_p, 2)
                 trading_client.submit_order(MarketOrderRequest(
@@ -301,8 +301,8 @@ def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy
     df["avg_20"] = df["close"].rolling(20).mean()
     df.dropna(inplace=True)
 
-    cash        = 100_000.0
-    position    = 0       # shares held
+    cash        = 10_000.0   # max starting capital for live app
+    position    = 0.0     # shares held (fractional)
     entry_price = 0.0
     peak_price  = 0.0
     trades      = []
@@ -341,9 +341,9 @@ def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy
         # ── Buy logic ──
         elif position == 0:
             if price > avg_20 * (1 + buy_trend):
-                qty  = int(max_trade_usd // price)   # dollar-based sizing
+                qty  = round(max_trade_usd / price, 6)  # fractional shares supported
                 cost = qty * price
-                if qty < 1 or cash < cost:
+                if qty <= 0 or cash < cost:
                     continue
                 cash        -= cost
                 position     = qty
@@ -360,7 +360,7 @@ def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy
                     "Cash":       round(cash, 2),
                 })
 
-    # Close any open position at last price
+    # Close any open position at last price (includes fractional)
     final_equity = cash + (position * float(df["close"].iloc[-1]))
 
     sells       = [t for t in trades if "SELL" in t["Action"]]
@@ -372,7 +372,7 @@ def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy
     results = {
         "symbol":        symbol,
         "period":        period,
-        "start_cash":    100_000.0,
+        "start_cash":    10_000.0,
         "final_equity":  round(final_equity, 2),
         "total_pl":      round(total_pl, 2),
         "total_trades":  len(sells),
