@@ -96,9 +96,9 @@ except Exception as e:
 # ─────────────────────────────────────────────
 SGT             = pytz.timezone('Asia/Singapore')
 TARGET_PROFIT   = 200.0      # USD — weekly target
-CASH_BUFFER     = 6_000.0    # Min cash before buying (keep ~60% of $10k as buffer)
+CASH_BUFFER     = 95_000.0    # Min cash before buying (keep ~50% of $10k as buffer)
 SCAN_INTERVAL   = 30         # seconds between auto-scans
-MAX_TRADE_USD   = 350.0      # max dollars to spend per trade (~3.5% of $10k capital)
+MAX_TRADE_USD   = 100.0      # max dollars to spend per trade
 
 # ── Per-stock volatility profiles ──────────────────────────────────────────
 # (hard_stop_loss_pct, trailing_stop_pct, buy_trend_pct)
