@@ -23,14 +23,61 @@ st.set_page_config(page_title="Trading Bot", page_icon="📈", layout="wide")
 import streamlit.components.v1 as components
 components.html(
     """
+    <div style="
+        font-family: monospace;
+        font-size: 12px;
+        color: #aaa;
+        background: #1a1a2e;
+        border: 1px solid #333;
+        border-radius: 6px;
+        padding: 5px 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 4px;
+    ">
+        <span style="color:#26a65b; font-size:10px;">●</span>
+        <span>Keepalive ping in: <strong id="countdown" style="color:#4f8ef7;">5:00</strong></span>
+        <span id="ping_status" style="color:#aaa; font-size:11px;"></span>
+    </div>
     <script>
-    // Ping the server every 5 minutes to prevent Streamlit Cloud sleep
-    setInterval(function() {
-        fetch(window.location.href);
-    }, 300000);
+    var totalSeconds = 300;
+    var remaining = totalSeconds;
+
+    function updateCountdown() {
+        var mins = Math.floor(remaining / 60);
+        var secs = remaining % 60;
+        document.getElementById('countdown').textContent =
+            mins + ':' + (secs < 10 ? '0' : '') + secs;
+
+        if (remaining <= 10) {
+            document.getElementById('countdown').style.color = '#e74c3c';
+        } else if (remaining <= 60) {
+            document.getElementById('countdown').style.color = '#f0a500';
+        } else {
+            document.getElementById('countdown').style.color = '#4f8ef7';
+        }
+
+        if (remaining <= 0) {
+            fetch(window.location.href).then(function() {
+                document.getElementById('ping_status').textContent = '✅ Pinged!';
+                setTimeout(function() {
+                    document.getElementById('ping_status').textContent = '';
+                }, 3000);
+            }).catch(function() {
+                document.getElementById('ping_status').textContent = '⚠️ Ping failed';
+            });
+            remaining = totalSeconds;
+        } else {
+            remaining--;
+        }
+    }
+
+    updateCountdown();
+    setInterval(updateCountdown, 1000);
     </script>
     """,
-    height=0,
+    height=40,
 )
 
 # ─────────────────────────────────────────────
