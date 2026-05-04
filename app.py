@@ -59,14 +59,13 @@ components.html(
         }
 
         if (remaining <= 0) {
-            fetch(window.location.href).then(function() {
-                document.getElementById('ping_status').textContent = '✅ Pinged!';
-                setTimeout(function() {
-                    document.getElementById('ping_status').textContent = '';
-                }, 3000);
-            }).catch(function() {
-                document.getElementById('ping_status').textContent = '⚠️ Ping failed';
-            });
+            try {
+                fetch(window.location.href, {mode: 'no-cors', cache: 'no-store'});
+            } catch(e) {}
+            document.getElementById('ping_status').textContent = '✅ Pinged!';
+            setTimeout(function() {
+                document.getElementById('ping_status').textContent = '';
+            }, 3000);
             remaining = totalSeconds;
         } else {
             remaining--;
