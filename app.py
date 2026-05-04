@@ -94,11 +94,11 @@ except Exception as e:
 # ─────────────────────────────────────────────
 # 2. CONSTANTS & CONFIG
 # ─────────────────────────────────────────────
-SGT           = pytz.timezone('Asia/Singapore')
-TARGET_PROFIT = 150.0      # USD (~200 SGD)
-CASH_BUFFER   = 90_000.0   # Min cash before buying
-SCAN_INTERVAL   = 30        # seconds between auto-scans
-MAX_TRADE_USD   = 500.0     # max dollars to spend per trade (dollar-based sizing)
+SGT             = pytz.timezone('Asia/Singapore')
+TARGET_PROFIT   = 200.0      # USD — weekly target
+CASH_BUFFER     = 6_000.0    # Min cash before buying (keep ~60% of $10k as buffer)
+SCAN_INTERVAL   = 30         # seconds between auto-scans
+MAX_TRADE_USD   = 350.0      # max dollars to spend per trade (~3.5% of $10k capital)
 
 # ── Per-stock volatility profiles ──────────────────────────────────────────
 # (hard_stop_loss_pct, trailing_stop_pct, buy_trend_pct)
@@ -201,7 +201,7 @@ if "nightly_baseline" not in st.session_state:
     try:
         st.session_state.nightly_baseline = float(trading_client.get_account().last_equity)
     except:
-        st.session_state.nightly_baseline = 100_000.0
+        st.session_state.nightly_baseline = 10_000.0
 
 # ── Auto-start: bot is RUNNING by default ──
 if "bot_running"      not in st.session_state: st.session_state.bot_running      = True
@@ -235,9 +235,10 @@ def is_eod_window() -> bool:
 
 def reset_baseline_if_needed():
     now = datetime.now(SGT)
-    if now.hour == 21 and now.minute == 30:
+    # Reset weekly baseline every Monday at 21:30 SGT (US Monday market open)
+    if now.weekday() == 0 and now.hour == 21 and now.minute == 30:
         st.session_state.nightly_baseline = float(trading_client.get_account().equity)
-        log("🔄 Baseline reset at 21:30 SGT")
+        log("🔄 Weekly baseline reset — Monday 21:30 SGT")
 
 def profile(symbol: str):
     return STOCK_PROFILES.get(symbol, (0.013, 0.008, 0.006))
@@ -636,7 +637,7 @@ combined     = round(unrealized + realized, 2)
 # ─────────────────────────────────────────────
 with st.sidebar:
     st.header("🕹️ Bot Controls")
-    st.metric("Session Baseline", f"${st.session_state.nightly_baseline:,.2f}")
+    st.metric("Weekly Baseline", f"${st.session_state.nightly_baseline:,.2f}")
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -698,7 +699,7 @@ tab_live, tab_signals, tab_backtest, tab_portfolio = st.tabs(["🔴 Live Trading
 # TAB 1 — LIVE TRADING
 # ════════════════════════════════════════════
 with tab_live:
-    st.write(f"## 🎯 Goal: ${TARGET_PROFIT:.0f} USD (~200 SGD)")
+    st.write(f"## 🎯 Weekly Goal: ${TARGET_PROFIT:.0f} USD")
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Total Equity",      f"${EQUITY:,.2f}",        delta=float(combined))
@@ -706,7 +707,7 @@ with tab_live:
     c3.metric("Total in Holdings", f"${total_holdings:,.2f}")
     c4.metric("Realized P&L",      f"${realized:,.2f}")
     c5.metric("Unrealized P&L",    f"${unrealized:,.2f}")
-    st.progress(progress_pct, text=f"Goal Progress: {int(progress_pct*100)}%")
+    st.progress(progress_pct, text=f"Weekly Goal Progress: ${realized:.2f} / ${TARGET_PROFIT:.0f} ({int(progress_pct*100)}%)")
 
     # ── Holdings ──
     st.write("### 📦 Live Holdings")
