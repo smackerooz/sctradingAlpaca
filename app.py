@@ -1509,5 +1509,3 @@ if st.session_state.bot_running:
     run_strategy()
     time.sleep(SCAN_INTERVAL)
     st.rerun()
-
-this is the current app.py
