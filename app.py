@@ -35,8 +35,8 @@ except Exception as e:
 SGT           = pytz.timezone('Asia/Singapore')
 TARGET_PROFIT = 150.0      # USD (~200 SGD)
 CASH_BUFFER   = 90_000.0   # Min cash before buying
-SCAN_INTERVAL = 30         # seconds between auto-scans
-BUY_QTY       = 5          # shares per order
+SCAN_INTERVAL   = 30        # seconds between auto-scans
+MAX_TRADE_USD   = 500.0     # max dollars to spend per trade (dollar-based sizing)
 
 # ── Per-stock volatility profiles ──────────────────────────────────────────
 # (hard_stop_loss_pct, trailing_stop_pct, buy_trend_pct)
@@ -48,88 +48,15 @@ BUY_QTY       = 5          # shares per order
 #  buy_trend_pct      : price must be this % above 20-min avg to trigger a buy
 # ───────────────────────────────────────────────────────────────────────────
 STOCK_PROFILES = {
-    # ── 🔵 Low Volatility (Beta < 0.8) ───────────────────────────
-    # (hard_sl, trail, buy_trend)
-    "AAPL"  : (0.010, 0.006, 0.004),   # Apple
-    "MSFT"  : (0.010, 0.006, 0.004),   # Microsoft
-    "GOOGL" : (0.010, 0.006, 0.004),   # Alphabet
-    "JPM"   : (0.010, 0.006, 0.004),   # JPMorgan Chase
-    "V"     : (0.010, 0.006, 0.004),   # Visa
-    "MA"    : (0.010, 0.006, 0.004),   # Mastercard
-    "PG"    : (0.010, 0.006, 0.004),   # Procter & Gamble
-    "WMT"   : (0.010, 0.006, 0.004),   # Walmart
-    "COST"  : (0.010, 0.006, 0.004),   # Costco
-    "KO"    : (0.010, 0.006, 0.004),   # Coca-Cola
-    "PEP"   : (0.010, 0.006, 0.004),   # PepsiCo
-    "PFE"   : (0.010, 0.006, 0.004),   # Pfizer
-    "UNH"   : (0.010, 0.006, 0.004),   # UnitedHealth
-    "HD"    : (0.010, 0.006, 0.004),   # Home Depot
-    "CSCO"  : (0.010, 0.006, 0.004),   # Cisco
-    "ORCL"  : (0.010, 0.006, 0.004),   # Oracle
-    "TXN"   : (0.010, 0.006, 0.004),   # Texas Instruments
-    "HON"   : (0.010, 0.006, 0.004),   # Honeywell
-    "MMM"   : (0.010, 0.006, 0.004),   # 3M
-    "T"     : (0.010, 0.006, 0.004),   # AT&T
-    "VZ"    : (0.010, 0.006, 0.004),   # Verizon
-    "TMUS"  : (0.010, 0.006, 0.004),   # T-Mobile
-    "ABBV"  : (0.010, 0.006, 0.004),   # AbbVie
-    "LOW"   : (0.010, 0.006, 0.004),   # Lowe's
-    "UPS"   : (0.010, 0.006, 0.004),   # UPS
-
-    # ── 🟡 Mid Volatility (Beta 0.8 – 1.2) ───────────────────────
-    "AMZN"  : (0.013, 0.008, 0.006),   # Amazon
-    "META"  : (0.013, 0.008, 0.006),   # Meta Platforms
-    "AVGO"  : (0.013, 0.008, 0.006),   # Broadcom
-    "ADBE"  : (0.013, 0.008, 0.006),   # Adobe
-    "CRM"   : (0.013, 0.008, 0.006),   # Salesforce
-    "INTC"  : (0.013, 0.008, 0.006),   # Intel
-    "QCOM"  : (0.013, 0.008, 0.006),   # Qualcomm
-    "AMAT"  : (0.013, 0.008, 0.006),   # Applied Materials
-    "ASML"  : (0.013, 0.008, 0.006),   # ASML Holding
-    "DIS"   : (0.013, 0.008, 0.006),   # Disney
-    "XOM"   : (0.013, 0.008, 0.006),   # ExxonMobil
-    "CVX"   : (0.013, 0.008, 0.006),   # Chevron
-    "CAT"   : (0.013, 0.008, 0.006),   # Caterpillar
-    "GE"    : (0.013, 0.008, 0.006),   # General Electric
-    "FDX"   : (0.013, 0.008, 0.006),   # FedEx
-    "LMT"   : (0.013, 0.008, 0.006),   # Lockheed Martin
-    "TMO"   : (0.013, 0.008, 0.006),   # Thermo Fisher
-    "AZN"   : (0.013, 0.008, 0.006),   # AstraZeneca
-    "NKE"   : (0.013, 0.008, 0.006),   # Nike
-    "SBUX"  : (0.013, 0.008, 0.006),   # Starbucks
-    "ZM"    : (0.013, 0.008, 0.006),   # Zoom
-    "IBM"   : (0.013, 0.008, 0.006),   # IBM
-    "DE"    : (0.013, 0.008, 0.006),   # John Deere
-    "GS"    : (0.013, 0.008, 0.006),   # Goldman Sachs
-    "BLK"   : (0.013, 0.008, 0.006),   # BlackRock
-
-    # ── 🔴 High Volatility (Beta > 1.2) ──────────────────────────
-    "NVDA"  : (0.018, 0.010, 0.008),   # Nvidia
-    "TSLA"  : (0.020, 0.012, 0.009),   # Tesla
-    "AMD"   : (0.015, 0.009, 0.007),   # AMD
-    "NFLX"  : (0.015, 0.009, 0.007),   # Netflix
-    "MU"    : (0.015, 0.009, 0.007),   # Micron
-    "BA"    : (0.015, 0.009, 0.007),   # Boeing
-    "LLY"   : (0.015, 0.009, 0.007),   # Eli Lilly
-    "PYPL"  : (0.015, 0.009, 0.007),   # PayPal
-    "SQ"    : (0.018, 0.010, 0.008),   # Block
-    "UBER"  : (0.018, 0.010, 0.008),   # Uber
-    "ABNB"  : (0.018, 0.010, 0.008),   # Airbnb
-    "SNOW"  : (0.018, 0.010, 0.008),   # Snowflake
-    "PLTR"  : (0.018, 0.010, 0.008),   # Palantir
-    "BABA"  : (0.018, 0.010, 0.008),   # Alibaba
-    "JD"    : (0.018, 0.010, 0.008),   # JD.com
-    "PDD"   : (0.020, 0.012, 0.009),   # Pinduoduo
-    "SHOP"  : (0.018, 0.010, 0.008),   # Shopify
-    "LCID"  : (0.020, 0.012, 0.009),   # Lucid
-    "RIVN"  : (0.020, 0.012, 0.009),   # Rivian
-    "COIN"  : (0.020, 0.012, 0.009),   # Coinbase
-    "MSTR"  : (0.020, 0.012, 0.009),   # MicroStrategy
-    "MARA"  : (0.020, 0.012, 0.009),   # Marathon Digital
-    "RIOT"  : (0.020, 0.012, 0.009),   # Riot Platforms
-    "DKNG"  : (0.018, 0.010, 0.008),   # DraftKings
+    "AAPL"  : (0.010, 0.006, 0.004),   # low volatility
+    "MSFT"  : (0.010, 0.006, 0.004),   # low volatility
+    "GOOGL" : (0.010, 0.006, 0.004),   # low volatility
+    "AMZN"  : (0.012, 0.007, 0.005),   # low-mid volatility
+    "META"  : (0.013, 0.008, 0.006),   # mid volatility
+    "AMD"   : (0.015, 0.009, 0.007),   # mid-high volatility
+    "NVDA"  : (0.018, 0.010, 0.008),   # high volatility
+    "TSLA"  : (0.020, 0.012, 0.009),   # high volatility
 }
-
 WATCHLIST = list(STOCK_PROFILES.keys())
 
 # ─────────────────────────────────────────────
@@ -267,12 +194,18 @@ def run_strategy():
             current_p = df["close"].iloc[-1]
 
             if current_p > avg_price * (1 + buy_trend):
+                # Dollar-based sizing: buy as many whole shares as fit in MAX_TRADE_USD
+                qty = int(MAX_TRADE_USD // current_p)
+                if qty < 1:
+                    log(f"⚠️ SKIP {symbol} — price ${current_p:.2f} exceeds trade budget ${MAX_TRADE_USD:.0f}")
+                    continue
+                actual_cost = round(qty * current_p, 2)
                 trading_client.submit_order(MarketOrderRequest(
-                    symbol=symbol, qty=BUY_QTY,
+                    symbol=symbol, qty=qty,
                     side=OrderSide.BUY, time_in_force=TimeInForce.DAY
                 ))
                 st.session_state.peak_prices[symbol] = current_p
-                log(f"🟢 BUY {BUY_QTY} {symbol} | ${current_p:.2f} vs avg ${avg_price:.2f} (trend +{buy_trend*100:.1f}%)")
+                log(f"🟢 BUY {qty} {symbol} @ ${current_p:.2f} = ${actual_cost:.2f} (budget ${MAX_TRADE_USD:.0f}, trend +{buy_trend*100:.1f}%)")
         except Exception as e:
             log(f"⚠️ Buy scan error {symbol}: {e}")
 
@@ -281,7 +214,7 @@ def run_strategy():
 # ─────────────────────────────────────────────
 # 6. BACKTESTING ENGINE (Yahoo Finance)
 # ─────────────────────────────────────────────
-def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy_trend: float, qty: int):
+def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy_trend: float, max_trade_usd: float):
     """
     Simulates the trailing stop strategy on historical Yahoo Finance data.
     Returns a results dict and trade log DataFrame.
@@ -296,7 +229,7 @@ def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy
     df.dropna(inplace=True)
 
     cash        = 100_000.0
-    position    = 0
+    position    = 0       # shares held
     entry_price = 0.0
     peak_price  = 0.0
     trades      = []
@@ -333,21 +266,25 @@ def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy
                 peak_price  = 0.0
 
         # ── Buy logic ──
-        elif position == 0 and cash > price * qty:
+        elif position == 0:
             if price > avg_20 * (1 + buy_trend):
-                cost         = price * qty
+                qty  = int(max_trade_usd // price)   # dollar-based sizing
+                cost = qty * price
+                if qty < 1 or cash < cost:
+                    continue
                 cash        -= cost
                 position     = qty
                 entry_price  = price
                 peak_price   = price
                 trades.append({
-                    "Date":    str(ts)[:16],
-                    "Action":  "BUY",
-                    "Price":   round(price, 2),
-                    "Qty":     qty,
-                    "P&L ($)": 0.0,
-                    "P&L (%)": "0.00%",
-                    "Cash":    round(cash, 2),
+                    "Date":       str(ts)[:16],
+                    "Action":     "BUY",
+                    "Price":      round(price, 2),
+                    "Qty":        qty,
+                    "Cost ($)":   round(cost, 2),
+                    "P&L ($)":    0.0,
+                    "P&L (%)":    "0.00%",
+                    "Cash":       round(cash, 2),
                 })
 
     # Close any open position at last price
@@ -440,6 +377,7 @@ with st.sidebar:
     if st.session_state.last_scan:
         st.write(f"**Last scan:** {st.session_state.last_scan.strftime('%H:%M:%S')} SGT")
     st.write(f"**Scan interval:** {SCAN_INTERVAL}s")
+    st.write(f"**Trade budget:** ${MAX_TRADE_USD:,.0f} per trade")
 
     st.divider()
     st.write("**Per-stock profiles:**")
@@ -543,7 +481,9 @@ with tab_backtest:
     with cfg1:
         bt_period = st.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y"], index=1)
     with cfg2:
-        bt_qty = st.number_input("Qty per trade", min_value=1, max_value=100, value=5)
+        bt_max_usd = st.number_input("Max $ per trade", min_value=100, max_value=50000,
+                                     value=500, step=100,
+                                     help="Dollar budget per trade — bot buys as many whole shares as fit")
     with cfg3:
         use_profile = st.checkbox("Use per-stock profiles", value=True,
                                   help="Uncheck to apply the same params to all stocks")
@@ -581,7 +521,7 @@ with tab_backtest:
             progress_bar.progress((idx) / len(WATCHLIST),
                                   text=f"Running {sym} ({idx+1}/{len(WATCHLIST)})...")
             hard_sl, trail, trend = profile(sym) if use_profile else (ov_hard_sl, ov_trail, ov_trend)
-            res, tlog = run_backtest(sym, bt_period, hard_sl, trail, trend, bt_qty)
+            res, tlog = run_backtest(sym, bt_period, hard_sl, trail, trend, bt_max_usd)
             if res:
                 all_results.append(res)
                 all_trades[sym] = tlog
@@ -682,7 +622,7 @@ with tab_backtest:
         hard_sl, trail, trend = profile(bt_symbol) if use_profile else (ov_hard_sl, ov_trail, ov_trend)
 
         with st.spinner(f"Downloading {bt_symbol} data and simulating..."):
-            results, trade_log = run_backtest(bt_symbol, bt_period, hard_sl, trail, trend, bt_qty)
+            results, trade_log = run_backtest(bt_symbol, bt_period, hard_sl, trail, trend, bt_max_usd)
 
         if results is None:
             st.error("No data returned from Yahoo Finance. Try a different symbol or period.")
