@@ -98,7 +98,7 @@ SGT             = pytz.timezone('Asia/Singapore')
 TARGET_PROFIT   = 200.0      # USD — weekly target
 CASH_BUFFER     = 6_000.0    # Min cash before buying (keep ~60% of $10k as buffer)
 SCAN_INTERVAL   = 30         # seconds between auto-scans
-MAX_TRADE_USD   = 100.0      # max dollars to spend per trade (~3.5% of $10k capital)
+MAX_TRADE_USD   = 350.0      # max dollars to spend per trade (~3.5% of $10k capital)
 
 # ── Per-stock volatility profiles ──────────────────────────────────────────
 # (hard_stop_loss_pct, trailing_stop_pct, buy_trend_pct)
@@ -192,8 +192,16 @@ STOCK_PROFILES = {
     "DKNG"  : (0.018, 0.010, 0.008),   # DraftKings
 }
 
-# ── Full 74-stock watchlist ──────────────────────────────────────────────
-WATCHLIST = list(STOCK_PROFILES.keys())
+# ── Recommended 20-stock watchlist (balanced across volatility tiers) ──────
+WATCHLIST = [
+    # Low Volatility
+    "AAPL", "MSFT", "GOOGL", "JPM", "V",
+    "PG", "WMT", "KO", "UNH", "HD",
+    # Mid Volatility
+    "AMZN", "META", "AVGO", "DIS", "GS",
+    # High Volatility
+    "NVDA", "TSLA", "AMD", "NFLX", "COIN",
+]
 
 # ─────────────────────────────────────────────
 # 3. SESSION STATE INIT
@@ -221,14 +229,18 @@ def log(msg: str):
     st.session_state.scan_log.insert(0, entry)
     st.session_state.scan_log = st.session_state.scan_log[:100]
 
-def get_bars(symbol: str, minutes: int = 60) -> pd.DataFrame:
-    req  = StockBarsRequest(
-        symbol_or_symbols=[symbol],
-        timeframe=TimeFrame.Minute,
-        start=datetime.now() - timedelta(minutes=minutes),
-    )
-    bars = data_client.get_stock_bars(req)
-    return bars.df
+def get_bars(symbol: str) -> pd.DataFrame:
+    """Fetch 1-min intraday bars via yfinance (matches old bot logic)."""
+    try:
+        data = yf.download(symbol, period="1d", interval="1m", progress=False)
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+        if data.empty:
+            return pd.DataFrame()
+        data = data.rename(columns={"Close": "close", "Open": "open", "High": "high", "Low": "low", "Volume": "volume"})
+        return data[["close"]].copy()
+    except Exception:
+        return pd.DataFrame()
 
 def is_eod_window() -> bool:
     """Returns True only on Friday (weekday=4) near US market close (03:45–03:55 SGT = Friday 15:45–15:55 ET)."""
@@ -434,37 +446,26 @@ def run_strategy():
                 log(f"⚠️ EOW sell error {p.symbol}: {e}")
         return
 
-    # ── Intraday exit: trailing stop + hard stop loss ────────────────────
+    # ── Intraday exit: +2% take-profit OR SMA5 < SMA20 trend reversal ──────
     for sym, p in held.items():
-        hard_sl, trail_pct, _ = profile(sym)
-        entry_price = float(p.avg_entry_price)
-        current_p   = float(p.current_price)
-        pl_pct      = float(p.unrealized_plpc)
-
-        # Update peak price tracker
-        prev_peak = st.session_state.peak_prices.get(sym, entry_price)
-        peak      = max(prev_peak, current_p)
-        st.session_state.peak_prices[sym] = peak
-
-        # Trailing stop activates once price moves up at least half the trail distance
-        gain_from_entry   = (peak - entry_price) / entry_price
-        trail_active      = gain_from_entry >= (trail_pct * 0.5)
-        trail_stop_price  = peak * (1 - trail_pct)
-        trail_hit         = trail_active and (current_p <= trail_stop_price)
-        hard_sl_hit       = pl_pct <= -hard_sl
-
         try:
-            if hard_sl_hit:
-                sell_limit(sym, p.qty, current_p,
-                    f"🛑 HARD STOP ({pl_pct*100:.2f}%, threshold -{hard_sl*100:.1f}%)")
-            elif trail_hit:
-                locked = (current_p - entry_price) / entry_price * 100
-                sell_limit(sym, p.qty, current_p,
-                    f"📉 TRAIL STOP (peak ${peak:.2f} → ${current_p:.2f}, locked {locked:+.2f}%)")
+            df = get_bars(sym)
+            if df.empty or len(df) < 20:
+                continue
+            curr_p    = float(df["close"].iloc[-1])
+            s_ma      = float(df["close"].rolling(window=5).mean().iloc[-1])
+            l_ma      = float(df["close"].rolling(window=20).mean().iloc[-1])
+            entry_p   = float(p.avg_entry_price)
+            profit_pct = (curr_p - entry_p) / entry_p
+
+            if profit_pct >= 0.02:
+                sell_limit(sym, p.qty, curr_p, f"✅ TARGET HIT (+{profit_pct*100:.2f}%)")
+            elif s_ma < l_ma:
+                sell_limit(sym, p.qty, curr_p, f"📉 TREND REVERSED (SMA5 < SMA20, P&L {profit_pct*100:+.2f}%)")
         except Exception as e:
             log(f"⚠️ Exit error {sym}: {e}")
 
-    # ── Buy logic ────────────────────────────────────────────────────────
+    # ── Buy logic: SMA5 > SMA20 + cash buffer ────────────────────────────
     if cash <= CASH_BUFFER:
         log("💤 Cash below buffer — skipping buy scan")
         st.session_state.last_scan = datetime.now(SGT)
@@ -477,28 +478,22 @@ def run_strategy():
             df = get_bars(symbol)
             if df.empty or len(df) < 20:
                 continue
-            close     = df["close"]
-            current_p = float(close.iloc[-1])
-            sma5      = float(close.rolling(5).mean().iloc[-1])
-            sma20     = float(close.rolling(20).mean().iloc[-1])
+            curr_p = float(df["close"].iloc[-1])
+            s_ma   = float(df["close"].rolling(window=5).mean().iloc[-1])
+            l_ma   = float(df["close"].rolling(window=20).mean().iloc[-1])
 
-            if sma5 > sma20:
-                # RSI/MACD confirmation filter
-                if not rsi_macd_confirmed_buy(df):
-                    log(f"⛔ SKIP {symbol} — RSI/MACD confirmation failed (overbought or MACD negative)")
-                    continue
-                # Dollar-based sizing: buy as many whole shares as fit in MAX_TRADE_USD
-                qty = round(MAX_TRADE_USD / current_p, 6)  # fractional shares supported
+            if s_ma > l_ma:
+                qty = round(MAX_TRADE_USD / curr_p, 6)
                 if qty <= 0:
                     log(f"⚠️ SKIP {symbol} — could not calculate valid qty")
                     continue
-                actual_cost = round(qty * current_p, 2)
+                actual_cost = round(qty * curr_p, 2)
                 trading_client.submit_order(MarketOrderRequest(
                     symbol=symbol, qty=qty,
                     side=OrderSide.BUY, time_in_force=TimeInForce.DAY
                 ))
-                st.session_state.peak_prices[symbol] = current_p
-                log(f"🟢 BUY {qty} {symbol} @ ${current_p:.2f} = ${actual_cost:.2f} (SMA5 {sma5:.2f} > SMA20 {sma20:.2f})")
+                st.session_state.peak_prices[symbol] = curr_p
+                log(f"🟢 BUY {qty} {symbol} @ ${curr_p:.2f} = ${actual_cost:.2f} (SMA5 > SMA20)")
         except Exception as e:
             log(f"⚠️ Buy scan error {symbol}: {e}")
 
@@ -518,64 +513,58 @@ def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy
 
     df = df[["Close"]].copy()
     df.columns = ["close"]
-    df["sma5"]  = df["close"].rolling(5).mean()
-    df["sma20"] = df["close"].rolling(20).mean()
+    df["avg_20"] = df["close"].rolling(20).mean()
     df.dropna(inplace=True)
 
-    cash        = 10_000.0
-    position    = 0.0
+    cash        = 10_000.0   # max starting capital for live app
+    position    = 0.0     # shares held (fractional)
     entry_price = 0.0
+    peak_price  = 0.0
     trades      = []
 
     for i, (ts, row) in enumerate(df.iterrows()):
-        price = float(row["close"])
-        sma5  = float(row["sma5"])
-        sma20 = float(row["sma20"])
-        pl_pct = (price - entry_price) / entry_price if entry_price > 0 else 0.0
+        price   = float(row["close"])
+        avg_20  = float(row["avg_20"])
 
         # ── Sell logic ──
         if position > 0:
-            if pl_pct >= 0.02:
-                reason = "TARGET +2%"
-                pl_usd = round((price - entry_price) * position, 2)
-                cash  += price * position
+            peak_price = max(peak_price, price)
+            gain_from_entry  = (peak_price - entry_price) / entry_price
+            trail_active     = gain_from_entry >= (trail_pct * 0.5)
+            trail_stop_price = peak_price * (1 - trail_pct)
+            trail_hit        = trail_active and (price <= trail_stop_price)
+            pl_pct           = (price - entry_price) / entry_price
+            hard_hit         = pl_pct <= -hard_sl
+
+            if hard_hit or trail_hit:
+                reason   = "HARD SL" if hard_hit else "TRAIL STOP"
+                pl_usd   = round((price - entry_price) * position, 2)
+                cash    += price * position
                 trades.append({
-                    "Date":    str(ts)[:16],
-                    "Action":  f"SELL ({reason})",
-                    "Price":   round(price, 2),
-                    "Qty":     position,
-                    "P&L ($)": pl_usd,
-                    "P&L (%)": f"{pl_pct*100:+.2f}%",
-                    "Cash":    round(cash, 2),
+                    "Date":       str(ts)[:16],
+                    "Action":     f"SELL ({reason})",
+                    "Price":      round(price, 2),
+                    "Qty":        position,
+                    "P&L ($)":    pl_usd,
+                    "P&L (%)":    f"{pl_pct*100:+.2f}%",
+                    "Cash":       round(cash, 2),
                 })
                 position    = 0
                 entry_price = 0.0
-            elif sma5 < sma20:
-                reason = "TREND REVERSED"
-                pl_usd = round((price - entry_price) * position, 2)
-                cash  += price * position
-                trades.append({
-                    "Date":    str(ts)[:16],
-                    "Action":  f"SELL ({reason})",
-                    "Price":   round(price, 2),
-                    "Qty":     position,
-                    "P&L ($)": pl_usd,
-                    "P&L (%)": f"{pl_pct*100:+.2f}%",
-                    "Cash":    round(cash, 2),
-                })
-                position    = 0
-                entry_price = 0.0
+                peak_price  = 0.0
 
         # ── Buy logic ──
         elif position == 0:
-            if sma5 > sma20:
+            if price > avg_20 * (1 + buy_trend):
+                # RSI/MACD confirmation: use data up to current bar
                 df_slice = df.iloc[:i+1]
                 if not rsi_macd_confirmed_buy(df_slice):
                     continue
-                qty  = round(max_trade_usd / price, 6)
+                qty  = round(max_trade_usd / price, 6)  # fractional shares supported
                 cost = qty * price
                 if qty <= 0 or cash < cost:
                     continue
+                # Compute RSI/MACD values for trade log
                 rsi_s = calc_rsi(df_slice["close"])
                 rsi_at_buy = round(rsi_s.iloc[-1], 1) if not rsi_s.empty else None
                 _, _, hist_s = calc_macd(df_slice["close"])
@@ -583,19 +572,18 @@ def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy
                 cash        -= cost
                 position     = qty
                 entry_price  = price
+                peak_price   = price
                 trades.append({
-                    "Date":      str(ts)[:16],
-                    "Action":    "BUY",
-                    "Price":     round(price, 2),
-                    "Qty":       qty,
-                    "Cost ($)":  round(cost, 2),
-                    "SMA5":      round(sma5, 2),
-                    "SMA20":     round(sma20, 2),
-                    "RSI":       rsi_at_buy,
-                    "MACD Hist": hist_at_buy,
-                    "P&L ($)":   0.0,
-                    "P&L (%)":   "0.00%",
-                    "Cash":      round(cash, 2),
+                    "Date":       str(ts)[:16],
+                    "Action":     "BUY",
+                    "Price":      round(price, 2),
+                    "Qty":        qty,
+                    "Cost ($)":   round(cost, 2),
+                    "RSI":        rsi_at_buy,
+                    "MACD Hist":  hist_at_buy,
+                    "P&L ($)":    0.0,
+                    "P&L (%)":    "0.00%",
+                    "Cash":       round(cash, 2),
                 })
 
     # Close any open position at last price (includes fractional)
@@ -1188,13 +1176,8 @@ with tab_backtest:
                 line=dict(color="#4f8ef7", width=1.5)
             ))
             fig.add_trace(go.Scatter(
-                x=df_chart.index, y=df_chart["sma5"],
-                mode="lines", name="SMA5",
-                line=dict(color="#26a65b", width=1, dash="dot")
-            ))
-            fig.add_trace(go.Scatter(
-                x=df_chart.index, y=df_chart["sma20"],
-                mode="lines", name="SMA20",
+                x=df_chart.index, y=df_chart["avg_20"],
+                mode="lines", name="20-bar Avg",
                 line=dict(color="#f0a500", width=1, dash="dot")
             ))
             if trade_log is not None and not trade_log.empty:
@@ -1289,8 +1272,7 @@ with tab_portfolio:
                         continue
                     df_raw = df_raw[["Close"]].copy()
                     df_raw.columns = ["close"]
-                    df_raw["sma5"]  = df_raw["close"].rolling(5).mean()
-                    df_raw["sma20"] = df_raw["close"].rolling(20).mean()
+                    df_raw["avg_20"] = df_raw["close"].rolling(20).mean()
                     df_raw.dropna(inplace=True)
                     all_data[sym] = df_raw
                 except:
@@ -1383,12 +1365,13 @@ with tab_portfolio:
                             continue
                         row   = all_data[sym].loc[ts]
                         price = float(row["close"])
-                        sma5_p  = float(all_data[sym]["close"].loc[:ts].rolling(5).mean().iloc[-1]) if len(all_data[sym].loc[:ts]) >= 5 else None
-                        sma20_p = float(all_data[sym]["close"].loc[:ts].rolling(20).mean().iloc[-1]) if len(all_data[sym].loc[:ts]) >= 20 else None
-                        if sma5_p is None or sma20_p is None:
+                        avg20 = float(row["avg_20"]) if not pd.isna(row["avg_20"]) else None
+                        if avg20 is None:
                             continue
 
-                        if sma5_p > sma20_p:
+                        _, _, buy_trend = profile(sym) if p_use_profile else (p_hard_sl, p_trail, p_trend)
+
+                        if price > avg20 * (1 + buy_trend):
                             # RSI/MACD confirmation
                             df_slice_p = all_data[sym].loc[:ts]
                             if not rsi_macd_confirmed_buy(df_slice_p):
