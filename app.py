@@ -192,7 +192,16 @@ STOCK_PROFILES = {
     "DKNG"  : (0.018, 0.010, 0.008),   # DraftKings
 }
 
-WATCHLIST = list(STOCK_PROFILES.keys())
+# ── Recommended 20-stock watchlist (balanced across volatility tiers) ──────
+WATCHLIST = [
+    # Low Volatility
+    "AAPL", "MSFT", "GOOGL", "JPM", "V",
+    "PG", "WMT", "KO", "UNH", "HD",
+    # Mid Volatility
+    "AMZN", "META", "AVGO", "DIS", "GS",
+    # High Volatility
+    "NVDA", "TSLA", "AMD", "NFLX", "COIN",
+]
 
 # ─────────────────────────────────────────────
 # 3. SESSION STATE INIT
@@ -230,8 +239,9 @@ def get_bars(symbol: str, minutes: int = 20) -> pd.DataFrame:
     return bars.df
 
 def is_eod_window() -> bool:
+    """Returns True only on Friday (weekday=4) near US market close (03:45–03:55 SGT = Friday 15:45–15:55 ET)."""
     now = datetime.now(SGT)
-    return now.hour == 3 and 45 <= now.minute < 55
+    return now.weekday() == 4 and now.hour == 3 and 45 <= now.minute < 55
 
 def reset_baseline_if_needed():
     now = datetime.now(SGT)
@@ -418,7 +428,7 @@ def run_strategy():
         log(f"⚠️ Account fetch error: {e}")
         return
 
-    # ── End-of-day flat market liquidation ──────────────────────────────
+    # ── End-of-week flat market liquidation (Friday close) ──────────────
     if is_eod_window():
         for p in positions:
             try:
@@ -427,9 +437,9 @@ def run_strategy():
                     side=OrderSide.SELL, time_in_force=TimeInForce.DAY
                 ))
                 st.session_state.peak_prices.pop(p.symbol, None)
-                log(f"🔔 EOD liquidation: SELL {p.qty} {p.symbol}")
+                log(f"🔔 End-of-Week liquidation: SELL {p.qty} {p.symbol}")
             except Exception as e:
-                log(f"⚠️ EOD sell error {p.symbol}: {e}")
+                log(f"⚠️ EOW sell error {p.symbol}: {e}")
         return
 
     # ── Intraday exit: trailing stop + hard stop loss ────────────────────
