@@ -48,15 +48,88 @@ MAX_TRADE_USD   = 500.0     # max dollars to spend per trade (dollar-based sizin
 #  buy_trend_pct      : price must be this % above 20-min avg to trigger a buy
 # ───────────────────────────────────────────────────────────────────────────
 STOCK_PROFILES = {
-    "AAPL"  : (0.010, 0.006, 0.004),   # low volatility
-    "MSFT"  : (0.010, 0.006, 0.004),   # low volatility
-    "GOOGL" : (0.010, 0.006, 0.004),   # low volatility
-    "AMZN"  : (0.012, 0.007, 0.005),   # low-mid volatility
-    "META"  : (0.013, 0.008, 0.006),   # mid volatility
-    "AMD"   : (0.015, 0.009, 0.007),   # mid-high volatility
-    "NVDA"  : (0.018, 0.010, 0.008),   # high volatility
-    "TSLA"  : (0.020, 0.012, 0.009),   # high volatility
+    # ── 🔵 Low Volatility (Beta < 0.8) ───────────────────────────
+    # (hard_sl, trail, buy_trend)
+    "AAPL"  : (0.010, 0.006, 0.004),   # Apple
+    "MSFT"  : (0.010, 0.006, 0.004),   # Microsoft
+    "GOOGL" : (0.010, 0.006, 0.004),   # Alphabet
+    "JPM"   : (0.010, 0.006, 0.004),   # JPMorgan Chase
+    "V"     : (0.010, 0.006, 0.004),   # Visa
+    "MA"    : (0.010, 0.006, 0.004),   # Mastercard
+    "PG"    : (0.010, 0.006, 0.004),   # Procter & Gamble
+    "WMT"   : (0.010, 0.006, 0.004),   # Walmart
+    "COST"  : (0.010, 0.006, 0.004),   # Costco
+    "KO"    : (0.010, 0.006, 0.004),   # Coca-Cola
+    "PEP"   : (0.010, 0.006, 0.004),   # PepsiCo
+    "PFE"   : (0.010, 0.006, 0.004),   # Pfizer
+    "UNH"   : (0.010, 0.006, 0.004),   # UnitedHealth
+    "HD"    : (0.010, 0.006, 0.004),   # Home Depot
+    "CSCO"  : (0.010, 0.006, 0.004),   # Cisco
+    "ORCL"  : (0.010, 0.006, 0.004),   # Oracle
+    "TXN"   : (0.010, 0.006, 0.004),   # Texas Instruments
+    "HON"   : (0.010, 0.006, 0.004),   # Honeywell
+    "MMM"   : (0.010, 0.006, 0.004),   # 3M
+    "T"     : (0.010, 0.006, 0.004),   # AT&T
+    "VZ"    : (0.010, 0.006, 0.004),   # Verizon
+    "TMUS"  : (0.010, 0.006, 0.004),   # T-Mobile
+    "ABBV"  : (0.010, 0.006, 0.004),   # AbbVie
+    "LOW"   : (0.010, 0.006, 0.004),   # Lowe's
+    "UPS"   : (0.010, 0.006, 0.004),   # UPS
+
+    # ── 🟡 Mid Volatility (Beta 0.8 – 1.2) ───────────────────────
+    "AMZN"  : (0.013, 0.008, 0.006),   # Amazon
+    "META"  : (0.013, 0.008, 0.006),   # Meta Platforms
+    "AVGO"  : (0.013, 0.008, 0.006),   # Broadcom
+    "ADBE"  : (0.013, 0.008, 0.006),   # Adobe
+    "CRM"   : (0.013, 0.008, 0.006),   # Salesforce
+    "INTC"  : (0.013, 0.008, 0.006),   # Intel
+    "QCOM"  : (0.013, 0.008, 0.006),   # Qualcomm
+    "AMAT"  : (0.013, 0.008, 0.006),   # Applied Materials
+    "ASML"  : (0.013, 0.008, 0.006),   # ASML Holding
+    "DIS"   : (0.013, 0.008, 0.006),   # Disney
+    "XOM"   : (0.013, 0.008, 0.006),   # ExxonMobil
+    "CVX"   : (0.013, 0.008, 0.006),   # Chevron
+    "CAT"   : (0.013, 0.008, 0.006),   # Caterpillar
+    "GE"    : (0.013, 0.008, 0.006),   # General Electric
+    "FDX"   : (0.013, 0.008, 0.006),   # FedEx
+    "LMT"   : (0.013, 0.008, 0.006),   # Lockheed Martin
+    "TMO"   : (0.013, 0.008, 0.006),   # Thermo Fisher
+    "AZN"   : (0.013, 0.008, 0.006),   # AstraZeneca
+    "NKE"   : (0.013, 0.008, 0.006),   # Nike
+    "SBUX"  : (0.013, 0.008, 0.006),   # Starbucks
+    "ZM"    : (0.013, 0.008, 0.006),   # Zoom
+    "IBM"   : (0.013, 0.008, 0.006),   # IBM
+    "DE"    : (0.013, 0.008, 0.006),   # John Deere
+    "GS"    : (0.013, 0.008, 0.006),   # Goldman Sachs
+    "BLK"   : (0.013, 0.008, 0.006),   # BlackRock
+
+    # ── 🔴 High Volatility (Beta > 1.2) ──────────────────────────
+    "NVDA"  : (0.018, 0.010, 0.008),   # Nvidia
+    "TSLA"  : (0.020, 0.012, 0.009),   # Tesla
+    "AMD"   : (0.015, 0.009, 0.007),   # AMD
+    "NFLX"  : (0.015, 0.009, 0.007),   # Netflix
+    "MU"    : (0.015, 0.009, 0.007),   # Micron
+    "BA"    : (0.015, 0.009, 0.007),   # Boeing
+    "LLY"   : (0.015, 0.009, 0.007),   # Eli Lilly
+    "PYPL"  : (0.015, 0.009, 0.007),   # PayPal
+    "SQ"    : (0.018, 0.010, 0.008),   # Block
+    "UBER"  : (0.018, 0.010, 0.008),   # Uber
+    "ABNB"  : (0.018, 0.010, 0.008),   # Airbnb
+    "SNOW"  : (0.018, 0.010, 0.008),   # Snowflake
+    "PLTR"  : (0.018, 0.010, 0.008),   # Palantir
+    "BABA"  : (0.018, 0.010, 0.008),   # Alibaba
+    "JD"    : (0.018, 0.010, 0.008),   # JD.com
+    "PDD"   : (0.020, 0.012, 0.009),   # Pinduoduo
+    "SHOP"  : (0.018, 0.010, 0.008),   # Shopify
+    "LCID"  : (0.020, 0.012, 0.009),   # Lucid
+    "RIVN"  : (0.020, 0.012, 0.009),   # Rivian
+    "COIN"  : (0.020, 0.012, 0.009),   # Coinbase
+    "MSTR"  : (0.020, 0.012, 0.009),   # MicroStrategy
+    "MARA"  : (0.020, 0.012, 0.009),   # Marathon Digital
+    "RIOT"  : (0.020, 0.012, 0.009),   # Riot Platforms
+    "DKNG"  : (0.018, 0.010, 0.008),   # DraftKings
 }
+
 WATCHLIST = list(STOCK_PROFILES.keys())
 
 # ─────────────────────────────────────────────
