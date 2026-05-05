@@ -792,23 +792,56 @@ with tab_live:
     st.divider()
 
     # ── Today's trades ──
-    with st.expander("📊 Today's Completed Trades", expanded=False):
+    with st.expander("📊 Today's Completed Trades", expanded=True):
         try:
             orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=200))
             today  = datetime.now(SGT).date()
             daily  = [o for o in orders if o.filled_at and o.filled_at.astimezone(SGT).date() == today]
             if daily:
+                # ── Raw order table ──────────────────────────────────────
+                raw_rows = [{"Symbol": o.symbol, "Side": o.side.value, "Qty": float(o.filled_qty),
+                             "Fill Price": round(float(o.filled_avg_price), 2),
+                             "Value":      round(float(o.filled_avg_price) * float(o.filled_qty), 2),
+                             "Time (SGT)": o.filled_at.astimezone(SGT).strftime("%H:%M:%S")} for o in daily]
+                st.dataframe(pd.DataFrame(raw_rows), use_container_width=True, hide_index=True)
+
+                # ── P&L per completed round-trip (BUY → SELL) ────────────
+                st.write("**📊 Completed Round-Trip P&L**")
+                buys  = {o.symbol: o for o in daily if o.side == OrderSide.BUY}
+                sells = [o for o in daily if o.side == OrderSide.SELL]
+                pl_rows = []
+                total_pl = 0.0
+                for s in sells:
+                    sym       = s.symbol
+                    sell_p    = float(s.filled_avg_price)
+                    qty       = float(s.filled_qty)
+                    buy_p     = float(buys[sym].filled_avg_price) if sym in buys else None
+                    if buy_p:
+                        pl_usd  = round((sell_p - buy_p) * qty, 2)
+                        pl_pct  = round((sell_p - buy_p) / buy_p * 100, 2)
+                        total_pl += pl_usd
+                        pl_rows.append({
+                            "Symbol":     sym,
+                            "Buy Price":  f"${buy_p:.2f}",
+                            "Sell Price": f"${sell_p:.2f}",
+                            "Qty":        round(qty, 4),
+                            "P&L ($)":    f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}",
+                            "P&L (%)":    f"{pl_pct:+.2f}%",
+                            "Sell Time":  s.filled_at.astimezone(SGT).strftime("%H:%M:%S"),
+                        })
+                if pl_rows:
+                    st.dataframe(pd.DataFrame(pl_rows), use_container_width=True, hide_index=True)
+                    color = "🟢" if total_pl >= 0 else "🔴"
+                    st.write(f"**{color} Total Realized P&L Today: ${total_pl:+.2f}**")
+                else:
+                    st.info("No completed round-trips yet (buys open, no sells yet).")
+
                 vol = sum(float(o.filled_avg_price)*float(o.filled_qty) for o in daily if o.side == OrderSide.BUY)
-                st.write(f"**Trades today:** {len(daily)} | **Buy volume:** ${vol:,.2f}")
-                rows = [{"Symbol": o.symbol, "Side": o.side.value, "Qty": o.filled_qty,
-                         "Price":  f"${float(o.filled_avg_price):.2f}",
-                         "Value":  f"${float(o.filled_avg_price)*float(o.filled_qty):,.2f}",
-                         "Time":   o.filled_at.astimezone(SGT).strftime("%H:%M:%S")} for o in daily]
-                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                st.write(f"**Total trades today:** {len(daily)} | **Buy volume:** ${vol:,.2f}")
             else:
                 st.info("No trades completed today yet.")
-        except:
-            st.write("Refreshing data...")
+        except Exception as e:
+            st.write(f"Refreshing data... ({e})")
 
     # ── Activity log ──
     with st.expander("📋 Activity Log", expanded=True):
