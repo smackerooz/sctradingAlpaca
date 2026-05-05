@@ -98,7 +98,7 @@ SGT             = pytz.timezone('Asia/Singapore')
 TARGET_PROFIT   = 200.0      # USD — weekly target
 CASH_BUFFER     = 95_000.0    # Min cash before buying (keep ~50% of $10k as buffer)
 SCAN_INTERVAL   = 10         # seconds between auto-scans
-MAX_TRADE_USD   = 200.0      # max dollars to spend per trade
+MAX_TRADE_USD   = 300.0      # max dollars to spend per trade
 
 # ── Per-stock volatility profiles ──────────────────────────────────────────
 # (hard_stop_loss_pct, trailing_stop_pct, buy_trend_pct)
@@ -110,86 +110,29 @@ MAX_TRADE_USD   = 200.0      # max dollars to spend per trade
 #  buy_trend_pct      : price must be this % above 20-min avg to trigger a buy
 # ───────────────────────────────────────────────────────────────────────────
 STOCK_PROFILES = {
-    # ── 🔵 Low Volatility (Beta < 0.8) ───────────────────────────
-    # (hard_sl, trail, buy_trend)
+    # ── Shariah-Compliant Scalping Watchlist (15 stocks) ─────────────
+    # (hard_stop_loss_pct, trailing_stop_pct, buy_trend_pct)
+
+    # 🔵 Large-Cap Stable
     "AAPL"  : (0.010, 0.006, 0.004),   # Apple
     "MSFT"  : (0.010, 0.006, 0.004),   # Microsoft
     "GOOGL" : (0.010, 0.006, 0.004),   # Alphabet
-    "JPM"   : (0.010, 0.006, 0.004),   # JPMorgan Chase
-    "V"     : (0.010, 0.006, 0.004),   # Visa
-    "MA"    : (0.010, 0.006, 0.004),   # Mastercard
-    "PG"    : (0.010, 0.006, 0.004),   # Procter & Gamble
-    "WMT"   : (0.010, 0.006, 0.004),   # Walmart
-    "COST"  : (0.010, 0.006, 0.004),   # Costco
-    "KO"    : (0.010, 0.006, 0.004),   # Coca-Cola
-    "PEP"   : (0.010, 0.006, 0.004),   # PepsiCo
-    "PFE"   : (0.010, 0.006, 0.004),   # Pfizer
-    "UNH"   : (0.010, 0.006, 0.004),   # UnitedHealth
-    "HD"    : (0.010, 0.006, 0.004),   # Home Depot
-    "CSCO"  : (0.010, 0.006, 0.004),   # Cisco
-    "ORCL"  : (0.010, 0.006, 0.004),   # Oracle
-    "TXN"   : (0.010, 0.006, 0.004),   # Texas Instruments
-    "HON"   : (0.010, 0.006, 0.004),   # Honeywell
-    "MMM"   : (0.010, 0.006, 0.004),   # 3M
-    "T"     : (0.010, 0.006, 0.004),   # AT&T
-    "VZ"    : (0.010, 0.006, 0.004),   # Verizon
-    "TMUS"  : (0.010, 0.006, 0.004),   # T-Mobile
-    "ABBV"  : (0.010, 0.006, 0.004),   # AbbVie
-    "LOW"   : (0.010, 0.006, 0.004),   # Lowe's
-    "UPS"   : (0.010, 0.006, 0.004),   # UPS
-
-    # ── 🟡 Mid Volatility (Beta 0.8 – 1.2) ───────────────────────
     "AMZN"  : (0.013, 0.008, 0.006),   # Amazon
-    "META"  : (0.013, 0.008, 0.006),   # Meta Platforms
-    "AVGO"  : (0.013, 0.008, 0.006),   # Broadcom
     "ADBE"  : (0.013, 0.008, 0.006),   # Adobe
     "CRM"   : (0.013, 0.008, 0.006),   # Salesforce
-    "INTC"  : (0.013, 0.008, 0.006),   # Intel
+
+    # 🟡 Mid Volatility
+    "AVGO"  : (0.013, 0.008, 0.006),   # Broadcom
     "QCOM"  : (0.013, 0.008, 0.006),   # Qualcomm
     "AMAT"  : (0.013, 0.008, 0.006),   # Applied Materials
     "ASML"  : (0.013, 0.008, 0.006),   # ASML Holding
-    "DIS"   : (0.013, 0.008, 0.006),   # Disney
-    "XOM"   : (0.013, 0.008, 0.006),   # ExxonMobil
-    "CVX"   : (0.013, 0.008, 0.006),   # Chevron
-    "CAT"   : (0.013, 0.008, 0.006),   # Caterpillar
-    "GE"    : (0.013, 0.008, 0.006),   # General Electric
-    "FDX"   : (0.013, 0.008, 0.006),   # FedEx
-    "LMT"   : (0.013, 0.008, 0.006),   # Lockheed Martin
-    "TMO"   : (0.013, 0.008, 0.006),   # Thermo Fisher
-    "AZN"   : (0.013, 0.008, 0.006),   # AstraZeneca
-    "NKE"   : (0.013, 0.008, 0.006),   # Nike
-    "SBUX"  : (0.013, 0.008, 0.006),   # Starbucks
-    "ZM"    : (0.013, 0.008, 0.006),   # Zoom
-    "IBM"   : (0.013, 0.008, 0.006),   # IBM
-    "DE"    : (0.013, 0.008, 0.006),   # John Deere
-    "GS"    : (0.013, 0.008, 0.006),   # Goldman Sachs
-    "BLK"   : (0.013, 0.008, 0.006),   # BlackRock
 
-    # ── 🔴 High Volatility (Beta > 1.2) ──────────────────────────
+    # 🔴 High Volatility / Momentum
     "NVDA"  : (0.018, 0.010, 0.008),   # Nvidia
     "TSLA"  : (0.020, 0.012, 0.009),   # Tesla
     "AMD"   : (0.015, 0.009, 0.007),   # AMD
-    "NFLX"  : (0.015, 0.009, 0.007),   # Netflix
-    "MU"    : (0.015, 0.009, 0.007),   # Micron
-    "BA"    : (0.015, 0.009, 0.007),   # Boeing
-    "LLY"   : (0.015, 0.009, 0.007),   # Eli Lilly
-    "PYPL"  : (0.015, 0.009, 0.007),   # PayPal
-    "SQ"    : (0.018, 0.010, 0.008),   # Block
-    "UBER"  : (0.018, 0.010, 0.008),   # Uber
-    "ABNB"  : (0.018, 0.010, 0.008),   # Airbnb
-    "SNOW"  : (0.018, 0.010, 0.008),   # Snowflake
     "PLTR"  : (0.018, 0.010, 0.008),   # Palantir
-    "BABA"  : (0.018, 0.010, 0.008),   # Alibaba
-    "JD"    : (0.018, 0.010, 0.008),   # JD.com
-    "PDD"   : (0.020, 0.012, 0.009),   # Pinduoduo
-    "SHOP"  : (0.018, 0.010, 0.008),   # Shopify
-    "LCID"  : (0.020, 0.012, 0.009),   # Lucid
-    "RIVN"  : (0.020, 0.012, 0.009),   # Rivian
-    "COIN"  : (0.020, 0.012, 0.009),   # Coinbase
-    "MSTR"  : (0.020, 0.012, 0.009),   # MicroStrategy
-    "MARA"  : (0.020, 0.012, 0.009),   # Marathon Digital
-    "RIOT"  : (0.020, 0.012, 0.009),   # Riot Platforms
-    "DKNG"  : (0.018, 0.010, 0.008),   # DraftKings
+    "SNOW"  : (0.018, 0.010, 0.008),   # Snowflake
 }
 
 # ── Full watchlist — all stocks from STOCK_PROFILES ──────────────────────
@@ -222,15 +165,26 @@ def log(msg: str):
     st.session_state.scan_log = st.session_state.scan_log[:100]
 
 def get_bars(symbol: str) -> pd.DataFrame:
-    """Fetch 1-min intraday bars via yfinance (matches old bot logic)."""
+    """Fetch 5-min intraday bars via Alpaca (real-time, no yfinance lag).
+    Pulls last 2 trading days to ensure enough bars for SMA20 + RSI/MACD."""
     try:
-        data = yf.download(symbol, period="1d", interval="1m", progress=False)
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-        if data.empty:
+        from alpaca.data.timeframe import TimeFrameUnit
+        end   = datetime.now(pytz.utc)
+        start = end - timedelta(days=2)
+        req   = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+            start=start,
+            end=end,
+            feed="iex",
+        )
+        bars = data_client.get_stock_bars(req).df
+        if bars.empty:
             return pd.DataFrame()
-        data = data.rename(columns={"Close": "close", "Open": "open", "High": "high", "Low": "low", "Volume": "volume"})
-        return data[["close"]].copy()
+        if isinstance(bars.index, pd.MultiIndex):
+            bars = bars.xs(symbol, level="symbol")
+        bars.index = pd.to_datetime(bars.index, utc=True)
+        return bars[["close"]].copy()
     except Exception:
         return pd.DataFrame()
 
@@ -436,26 +390,46 @@ def run_strategy():
                 log(f"⚠️ EOW sell error {p.symbol}: {e}")
         return
 
-    # ── Intraday exit: +2% take-profit OR SMA5 < SMA20 trend reversal ──────
+    # ── Intraday exit: hard stop / trailing stop / take-profit / trend reversal ──
     for sym, p in held.items():
         try:
             df = get_bars(sym)
             if df.empty or len(df) < 20:
                 continue
-            curr_p    = float(df["close"].iloc[-1])
-            s_ma      = float(df["close"].rolling(window=5).mean().iloc[-1])
-            l_ma      = float(df["close"].rolling(window=20).mean().iloc[-1])
-            entry_p   = float(p.avg_entry_price)
+            curr_p     = float(df["close"].iloc[-1])
+            s_ma       = float(df["close"].rolling(window=5).mean().iloc[-1])
+            l_ma       = float(df["close"].rolling(window=20).mean().iloc[-1])
+            entry_p    = float(p.avg_entry_price)
             profit_pct = (curr_p - entry_p) / entry_p
+            hard_sl, trail_pct, _ = profile(sym)
 
+            # ── 1. Hard stop loss ────────────────────────────────────────
+            if profit_pct <= -hard_sl:
+                sell_limit(sym, p.qty, curr_p, f"🛑 HARD STOP ({profit_pct*100:+.2f}% <= -{hard_sl*100:.1f}%)")
+                continue
+
+            # ── 2. Trailing stop ─────────────────────────────────────────
+            peak = max(st.session_state.peak_prices.get(sym, entry_p), curr_p)
+            st.session_state.peak_prices[sym] = peak
+            gain_from_entry = (peak - entry_p) / entry_p
+            trail_active    = gain_from_entry >= (trail_pct * 0.5)
+            trail_stop      = peak * (1 - trail_pct)
+            if trail_active and curr_p <= trail_stop:
+                sell_limit(sym, p.qty, curr_p, f"📉 TRAIL STOP (peak ${peak:.2f} → ${curr_p:.2f}, P&L {profit_pct*100:+.2f}%)")
+                continue
+
+            # ── 3. Take-profit ───────────────────────────────────────────
             if profit_pct >= 0.02:
                 sell_limit(sym, p.qty, curr_p, f"✅ TARGET HIT (+{profit_pct*100:.2f}%)")
-            elif s_ma < l_ma:
+                continue
+
+            # ── 4. Trend reversal ────────────────────────────────────────
+            if s_ma < l_ma:
                 sell_limit(sym, p.qty, curr_p, f"📉 TREND REVERSED (SMA5 < SMA20, P&L {profit_pct*100:+.2f}%)")
         except Exception as e:
             log(f"⚠️ Exit error {sym}: {e}")
 
-    # ── Buy logic: SMA5 > SMA20 + cash buffer ────────────────────────────
+    # ── Buy logic: SMA5 > SMA20 + RSI/MACD confirmation + cash buffer ────
     if cash <= CASH_BUFFER:
         log("💤 Cash below buffer — skipping buy scan")
         st.session_state.last_scan = datetime.now(SGT)
@@ -473,6 +447,10 @@ def run_strategy():
             l_ma   = float(df["close"].rolling(window=20).mean().iloc[-1])
 
             if s_ma > l_ma:
+                # ── RSI/MACD confirmation gate ───────────────────────────
+                if not rsi_macd_confirmed_buy(df):
+                    log(f"⏭️ SKIP {symbol} — RSI overbought or MACD histogram negative")
+                    continue
                 qty = round(MAX_TRADE_USD / curr_p, 6)
                 if qty <= 0:
                     log(f"⚠️ SKIP {symbol} — could not calculate valid qty")
@@ -487,7 +465,7 @@ def run_strategy():
                 ))
                 cash -= actual_cost
                 st.session_state.peak_prices[symbol] = curr_p
-                log(f"🟢 BUY {qty} {symbol} @ ${curr_p:.2f} = ${actual_cost:.2f} (SMA5 > SMA20)")
+                log(f"🟢 BUY {qty} {symbol} @ ${curr_p:.2f} = ${actual_cost:.2f} (SMA5 > SMA20, RSI+MACD ✓)")
         except Exception as e:
             log(f"⚠️ Buy scan error {symbol}: {e}")
 
