@@ -21,6 +21,8 @@ st.set_page_config(page_title="Trading Bot", page_icon="📈", layout="wide")
 # KEEPALIVE — Prevents Streamlit Cloud from sleeping
 # ─────────────────────────────────────────────
 import streamlit.components.v1 as components
+import os
+from supabase import create_client, Client
 components.html(
     """
     <div style="
@@ -95,6 +97,14 @@ except Exception as e:
 # 2. CONSTANTS & CONFIG
 # ─────────────────────────────────────────────
 SGT             = pytz.timezone('Asia/Singapore')
+# ── Supabase client (replaces all JSON file storage) ─────────────────────────
+@st.cache_resource
+def get_supabase() -> Client:
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    return create_client(url, key)
+
+supabase: Client = get_supabase()
 TARGET_PROFIT   = 200.0      # USD — weekly target
 CASH_BUFFER     = 95_000.0    # Min cash before buying (keep ~50% of $10k as buffer)
 SCAN_INTERVAL   = 10         # seconds between auto-scans
@@ -142,18 +152,117 @@ WATCHLIST = list(STOCK_PROFILES.keys())
 # 3. SESSION STATE INIT
 # ─────────────────────────────────────────────
 if "nightly_baseline" not in st.session_state:
+    # Load from Supabase — persists across browser closes and redeploys
     try:
-        st.session_state.nightly_baseline = float(trading_client.get_account().last_equity)
-    except:
-        st.session_state.nightly_baseline = 10_000.0
+        row = supabase.table("weekly_baseline").select("*").eq("id", 1).execute()
+        if row.data:
+            bl = row.data[0]
+            saved_date  = datetime.fromisoformat(bl["date"]).date()
+            today       = datetime.now(SGT).date()
+            last_monday = today - timedelta(days=today.weekday())
+            if saved_date >= last_monday:
+                st.session_state.nightly_baseline = float(bl["baseline"])
+            else:
+                raise ValueError("Baseline from previous week")
+        else:
+            raise ValueError("No baseline row yet")
+    except Exception:
+        try:
+            st.session_state.nightly_baseline = float(trading_client.get_account().last_equity)
+        except:
+            st.session_state.nightly_baseline = 10_000.0
 
 # ── Auto-start: bot is RUNNING by default ──
+def load_realized_trades() -> list:
+    """Load today's realized trades from Supabase."""
+    try:
+        today = datetime.now(SGT).date().isoformat()
+        rows  = supabase.table("realized_trades").select("*").eq("date", today).order("id", desc=True).execute()
+        result = []
+        for r in rows.data:
+            result.append({
+                "date":       r["date"],
+                "Symbol":     r["symbol"],
+                "Buy Price":  r["buy_price"],
+                "Sell Price": r["sell_price"],
+                "Qty":        r["qty"],
+                "P&L ($)":    r["pl_display"],
+                "P&L (%)":    r["pl_pct"],
+                "Time (SGT)": r["time_sgt"],
+                "Reason":     r["reason"],
+                "_pl_usd":    float(r["pl_usd"]),
+            })
+        return result
+    except Exception:
+        return []
+
+def save_trade_to_supabase(trade: dict):
+    """Insert a single realized trade into Supabase."""
+    try:
+        supabase.table("realized_trades").insert({
+            "date":       trade["date"],
+            "symbol":     trade["Symbol"],
+            "buy_price":  trade["Buy Price"],
+            "sell_price": trade["Sell Price"],
+            "qty":        trade["Qty"],
+            "pl_usd":     trade["_pl_usd"],
+            "pl_display": trade["P&L ($)"],
+            "pl_pct":     trade["P&L (%)"],
+            "time_sgt":   trade["Time (SGT)"],
+            "reason":     trade["Reason"],
+        }).execute()
+    except Exception:
+        pass
+
 if "bot_running"      not in st.session_state: st.session_state.bot_running      = True
 if "last_scan"        not in st.session_state: st.session_state.last_scan        = None
 if "scan_log"         not in st.session_state: st.session_state.scan_log         = []
 if "peak_prices"      not in st.session_state: st.session_state.peak_prices      = {}
 if "signal_results"   not in st.session_state: st.session_state.signal_results   = None
 if "live_signal_time" not in st.session_state: st.session_state.live_signal_time = None
+if "realized_trades"  not in st.session_state: st.session_state.realized_trades  = load_realized_trades()  # load from disk on first run
+
+# ── Single-runner lock (Supabase) ────────────────────────────────────────────
+# Only the FIRST session to open claims the runner role; all others are viewers.
+
+def claim_runner() -> bool:
+    """Try to claim the runner role via Supabase. Returns True if claimed."""
+    try:
+        sid = st.runtime.scriptrunner.get_script_run_ctx().session_id
+        supabase.table("runner_lock").upsert({
+            "id": 1,
+            "session_id": sid,
+            "claimed_at": datetime.now(SGT).isoformat(),
+        }).execute()
+        return True
+    except Exception:
+        return False
+
+def is_runner() -> bool:
+    """Check if this session currently holds the runner lock in Supabase."""
+    try:
+        sid  = st.runtime.scriptrunner.get_script_run_ctx().session_id
+        rows = supabase.table("runner_lock").select("session_id").eq("id", 1).execute()
+        if rows.data:
+            return rows.data[0]["session_id"] == sid
+        return False
+    except Exception:
+        return False
+
+def release_runner():
+    """Release the runner lock in Supabase."""
+    try:
+        supabase.table("runner_lock").delete().eq("id", 1).execute()
+    except Exception:
+        pass
+
+# Claim runner on first load if no one else holds it
+if "is_runner_session" not in st.session_state:
+    rows = supabase.table("runner_lock").select("session_id").eq("id", 1).execute()
+    if not rows.data:
+        st.session_state.is_runner_session = claim_runner()
+    else:
+        st.session_state.is_runner_session = is_runner()
 
 # ─────────────────────────────────────────────
 # 4. HELPERS
@@ -193,11 +302,24 @@ def is_eod_window() -> bool:
     now = datetime.now(SGT)
     return now.weekday() == 4 and now.hour == 3 and 45 <= now.minute < 55
 
+def save_baseline(value: float):
+    """Save weekly baseline to Supabase so it survives browser close and redeploys."""
+    try:
+        supabase.table("weekly_baseline").upsert({
+            "id":       1,
+            "baseline": value,
+            "date":     datetime.now(SGT).date().isoformat(),
+        }).execute()
+    except Exception:
+        pass
+
 def reset_baseline_if_needed():
     now = datetime.now(SGT)
     # Reset weekly baseline every Monday at 21:30 SGT (US Monday market open)
     if now.weekday() == 0 and now.hour == 21 and now.minute == 30:
-        st.session_state.nightly_baseline = float(trading_client.get_account().equity)
+        new_bl = float(trading_client.get_account().equity)
+        st.session_state.nightly_baseline = new_bl
+        save_baseline(new_bl)
         log("🔄 Weekly baseline reset — Monday 21:30 SGT")
 
 def profile(symbol: str):
@@ -351,7 +473,7 @@ def rsi_macd_confirmed_buy(df: pd.DataFrame) -> bool:
     if pd.isna(hist_val): hist_val = 0.0
     return (rsi_val < 70) and (hist_val > 0)
 
-def sell_limit(symbol: str, qty, current_price: float, reason: str):
+def sell_limit(symbol: str, qty, current_price: float, reason: str, entry_price: float = 0.0):
     trading_client.submit_order(MarketOrderRequest(
         symbol=symbol,
         qty=qty,
@@ -360,12 +482,58 @@ def sell_limit(symbol: str, qty, current_price: float, reason: str):
     ))
     st.session_state.peak_prices.pop(symbol, None)
     log(f"{reason} | SELL {qty} {symbol} @ MARKET (last ${current_price:.2f})")
+    # ── Record realized P&L immediately so it persists across reruns ──
+    if entry_price > 0:
+        pl_usd = round((current_price - entry_price) * float(qty), 2)
+        pl_pct = round((current_price - entry_price) / entry_price * 100, 2)
+        today  = datetime.now(SGT).date().isoformat()
+        # Reset list if it's a new trading day
+        if st.session_state.realized_trades and st.session_state.realized_trades[0].get("date") != today:
+            st.session_state.realized_trades = []
+        st.session_state.realized_trades.insert(0, {
+            "date":       today,
+            "Symbol":     symbol,
+            "Buy Price":  f"${entry_price:.2f}",
+            "Sell Price": f"${current_price:.2f}",
+            "Qty":        round(float(qty), 4),
+            "P&L ($)":    f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}",
+            "P&L (%)":    f"{pl_pct:+.2f}%",
+            "Time (SGT)": datetime.now(SGT).strftime("%H:%M:%S"),
+            "Reason":     reason.split("|")[0].strip(),
+            "_pl_usd":    pl_usd,  # numeric for total
+        })
+        save_trade_to_supabase(st.session_state.realized_trades[0])
 
 # ─────────────────────────────────────────────
 # 5. STRATEGY ENGINE
 # ─────────────────────────────────────────────
+def is_market_open() -> bool:
+    """Returns True only during regular US market hours (9:30–16:00 ET = 21:30–04:00 SGT)."""
+    try:
+        clock = trading_client.get_clock()
+        return clock.is_open
+    except Exception:
+        # Fallback: check SGT time manually
+        now_sgt = datetime.now(SGT)
+        # US market: Mon–Fri 21:30–04:00 SGT (next day)
+        weekday = now_sgt.weekday()  # 0=Mon … 4=Fri
+        hour, minute = now_sgt.hour, now_sgt.minute
+        after_open  = (hour == 21 and minute >= 30) or (hour >= 22)
+        before_close = hour < 4 or (hour == 4 and minute == 0)
+        is_weekday  = weekday < 5
+        # After midnight SGT the "trading day" continues until 4am
+        if hour < 12:
+            is_weekday = (weekday - 1) % 7 < 5
+        return is_weekday and (after_open or before_close)
+
 def run_strategy():
     reset_baseline_if_needed()
+
+    # ── Guard: only trade during regular market hours ────────────────
+    if not is_market_open():
+        log("💤 Market closed — skipping scan")
+        st.session_state.last_scan = datetime.now(SGT)
+        return
 
     try:
         account   = trading_client.get_account()
@@ -405,7 +573,7 @@ def run_strategy():
 
             # ── 1. Hard stop loss ────────────────────────────────────────
             if profit_pct <= -hard_sl:
-                sell_limit(sym, p.qty, curr_p, f"🛑 HARD STOP ({profit_pct*100:+.2f}% <= -{hard_sl*100:.1f}%)")
+                sell_limit(sym, p.qty, curr_p, f"🛑 HARD STOP ({profit_pct*100:+.2f}% <= -{hard_sl*100:.1f}%)", entry_p)
                 continue
 
             # ── 2. Trailing stop ─────────────────────────────────────────
@@ -415,17 +583,17 @@ def run_strategy():
             trail_active    = gain_from_entry >= (trail_pct * 0.5)
             trail_stop      = peak * (1 - trail_pct)
             if trail_active and curr_p <= trail_stop:
-                sell_limit(sym, p.qty, curr_p, f"📉 TRAIL STOP (peak ${peak:.2f} → ${curr_p:.2f}, P&L {profit_pct*100:+.2f}%)")
+                sell_limit(sym, p.qty, curr_p, f"📉 TRAIL STOP (peak ${peak:.2f} → ${curr_p:.2f}, P&L {profit_pct*100:+.2f}%)", entry_p)
                 continue
 
             # ── 3. Take-profit ───────────────────────────────────────────
             if profit_pct >= 0.02:
-                sell_limit(sym, p.qty, curr_p, f"✅ TARGET HIT (+{profit_pct*100:.2f}%)")
+                sell_limit(sym, p.qty, curr_p, f"✅ TARGET HIT (+{profit_pct*100:.2f}%)", entry_p)
                 continue
 
             # ── 4. Trend reversal ────────────────────────────────────────
             if s_ma < l_ma:
-                sell_limit(sym, p.qty, curr_p, f"📉 TREND REVERSED (SMA5 < SMA20, P&L {profit_pct*100:+.2f}%)")
+                sell_limit(sym, p.qty, curr_p, f"📉 TREND REVERSED (SMA5 < SMA20, P&L {profit_pct*100:+.2f}%)", entry_p)
         except Exception as e:
             log(f"⚠️ Exit error {sym}: {e}")
 
@@ -613,6 +781,8 @@ with st.sidebar:
     with col_b:
         if st.button("⏹ Stop", use_container_width=True, disabled=not st.session_state.bot_running):
             st.session_state.bot_running = False
+            release_runner()
+            st.session_state.is_runner_session = False
             log("🛑 Bot STOPPED")
 
     st.divider()
@@ -658,6 +828,12 @@ with st.sidebar:
 # 9. MAIN DASHBOARD — TABS
 # ─────────────────────────────────────────────
 st.title("📈 Auto Trading Bot")
+
+# ── Runner / Viewer indicator banner ────────────────────────────────────────
+if st.session_state.is_runner_session:
+    st.success("🟢 **RUNNER** — This session is executing the bot and placing trades.", icon="🤖")
+else:
+    st.info("👁️ **VIEWER** — This session is view-only. The bot is running in another tab/device.", icon="👁️")
 
 tab_live, tab_signals, tab_backtest, tab_portfolio = st.tabs(["🔴 Live Trading", "📡 Signal Scanner", "🧪 Backtesting", "📂 Portfolio Backtest"])
 
@@ -793,55 +969,17 @@ with tab_live:
 
     # ── Today's trades ──
     with st.expander("📊 Today's Completed Trades", expanded=True):
-        try:
-            orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=200))
-            today  = datetime.now(SGT).date()
-            daily  = [o for o in orders if o.filled_at and o.filled_at.astimezone(SGT).date() == today]
-            if daily:
-                # ── Raw order table ──────────────────────────────────────
-                raw_rows = [{"Symbol": o.symbol, "Side": o.side.value, "Qty": float(o.filled_qty),
-                             "Fill Price": round(float(o.filled_avg_price), 2),
-                             "Value":      round(float(o.filled_avg_price) * float(o.filled_qty), 2),
-                             "Time (SGT)": o.filled_at.astimezone(SGT).strftime("%H:%M:%S")} for o in daily]
-                st.dataframe(pd.DataFrame(raw_rows), use_container_width=True, hide_index=True)
-
-                # ── P&L per completed round-trip (BUY → SELL) ────────────
-                st.write("**📊 Completed Round-Trip P&L**")
-                buys  = {o.symbol: o for o in daily if o.side == OrderSide.BUY}
-                sells = [o for o in daily if o.side == OrderSide.SELL]
-                pl_rows = []
-                total_pl = 0.0
-                for s in sells:
-                    sym       = s.symbol
-                    sell_p    = float(s.filled_avg_price)
-                    qty       = float(s.filled_qty)
-                    buy_p     = float(buys[sym].filled_avg_price) if sym in buys else None
-                    if buy_p:
-                        pl_usd  = round((sell_p - buy_p) * qty, 2)
-                        pl_pct  = round((sell_p - buy_p) / buy_p * 100, 2)
-                        total_pl += pl_usd
-                        pl_rows.append({
-                            "Symbol":     sym,
-                            "Buy Price":  f"${buy_p:.2f}",
-                            "Sell Price": f"${sell_p:.2f}",
-                            "Qty":        round(qty, 4),
-                            "P&L ($)":    f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}",
-                            "P&L (%)":    f"{pl_pct:+.2f}%",
-                            "Sell Time":  s.filled_at.astimezone(SGT).strftime("%H:%M:%S"),
-                        })
-                if pl_rows:
-                    st.dataframe(pd.DataFrame(pl_rows), use_container_width=True, hide_index=True)
-                    color = "🟢" if total_pl >= 0 else "🔴"
-                    st.write(f"**{color} Total Realized P&L Today: ${total_pl:+.2f}**")
-                else:
-                    st.info("No completed round-trips yet (buys open, no sells yet).")
-
-                vol = sum(float(o.filled_avg_price)*float(o.filled_qty) for o in daily if o.side == OrderSide.BUY)
-                st.write(f"**Total trades today:** {len(daily)} | **Buy volume:** ${vol:,.2f}")
-            else:
-                st.info("No trades completed today yet.")
-        except Exception as e:
-            st.write(f"Refreshing data... ({e})")
+        trades = st.session_state.realized_trades
+        today  = datetime.now(SGT).date().isoformat()
+        trades_today = [t for t in trades if t.get("date") == today]
+        if trades_today:
+            display_cols = ["Symbol", "Buy Price", "Sell Price", "Qty", "P&L ($)", "P&L (%)", "Time (SGT)", "Reason"]
+            st.dataframe(pd.DataFrame(trades_today)[display_cols], use_container_width=True, hide_index=True)
+            total_pl = sum(t["_pl_usd"] for t in trades_today)
+            color    = "🟢" if total_pl >= 0 else "🔴"
+            st.write(f"**{color} Total Realized P&L Today: ${total_pl:+.2f}** ({len(trades_today)} trades)")
+        else:
+            st.info("No completed trades today yet.")
 
     # ── Activity log ──
     with st.expander("📋 Activity Log", expanded=True):
@@ -1518,7 +1656,7 @@ with tab_portfolio:
 # ─────────────────────────────────────────────
 # 10. AUTO-RERUN LOOP (bot runs automatically on page load)
 # ─────────────────────────────────────────────
-if st.session_state.bot_running:
+if st.session_state.bot_running and st.session_state.is_runner_session:
     run_strategy()
     time.sleep(SCAN_INTERVAL)
     st.rerun()
