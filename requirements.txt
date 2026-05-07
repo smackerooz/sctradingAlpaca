@@ -4,3 +4,4 @@ yfinance
 streamlit
 pytz
 plotly
+supabase
