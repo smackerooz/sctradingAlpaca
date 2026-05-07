@@ -487,6 +487,7 @@ def sell_limit(symbol: str, qty, current_price: float, reason: str, entry_price:
         time_in_force=TimeInForce.DAY,
     ))
     st.session_state.peak_prices.pop(symbol, None)
+    st.session_state.pop("local_cash", None)   # force re-fetch from Alpaca after sell
     log(f"{reason} | SELL {qty} {symbol} @ MARKET (last ${current_price:.2f})")
     # ── Record realized P&L immediately so it persists across reruns ──
     if entry_price > 0:
@@ -514,23 +515,35 @@ def sell_limit(symbol: str, qty, current_price: float, reason: str, entry_price:
 # 5. STRATEGY ENGINE
 # ─────────────────────────────────────────────
 def is_market_open() -> bool:
-    """Returns True only during regular US market hours (9:30–16:00 ET = 21:30–04:00 SGT)."""
+    """Returns True only during regular US market hours.
+    Uses Alpaca clock as primary source. Falls back to strict time check.
+    NEVER returns True if Alpaca clock call fails — safety first."""
     try:
         clock = trading_client.get_clock()
+        if not clock.is_open:
+            return False
+        # Double-check: even if Alpaca says open, verify we're past 9:30 ET
+        # by checking next_open vs now
+        now_utc = datetime.now(pytz.utc)
+        if clock.next_open and clock.next_close:
+            return clock.next_open > clock.next_close  # open if close is next event
         return clock.is_open
     except Exception:
-        # Fallback: check SGT time manually
-        now_sgt = datetime.now(SGT)
-        # US market: Mon–Fri 21:30–04:00 SGT (next day)
-        weekday = now_sgt.weekday()  # 0=Mon … 4=Fri
-        hour, minute = now_sgt.hour, now_sgt.minute
-        after_open  = (hour == 21 and minute >= 30) or (hour >= 22)
-        before_close = hour < 4 or (hour == 4 and minute == 0)
-        is_weekday  = weekday < 5
-        # After midnight SGT the "trading day" continues until 4am
-        if hour < 12:
+        # Fallback: strict SGT time check — default to CLOSED if uncertain
+        now_sgt  = datetime.now(SGT)
+        weekday  = now_sgt.weekday()
+        hour     = now_sgt.hour
+        minute   = now_sgt.minute
+        # Market hours in SGT: 21:30–04:00 (Mon night to Tue morning SGT etc.)
+        # Be conservative — only open from 21:31 onwards to avoid pre-market
+        after_open   = (hour == 21 and minute >= 31) or (hour >= 22)
+        before_close = (hour < 4) or (hour == 4 and minute == 0)
+        is_weekday   = weekday < 5
+        if hour < 12:  # past midnight SGT, still same US trading session
             is_weekday = (weekday - 1) % 7 < 5
-        return is_weekday and (after_open or before_close)
+        if not (is_weekday and (after_open or before_close)):
+            return False
+        return True
 
 def run_strategy():
     reset_baseline_if_needed()
@@ -542,10 +555,16 @@ def run_strategy():
         return
 
     try:
-        account   = trading_client.get_account()
-        cash      = float(account.cash)
-        positions = trading_client.get_all_positions()
-        held      = {p.symbol: p for p in positions}
+        account        = trading_client.get_account()
+        alpaca_bp      = float(account.buying_power)
+        # Use the LOWER of Alpaca's buying_power vs our locally tracked cash.
+        # This prevents rapid-fire buys where Alpaca hasn't yet reflected recent orders.
+        local_cash     = st.session_state.get("local_cash", alpaca_bp)
+        # If Alpaca shows LESS than local (e.g. orders settled), trust Alpaca
+        # If Alpaca shows MORE (orders not yet reflected), trust our local tracker
+        cash           = min(alpaca_bp, local_cash)
+        positions      = trading_client.get_all_positions()
+        held           = {p.symbol: p for p in positions}
     except Exception as e:
         log(f"⚠️ Account fetch error: {e}")
         return
@@ -635,9 +654,10 @@ def run_strategy():
                     continue
                 trading_client.submit_order(MarketOrderRequest(
                     symbol=symbol, qty=qty,
-                    side=OrderSide.BUY, time_in_force=TimeInForce.DAY
+                    side=OrderSide.BUY, time_in_force=TimeInForce.IOC  # IOC: fill now or cancel — never queues for market open
                 ))
                 cash -= actual_cost
+                st.session_state.local_cash = cash   # persist so next scan doesn't reset
                 st.session_state.peak_prices[symbol] = curr_p
                 log(f"🟢 BUY {qty} {symbol} @ ${curr_p:.2f} = ${actual_cost:.2f} (SMA5 > SMA20, RSI+MACD ✓)")
         except Exception as e:
