@@ -258,11 +258,17 @@ def release_runner():
 
 # Claim runner on first load if no one else holds it
 if "is_runner_session" not in st.session_state:
-    rows = supabase.table("runner_lock").select("session_id").eq("id", 1).execute()
-    if not rows.data:
-        st.session_state.is_runner_session = claim_runner()
-    else:
-        st.session_state.is_runner_session = is_runner()
+    try:
+        rows = supabase.table("runner_lock").select("session_id").eq("id", 1).execute()
+        if not rows.data:
+            # No runner yet — claim it
+            st.session_state.is_runner_session = claim_runner()
+        else:
+            # Someone holds the lock — check if it's us
+            st.session_state.is_runner_session = is_runner()
+    except Exception:
+        # Supabase unreachable — default to runner so bot still works
+        st.session_state.is_runner_session = True
 
 # ─────────────────────────────────────────────
 # 4. HELPERS
@@ -833,7 +839,14 @@ st.title("📈 Auto Trading Bot")
 if st.session_state.is_runner_session:
     st.success("🟢 **RUNNER** — This session is executing the bot and placing trades.", icon="🤖")
 else:
-    st.info("👁️ **VIEWER** — This session is view-only. The bot is running in another tab/device.", icon="👁️")
+    col_v1, col_v2 = st.columns([4, 1])
+    with col_v1:
+        st.info("👁️ **VIEWER** — This session is view-only. The bot is running in another tab/device.", icon="👁️")
+    with col_v2:
+        if st.button("🔄 Claim Runner", help="Click if no other device is running the bot"):
+            release_runner()
+            st.session_state.is_runner_session = claim_runner()
+            st.rerun()
 
 tab_live, tab_signals, tab_backtest, tab_portfolio = st.tabs(["🔴 Live Trading", "📡 Signal Scanner", "🧪 Backtesting", "📂 Portfolio Backtest"])
 
