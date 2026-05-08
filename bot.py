@@ -368,7 +368,7 @@ def run_strategy():
                     continue
                 trading_client.submit_order(MarketOrderRequest(
                     symbol=symbol, qty=qty,
-                    side=OrderSide.BUY, time_in_force=TimeInForce.IOC,
+                    side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
                 ))
                 cash        -= actual_cost
                 local_cash   = cash
