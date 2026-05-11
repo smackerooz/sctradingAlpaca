@@ -38,24 +38,28 @@ MAX_TRADE_USD  = 300.0
 CASH_BUFFER    = 95_000.0
 TARGET_PROFIT  = 200.0
 
+# UPDATED WATCHLIST
+WATCHLIST = [
+    "AMD", "NVDA", "QCOM", "MU", "ARM",
+    "ASML", "PANW", "SMCI", "AVGO", "KLAC", "AMAT"
+]
+
+# Stock profiles remain the same for risk parameters
 STOCK_PROFILES = {
-    "AAPL"  : (0.010, 0.006, 0.004),
-    "MSFT"  : (0.010, 0.006, 0.004),
-    "GOOGL" : (0.010, 0.006, 0.004),
-    "AMZN"  : (0.013, 0.008, 0.006),
-    "ADBE"  : (0.013, 0.008, 0.006),
-    "CRM"   : (0.013, 0.008, 0.006),
-    "AVGO"  : (0.013, 0.008, 0.006),
-    "QCOM"  : (0.013, 0.008, 0.006),
-    "AMAT"  : (0.013, 0.008, 0.006),
-    "ASML"  : (0.013, 0.008, 0.006),
-    "NVDA"  : (0.018, 0.010, 0.008),
-    "TSLA"  : (0.020, 0.012, 0.009),
     "AMD"   : (0.015, 0.009, 0.007),
-    "PLTR"  : (0.018, 0.010, 0.008),
-    "SNOW"  : (0.018, 0.010, 0.008),
+    "NVDA"  : (0.018, 0.010, 0.008),
+    "QCOM"  : (0.013, 0.008, 0.006),
+    "MU"    : (0.013, 0.008, 0.006),
+    "ARM"   : (0.018, 0.010, 0.008),
+    "ASML"  : (0.013, 0.008, 0.006),
+    "PANW"  : (0.013, 0.008, 0.006),
+    "SMCI"  : (0.018, 0.010, 0.008),
+    "AVGO"  : (0.013, 0.008, 0.006),
+    "KLAC"  : (0.013, 0.008, 0.006),
+    "AMAT"  : (0.013, 0.008, 0.006),
 }
-WATCHLIST = list(STOCK_PROFILES.keys())
+# Default profile for any missing symbols
+DEFAULT_PROFILE = (0.013, 0.008, 0.006)
 
 # ─────────────────────────────────────────────
 # CLIENTS (from environment variables)
@@ -182,6 +186,7 @@ def calc_macd(series: pd.Series, fast=12, slow=26, signal=9):
     return macd_line, signal_line, macd_line - signal_line
 
 def rsi_macd_confirmed_buy(df: pd.DataFrame) -> bool:
+    """Setup Layer: RSI < 70 and MACD histogram > 0"""
     if df is None or len(df) < 30:
         return True
     close      = df["close"].dropna()
@@ -193,15 +198,16 @@ def rsi_macd_confirmed_buy(df: pd.DataFrame) -> bool:
     return (rsi_val < 70) and (hist_val > 0)
 
 def profile(symbol: str):
-    return STOCK_PROFILES.get(symbol, (0.013, 0.008, 0.006))
+    return STOCK_PROFILES.get(symbol, DEFAULT_PROFILE)
 
 # ─────────────────────────────────────────────
 # DATA
 # ─────────────────────────────────────────────
-def get_bars(symbol: str) -> pd.DataFrame:
+def get_bars(symbol: str, days_back: int = 2) -> pd.DataFrame:
+    """Fetch 5-minute bars for the given symbol."""
     try:
         end   = datetime.now(pytz.utc)
-        start = end - timedelta(days=2)
+        start = end - timedelta(days=days_back)
         req   = StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=TimeFrame(5, TimeFrameUnit.Minute),
@@ -246,7 +252,101 @@ def is_eod_window() -> bool:
     return now.weekday() == 4 and now.hour == 3 and 45 <= now.minute < 55
 
 # ─────────────────────────────────────────────
-# SELLS
+# 3-LAYER ARCHITECTURE
+# ─────────────────────────────────────────────
+
+# LAYER 1: REGIME FILTER
+def get_market_regime() -> bool:
+    """
+    Check if QQQ is above its 50-period SMA (5-minute bars) and RSI is not overbought.
+    Returns True if regime is favorable for longs.
+    """
+    try:
+        df = get_bars("QQQ", days_back=3)
+        if df.empty or len(df) < 50:
+            log.warning("⚠️ QQQ data insufficient – defaulting to bullish regime")
+            return True
+        close = df["close"]
+        sma50 = close.rolling(50).mean().iloc[-1]
+        current_price = close.iloc[-1]
+        if pd.isna(sma50):
+            return True
+        # Price above 50-SMA and RSI < 70
+        rsi = calc_rsi(close).iloc[-1]
+        if pd.isna(rsi):
+            rsi = 50.0
+        regime_ok = (current_price > sma50) and (rsi < 70)
+        if not regime_ok:
+            log.info(f"🚫 Regime filter: QQQ price=${current_price:.2f} SMA50=${sma50:.2f} RSI={rsi:.1f}")
+        return regime_ok
+    except Exception as e:
+        log.error(f"Regime filter error: {e}")
+        return True  # fail open
+
+# LAYER 2: SETUP LOGIC
+def is_buy_setup(symbol: str) -> tuple:
+    """
+    Returns (bool, price) – True if setup conditions are met, and the current price.
+    Conditions: Short MA (5) > Long MA (20) + RSI/MACD confirmation.
+    """
+    df = get_bars(symbol)
+    if df.empty or len(df) < 20:
+        return False, None
+    close = df["close"]
+    s_ma  = close.rolling(5).mean().iloc[-1]
+    l_ma  = close.rolling(20).mean().iloc[-1]
+    curr_p = close.iloc[-1]
+    if pd.isna(s_ma) or pd.isna(l_ma):
+        return False, None
+    if s_ma <= l_ma:
+        return False, None
+    if not rsi_macd_confirmed_buy(df):
+        return False, None
+    return True, curr_p
+
+# LAYER 3: EXECUTION (risk management)
+def manage_exit(symbol, position, df):
+    """
+    Evaluate exit conditions for a held position.
+    Returns True if position was sold.
+    """
+    if df.empty or len(df) < 20:
+        return False
+    close   = df["close"]
+    curr_p  = close.iloc[-1]
+    s_ma    = close.rolling(5).mean().iloc[-1]
+    l_ma    = close.rolling(20).mean().iloc[-1]
+    entry_p = float(position.avg_entry_price)
+    profit_pct = (curr_p - entry_p) / entry_p
+    hard_sl, trail_pct, _ = profile(symbol)
+
+    # Hard stop loss
+    if profit_pct <= -hard_sl:
+        sell_market(symbol, position.qty, curr_p, f"🛑 HARD STOP ({profit_pct*100:+.2f}%)", entry_p)
+        return True
+
+    # Trailing stop
+    peak = max(peak_prices.get(symbol, entry_p), curr_p)
+    peak_prices[symbol] = peak
+    gain_from_entry = (peak - entry_p) / entry_p
+    if gain_from_entry >= (trail_pct * 0.5) and curr_p <= peak * (1 - trail_pct):
+        sell_market(symbol, position.qty, curr_p, f"📉 TRAIL STOP (peak ${peak:.2f})", entry_p)
+        return True
+
+    # Target profit
+    if profit_pct >= 0.02:
+        sell_market(symbol, position.qty, curr_p, f"✅ TARGET HIT (+{profit_pct*100:.2f}%)", entry_p)
+        return True
+
+    # Trend reversal (MA death cross)
+    if s_ma < l_ma:
+        sell_market(symbol, position.qty, curr_p, f"📉 TREND REVERSED (P&L {profit_pct*100:+.2f}%)", entry_p)
+        return True
+
+    return False
+
+# ─────────────────────────────────────────────
+# SELLS (helper)
 # ─────────────────────────────────────────────
 def sell_market(symbol, qty, current_price, reason, entry_price=0.0):
     global local_cash
@@ -308,40 +408,20 @@ def run_strategy():
                 sb_log(f"⚠️ EOW sell error {p.symbol}: {e}")
         return
 
-    # ── Exit logic ───────────────────────────────────────────────────────
+    # ── LAYER 3: EXECUTION – Exit existing positions ─────────────────────
     for sym, p in held.items():
         try:
             df = get_bars(sym)
-            if df.empty or len(df) < 20:
-                continue
-            curr_p     = float(df["close"].iloc[-1])
-            s_ma       = float(df["close"].rolling(5).mean().iloc[-1])
-            l_ma       = float(df["close"].rolling(20).mean().iloc[-1])
-            entry_p    = float(p.avg_entry_price)
-            profit_pct = (curr_p - entry_p) / entry_p
-            hard_sl, trail_pct, _ = profile(sym)
-
-            if profit_pct <= -hard_sl:
-                sell_market(sym, p.qty, curr_p, f"🛑 HARD STOP ({profit_pct*100:+.2f}%)", entry_p)
-                continue
-
-            peak = max(peak_prices.get(sym, entry_p), curr_p)
-            peak_prices[sym] = peak
-            gain_from_entry  = (peak - entry_p) / entry_p
-            if gain_from_entry >= (trail_pct * 0.5) and curr_p <= peak * (1 - trail_pct):
-                sell_market(sym, p.qty, curr_p, f"📉 TRAIL STOP (peak ${peak:.2f})", entry_p)
-                continue
-
-            if profit_pct >= 0.02:
-                sell_market(sym, p.qty, curr_p, f"✅ TARGET HIT (+{profit_pct*100:.2f}%)", entry_p)
-                continue
-
-            if s_ma < l_ma:
-                sell_market(sym, p.qty, curr_p, f"📉 TREND REVERSED (P&L {profit_pct*100:+.2f}%)", entry_p)
+            manage_exit(sym, p, df)
         except Exception as e:
             sb_log(f"⚠️ Exit error {sym}: {e}")
 
-    # ── Buy logic ────────────────────────────────────────────────────────
+    # ── LAYER 1: REGIME FILTER (check market before new buys) ────────────
+    if not get_market_regime():
+        log.info("⛔ Regime filter blocks new buys")
+        return
+
+    # ── Buy logic (only if cash buffer allows) ───────────────────────────
     if cash <= CASH_BUFFER:
         log.info(f"💤 Cash ${cash:.2f} below buffer — skipping buys")
         return
@@ -350,30 +430,25 @@ def run_strategy():
         if symbol in held:
             continue
         try:
-            df = get_bars(symbol)
-            if df.empty or len(df) < 20:
+            # LAYER 2: SETUP LOGIC
+            setup_ok, curr_p = is_buy_setup(symbol)
+            if not setup_ok or curr_p is None:
                 continue
-            curr_p = float(df["close"].iloc[-1])
-            s_ma   = float(df["close"].rolling(5).mean().iloc[-1])
-            l_ma   = float(df["close"].rolling(20).mean().iloc[-1])
 
-            if s_ma > l_ma:
-                if not rsi_macd_confirmed_buy(df):
-                    log.info(f"⏭️ SKIP {symbol} — RSI/MACD gate")
-                    continue
-                qty         = round(MAX_TRADE_USD / curr_p, 6)
-                actual_cost = round(qty * curr_p, 2)
-                if qty <= 0 or cash - actual_cost < CASH_BUFFER:
-                    sb_log(f"💤 SKIP {symbol} — would breach buffer")
-                    continue
-                trading_client.submit_order(MarketOrderRequest(
-                    symbol=symbol, qty=qty,
-                    side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
-                ))
-                cash        -= actual_cost
-                local_cash   = cash
-                peak_prices[symbol] = curr_p
-                sb_log(f"🟢 BUY {qty} {symbol} @ ${curr_p:.2f} = ${actual_cost:.2f}")
+            qty         = round(MAX_TRADE_USD / curr_p, 6)
+            actual_cost = round(qty * curr_p, 2)
+            if qty <= 0 or cash - actual_cost < CASH_BUFFER:
+                sb_log(f"💤 SKIP {symbol} — would breach buffer")
+                continue
+
+            trading_client.submit_order(MarketOrderRequest(
+                symbol=symbol, qty=qty,
+                side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
+            ))
+            cash        -= actual_cost
+            local_cash   = cash
+            peak_prices[symbol] = curr_p
+            sb_log(f"🟢 BUY {qty} {symbol} @ ${curr_p:.2f} = ${actual_cost:.2f}")
         except Exception as e:
             sb_log(f"⚠️ Buy error {symbol}: {e}")
 
@@ -383,7 +458,7 @@ def run_strategy():
 # ENTRY POINT
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    log.info("🤖 Trading bot started")
+    log.info("🤖 Trading bot started (3-layer + QQQ filter)")
     baseline = load_baseline()
     log.info(f"📊 Weekly baseline loaded: ${baseline:,.2f}")
 
