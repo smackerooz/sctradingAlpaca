@@ -1173,7 +1173,7 @@ with tab_signals:
         st.plotly_chart(fig_rsi, use_container_width=True)
 
     else:
-        st.info("👆 Click **Run Signal Scan** to score all 74 stocks.")
+        st.info("👆 Click **Run Signal Scan** to score all stocks.")
 
 # ════════════════════════════════════════════
 # TAB 3 — BACKTESTING
