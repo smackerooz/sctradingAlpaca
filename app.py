@@ -1000,7 +1000,7 @@ with tab_live:
                 st.markdown("**📦 Signal Scores for Current Holdings**")
                 st.dataframe(held_sigs, use_container_width=True, hide_index=True)
     else:
-        st.info("👆 Click **Refresh Rankings** to load signal scores for all 74 stocks.")
+        st.info("👆 Click **Refresh Rankings** to load signal scores for all stocks.")
 
     st.divider()
 
