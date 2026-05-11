@@ -1018,13 +1018,20 @@ with tab_live:
         else:
             st.info("No completed trades today yet.")
 
-    # ── Activity log ──
-    with st.expander("📋 Activity Log", expanded=True):
-        if st.session_state.scan_log:
-            for entry in st.session_state.scan_log:
-                st.text(entry)
+    # ── Activity log (reads from Supabase bot_logs) ──
+with st.expander("📋 Activity Log", expanded=True):
+    try:
+        logs = supabase.table("bot_logs").select("message, created_at").order("created_at", desc=True).limit(50).execute()
+        if logs.data:
+            for log_entry in logs.data:
+                # Convert UTC timestamp to SGT for display
+                utc_time = datetime.fromisoformat(log_entry["created_at"].replace('Z', '+00:00'))
+                sgt_time = utc_time.astimezone(SGT).strftime("%H:%M:%S")
+                st.text(f"[{sgt_time}] {log_entry['message']}")
         else:
-            st.info("No activity yet. Bot is auto-running every 30s.")
+            st.info("No logs yet. Bot is running on Railway.")
+    except Exception as e:
+        st.error(f"Could not load logs: {e}")
 
 # ════════════════════════════════════════════
 # TAB 2 — SIGNAL SCANNER
