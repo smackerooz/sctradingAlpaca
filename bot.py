@@ -71,9 +71,18 @@ RETEST_TOLERANCE_PCT = 0.002   # within 0.2% of the breakout level
 MIN_BOX_PCT = 0.003            # yesterday's range must be >= 0.3% of price
 
 WATCHLIST = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "ADBE", "CRM",
-    "AVGO", "QCOM", "AMAT", "ASML",
-    "NVDA", "TSLA", "AMD", "PLTR", "SNOW",
+    "NVDA",
+    "AMD",
+    "AVGO",
+    "QCOM",
+    "AMAT",
+    "ASML",
+    "MU",
+    "KLAC",
+    "SMCI",
+    "ARM",
+    "MSTR",
+    "PANW",
 ]
 
 # ─────────────────────────────────────────────
