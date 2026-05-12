@@ -1,8 +1,20 @@
 """
-bot.py — Trading Bot (Railway)
-Runs 24/7 as a pure Python process. No browser needed.
-Reads secrets from environment variables.
-Writes all state to Supabase.
+botbounce.py — Opening Range Breakout with Retest (ORB-R)
+──────────────────────────────────────────────────────────
+Strategy: Box yesterday's regular session high/low as key levels.
+          Wait for a 15-min candle to CLOSE above yesterday's high (breakout).
+          Wait for price to pull back and RETEST the broken level.
+          Confirm with a bullish reversal candle on the 5-min chart
+          (Hammer, Inverted Hammer, or Bullish Engulfing).
+          Enter long with 3:1 R:R. Stop = below confirmation candle low.
+          Target = entry + 3 x risk.
+          Only trade within the first 2.5 hours of US market open.
+          Long only (Shariah-compliant — no shorting).
+
+Run on Railway:
+    Start command: python botbounce.py
+    Environment variables: ALPACA_API_KEY, ALPACA_SECRET_KEY,
+                           SUPABASE_URL, SUPABASE_KEY
 """
 
 import os
@@ -13,8 +25,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 from supabase import create_client, Client
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, StopLossRequest, TakeProfitRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -32,37 +44,40 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-SGT            = pytz.timezone("Asia/Singapore")
-SCAN_INTERVAL  = 10          # seconds between scans
-MAX_TRADE_USD  = 300.0
-CASH_BUFFER    = 95_000.0
-TARGET_PROFIT  = 200.0
+ET            = pytz.timezone("US/Eastern")
+SGT           = pytz.timezone("Asia/Singapore")
+SCAN_INTERVAL = 30           # seconds between scans (slower — pattern-based)
+MAX_TRADE_USD = 300.0        # max dollars per trade
+CASH_BUFFER   = 95_000.0    # min buying power before buying
+REWARD_RISK   = 3.0         # 3:1 R:R
+TARGET_PROFIT = 200.0       # weekly target USD
 
-# UPDATED WATCHLIST
+# Trade window: first 2.5 hours of US market (9:30–12:00 ET)
+TRADE_WINDOW_START_H = 9
+TRADE_WINDOW_START_M = 30
+TRADE_WINDOW_END_H   = 12
+TRADE_WINDOW_END_M   = 0
+
+# Breakout confirmation: 15-min candle must CLOSE above box high
+BREAKOUT_TF_MINUTES = 15
+
+# Retest confirmation: 5-min candle pattern
+RETEST_TF_MINUTES   = 5
+
+# Retest tolerance: how close price must come to box high (% of box range)
+RETEST_TOLERANCE_PCT = 0.002   # within 0.2% of the breakout level
+
+# Minimum box size to trade (avoid tiny ranges)
+MIN_BOX_PCT = 0.003            # yesterday's range must be >= 0.3% of price
+
 WATCHLIST = [
-    "AMD", "NVDA", "QCOM", "MU", "ARM",
-    "ASML", "PANW", "SMCI", "AVGO", "KLAC", "AMAT"
+    "AAPL", "MSFT", "GOOGL", "AMZN", "ADBE", "CRM",
+    "AVGO", "QCOM", "AMAT", "ASML",
+    "NVDA", "TSLA", "AMD", "PLTR", "SNOW",
 ]
 
-# Stock profiles remain the same for risk parameters
-STOCK_PROFILES = {
-    "AMD"   : (0.015, 0.009, 0.007),
-    "NVDA"  : (0.018, 0.010, 0.008),
-    "QCOM"  : (0.013, 0.008, 0.006),
-    "MU"    : (0.013, 0.008, 0.006),
-    "ARM"   : (0.018, 0.010, 0.008),
-    "ASML"  : (0.013, 0.008, 0.006),
-    "PANW"  : (0.013, 0.008, 0.006),
-    "SMCI"  : (0.018, 0.010, 0.008),
-    "AVGO"  : (0.013, 0.008, 0.006),
-    "KLAC"  : (0.013, 0.008, 0.006),
-    "AMAT"  : (0.013, 0.008, 0.006),
-}
-# Default profile for any missing symbols
-DEFAULT_PROFILE = (0.013, 0.008, 0.006)
-
 # ─────────────────────────────────────────────
-# CLIENTS (from environment variables)
+# CLIENTS
 # ─────────────────────────────────────────────
 API_KEY    = os.environ["ALPACA_API_KEY"]
 SECRET_KEY = os.environ["ALPACA_SECRET_KEY"]
@@ -74,17 +89,20 @@ data_client    = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 supabase: Client = create_client(SB_URL, SB_KEY)
 
 # ─────────────────────────────────────────────
-# BOT STATE (in-memory, backed by Supabase)
+# BOT STATE
 # ─────────────────────────────────────────────
-peak_prices  = {}
-local_cash   = None
-baseline     = None
+# Tracks per-symbol state across scans
+# {symbol: {"box_high": float, "box_low": float, "breakout_confirmed": bool,
+#            "retest_zone": float, "in_trade": bool, "entry": float,
+#            "stop": float, "target": float, "qty": float}}
+symbol_state: dict = {}
+local_cash: float  = None
+baseline: float    = None
 
 # ─────────────────────────────────────────────
 # SUPABASE HELPERS
 # ─────────────────────────────────────────────
 def sb_log(msg: str):
-    """Write a log entry to Supabase for dashboard to display."""
     try:
         supabase.table("bot_logs").insert({
             "message":    msg,
@@ -94,17 +112,16 @@ def sb_log(msg: str):
         pass
     log.info(msg)
 
-def save_trade(symbol, buy_p, sell_p, qty, entry_price, current_price, reason):
-    """Save a completed trade to Supabase."""
+def save_trade(symbol, entry_price, exit_price, qty, reason):
     try:
-        pl_usd = round((current_price - entry_price) * float(qty), 2)
-        pl_pct = round((current_price - entry_price) / entry_price * 100, 2)
+        pl_usd = round((exit_price - entry_price) * float(qty), 2)
+        pl_pct = round((exit_price - entry_price) / entry_price * 100, 2)
         today  = datetime.now(SGT).date().isoformat()
         supabase.table("realized_trades").insert({
             "date":       today,
             "symbol":     symbol,
             "buy_price":  f"${entry_price:.2f}",
-            "sell_price": f"${current_price:.2f}",
+            "sell_price": f"${exit_price:.2f}",
             "qty":        round(float(qty), 4),
             "pl_usd":     pl_usd,
             "pl_display": f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}",
@@ -116,13 +133,12 @@ def save_trade(symbol, buy_p, sell_p, qty, entry_price, current_price, reason):
         log.error(f"save_trade error: {e}")
 
 def load_baseline() -> float:
-    """Load weekly baseline from Supabase."""
     try:
         row = supabase.table("weekly_baseline").select("*").eq("id", 1).execute()
         if row.data:
-            bl         = row.data[0]
-            saved_date = datetime.fromisoformat(bl["date"]).date()
-            today      = datetime.now(SGT).date()
+            bl          = row.data[0]
+            saved_date  = datetime.fromisoformat(bl["date"]).date()
+            today       = datetime.now(SGT).date()
             last_monday = today - timedelta(days=today.weekday())
             if saved_date >= last_monday:
                 return float(bl["baseline"])
@@ -134,7 +150,6 @@ def load_baseline() -> float:
         return 10_000.0
 
 def save_baseline(value: float):
-    """Save weekly baseline to Supabase."""
     try:
         supabase.table("weekly_baseline").upsert({
             "id":       1,
@@ -144,73 +159,60 @@ def save_baseline(value: float):
     except Exception as e:
         log.error(f"save_baseline error: {e}")
 
-def save_peak_prices():
-    """Persist peak_prices to Supabase for dashboard display."""
-    try:
-        supabase.table("bot_state").upsert({
-            "id":          1,
-            "peak_prices": str(peak_prices),
-            "updated_at":  datetime.now(SGT).isoformat(),
-        }).execute()
-    except Exception:
-        pass
-
 def send_heartbeat():
-    """Write current timestamp to Supabase so dashboard can detect crashes."""
     try:
         supabase.table("bot_state").upsert({
-            "id":            1,
+            "id":             1,
             "last_heartbeat": datetime.now(SGT).isoformat(),
-            "updated_at":    datetime.now(SGT).isoformat(),
+            "updated_at":     datetime.now(SGT).isoformat(),
         }).execute()
     except Exception:
         pass
 
 # ─────────────────────────────────────────────
-# TECHNICAL INDICATORS
+# MARKET HOURS
 # ─────────────────────────────────────────────
-def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain  = delta.clip(lower=0)
-    loss  = -delta.clip(upper=0)
-    avg_g = gain.ewm(com=period - 1, min_periods=period).mean()
-    avg_l = loss.ewm(com=period - 1, min_periods=period).mean()
-    rs    = avg_g / avg_l.replace(0, float("nan"))
-    return 100 - (100 / (1 + rs))
+def is_market_open() -> bool:
+    """True only during regular US market hours."""
+    try:
+        clock = trading_client.get_clock()
+        if not clock.is_open:
+            return False
+        if clock.next_open and clock.next_close:
+            return clock.next_open > clock.next_close
+        return clock.is_open
+    except Exception:
+        now_et       = datetime.now(ET)
+        weekday      = now_et.weekday()
+        hour, minute = now_et.hour, now_et.minute
+        after_open   = (hour == 9 and minute >= 31) or (hour >= 10)
+        before_close = hour < 16
+        return weekday < 5 and after_open and before_close
 
-def calc_macd(series: pd.Series, fast=12, slow=26, signal=9):
-    ema_fast    = series.ewm(span=fast, adjust=False).mean()
-    ema_slow    = series.ewm(span=slow, adjust=False).mean()
-    macd_line   = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    return macd_line, signal_line, macd_line - signal_line
+def is_in_trade_window() -> bool:
+    """True only within the first 2.5 hours of market open (9:30–12:00 ET)."""
+    now_et  = datetime.now(ET)
+    open_t  = now_et.replace(hour=TRADE_WINDOW_START_H, minute=TRADE_WINDOW_START_M,
+                              second=0, microsecond=0)
+    close_t = now_et.replace(hour=TRADE_WINDOW_END_H, minute=TRADE_WINDOW_END_M,
+                              second=0, microsecond=0)
+    return open_t <= now_et <= close_t
 
-def rsi_macd_confirmed_buy(df: pd.DataFrame) -> bool:
-    """Setup Layer: RSI < 70 and MACD histogram > 0"""
-    if df is None or len(df) < 30:
-        return True
-    close      = df["close"].dropna()
-    rsi_val    = calc_rsi(close).iloc[-1]
-    _, _, hist = calc_macd(close)
-    hist_val   = hist.iloc[-1]
-    if pd.isna(rsi_val):  rsi_val  = 50.0
-    if pd.isna(hist_val): hist_val = 0.0
-    return (rsi_val < 70) and (hist_val > 0)
-
-def profile(symbol: str):
-    return STOCK_PROFILES.get(symbol, DEFAULT_PROFILE)
+def is_eod_window() -> bool:
+    now_et = datetime.now(ET)
+    return now_et.weekday() == 4 and now_et.hour == 15 and 45 <= now_et.minute < 55
 
 # ─────────────────────────────────────────────
-# DATA
+# DATA FETCHERS
 # ─────────────────────────────────────────────
-def get_bars(symbol: str, days_back: int = 2) -> pd.DataFrame:
-    """Fetch 5-minute bars for the given symbol."""
+def get_bars(symbol: str, timeframe_minutes: int, days_back: int = 3) -> pd.DataFrame:
+    """Fetch intraday bars from Alpaca."""
     try:
         end   = datetime.now(pytz.utc)
         start = end - timedelta(days=days_back)
         req   = StockBarsRequest(
             symbol_or_symbols=symbol,
-            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+            timeframe=TimeFrame(timeframe_minutes, TimeFrameUnit.Minute),
             start=start,
             end=end,
             feed="iex",
@@ -221,169 +223,273 @@ def get_bars(symbol: str, days_back: int = 2) -> pd.DataFrame:
         if isinstance(bars.index, pd.MultiIndex):
             bars = bars.xs(symbol, level="symbol")
         bars.index = pd.to_datetime(bars.index, utc=True)
-        return bars[["close"]].copy()
-    except Exception:
+        # Convert to ET for session filtering
+        bars.index = bars.index.tz_convert(ET)
+        return bars[["open", "high", "low", "close", "volume"]].copy()
+    except Exception as e:
+        log.warning(f"get_bars error {symbol}: {e}")
         return pd.DataFrame()
 
+def get_yesterday_box(symbol: str) -> tuple:
+    """
+    Get yesterday's regular session high and low (9:30–16:00 ET).
+    Returns (box_high, box_low) or (None, None) if insufficient data.
+    """
+    df = get_bars(symbol, timeframe_minutes=15, days_back=5)
+    if df.empty:
+        return None, None
+
+    today_et    = datetime.now(ET).date()
+    yesterday   = today_et - timedelta(days=1)
+    # Skip weekends — find last trading day
+    while yesterday.weekday() >= 5:
+        yesterday -= timedelta(days=1)
+
+    # Filter yesterday's regular session bars
+    session_bars = df[
+        (df.index.date == yesterday) &
+        (df.index.time >= pd.Timestamp("09:30").time()) &
+        (df.index.time <= pd.Timestamp("16:00").time())
+    ]
+
+    if session_bars.empty or len(session_bars) < 4:
+        log.warning(f"{symbol}: insufficient yesterday bars ({len(session_bars)})")
+        return None, None
+
+    box_high = round(float(session_bars["high"].max()), 4)
+    box_low  = round(float(session_bars["low"].min()), 4)
+    return box_high, box_low
+
 # ─────────────────────────────────────────────
-# MARKET HOURS
+# CANDLESTICK PATTERN DETECTION
 # ─────────────────────────────────────────────
-def is_market_open() -> bool:
-    try:
-        clock = trading_client.get_clock()
-        if not clock.is_open:
-            return False
-        if clock.next_open and clock.next_close:
-            return clock.next_open > clock.next_close
-        return clock.is_open
-    except Exception:
-        now_sgt      = datetime.now(SGT)
-        weekday      = now_sgt.weekday()
-        hour, minute = now_sgt.hour, now_sgt.minute
-        after_open   = (hour == 21 and minute >= 31) or (hour >= 22)
-        before_close = hour < 4 or (hour == 4 and minute == 0)
-        is_weekday   = weekday < 5
-        if hour < 12:
-            is_weekday = (weekday - 1) % 7 < 5
-        return is_weekday and (after_open or before_close)
-
-def is_eod_window() -> bool:
-    now = datetime.now(SGT)
-    return now.weekday() == 4 and now.hour == 3 and 45 <= now.minute < 55
-
-# ─────────────────────────────────────────────
-# 3-LAYER ARCHITECTURE
-# ─────────────────────────────────────────────
-
-# LAYER 1: REGIME FILTER
-def get_market_regime() -> bool:
+def is_hammer(candle: pd.Series) -> bool:
     """
-    Check if QQQ is above its 50-period SMA (5-minute bars) and RSI is not overbought.
-    Returns True if regime is favorable for longs.
+    Hammer: small body at the top, long lower wick (>= 2x body).
+    Bullish reversal signal at support.
     """
-    try:
-        df = get_bars("QQQ", days_back=3)
-        if df.empty or len(df) < 50:
-            log.warning("⚠️ QQQ data insufficient – defaulting to bullish regime")
-            return True
-        close = df["close"]
-        sma50 = close.rolling(50).mean().iloc[-1]
-        current_price = close.iloc[-1]
-        if pd.isna(sma50):
-            return True
-        # Price above 50-SMA and RSI < 70
-        rsi = calc_rsi(close).iloc[-1]
-        if pd.isna(rsi):
-            rsi = 50.0
-        regime_ok = (current_price > sma50) and (rsi < 70)
-        if not regime_ok:
-            log.info(f"🚫 Regime filter: QQQ price=${current_price:.2f} SMA50=${sma50:.2f} RSI={rsi:.1f}")
-        return regime_ok
-    except Exception as e:
-        log.error(f"Regime filter error: {e}")
-        return True  # fail open
-
-# LAYER 2: SETUP LOGIC
-def is_buy_setup(symbol: str) -> tuple:
-    """
-    Returns (bool, price) – True if setup conditions are met, and the current price.
-    Conditions: Short MA (5) > Long MA (20) + RSI/MACD confirmation.
-    """
-    df = get_bars(symbol)
-    if df.empty or len(df) < 20:
-        return False, None
-    close = df["close"]
-    s_ma  = close.rolling(5).mean().iloc[-1]
-    l_ma  = close.rolling(20).mean().iloc[-1]
-    curr_p = close.iloc[-1]
-    if pd.isna(s_ma) or pd.isna(l_ma):
-        return False, None
-    if s_ma <= l_ma:
-        return False, None
-    if not rsi_macd_confirmed_buy(df):
-        return False, None
-    return True, curr_p
-
-# LAYER 3: EXECUTION (risk management)
-def manage_exit(symbol, position, df):
-    """
-    Evaluate exit conditions for a held position.
-    Returns True if position was sold.
-    """
-    if df.empty or len(df) < 20:
+    body      = abs(candle["close"] - candle["open"])
+    total     = candle["high"] - candle["low"]
+    lower_wick = candle["open"] - candle["low"] if candle["close"] >= candle["open"] \
+                 else candle["close"] - candle["low"]
+    if total == 0 or body == 0:
         return False
-    close   = df["close"]
-    curr_p  = close.iloc[-1]
-    s_ma    = close.rolling(5).mean().iloc[-1]
-    l_ma    = close.rolling(20).mean().iloc[-1]
-    entry_p = float(position.avg_entry_price)
-    profit_pct = (curr_p - entry_p) / entry_p
-    hard_sl, trail_pct, _ = profile(symbol)
+    return (lower_wick >= 2 * body) and (body / total <= 0.35)
 
-    # Hard stop loss
-    if profit_pct <= -hard_sl:
-        sell_market(symbol, position.qty, curr_p, f"🛑 HARD STOP ({profit_pct*100:+.2f}%)", entry_p)
-        return True
+def is_inverted_hammer(candle: pd.Series) -> bool:
+    """
+    Inverted Hammer: small body at the bottom, long upper wick (>= 2x body).
+    Bullish reversal at support after downtrend/pullback.
+    """
+    body       = abs(candle["close"] - candle["open"])
+    total      = candle["high"] - candle["low"]
+    upper_wick = candle["high"] - max(candle["close"], candle["open"])
+    if total == 0 or body == 0:
+        return False
+    return (upper_wick >= 2 * body) and (body / total <= 0.35)
 
-    # Trailing stop
-    peak = max(peak_prices.get(symbol, entry_p), curr_p)
-    peak_prices[symbol] = peak
-    gain_from_entry = (peak - entry_p) / entry_p
-    if gain_from_entry >= (trail_pct * 0.5) and curr_p <= peak * (1 - trail_pct):
-        sell_market(symbol, position.qty, curr_p, f"📉 TRAIL STOP (peak ${peak:.2f})", entry_p)
-        return True
+def is_bullish_engulfing(prev: pd.Series, curr: pd.Series) -> bool:
+    """
+    Bullish Engulfing: current bullish candle's body fully engulfs
+    the previous bearish candle's body.
+    """
+    prev_bearish = prev["close"] < prev["open"]
+    curr_bullish = curr["close"] > curr["open"]
+    if not prev_bearish or not curr_bullish:
+        return False
+    return (curr["open"] <= prev["close"]) and (curr["close"] >= prev["open"])
 
-    # Target profit
-    if profit_pct >= 0.02:
-        sell_market(symbol, position.qty, curr_p, f"✅ TARGET HIT (+{profit_pct*100:.2f}%)", entry_p)
-        return True
+def check_reversal_candle(df_5m: pd.DataFrame, retest_level: float) -> bool:
+    """
+    Check if the latest 5-min candle(s) show a bullish reversal pattern
+    at or near the retest level.
+    Returns True if any valid pattern is detected.
+    """
+    if df_5m is None or len(df_5m) < 2:
+        return False
 
-    # Trend reversal (MA death cross)
-    if s_ma < l_ma:
-        sell_market(symbol, position.qty, curr_p, f"📉 TREND REVERSED (P&L {profit_pct*100:+.2f}%)", entry_p)
-        return True
+    latest = df_5m.iloc[-1]
+    prev   = df_5m.iloc[-2]
 
-    return False
+    # Check candle is near the retest level
+    candle_low  = latest["low"]
+    candle_high = latest["high"]
+    level_in_range = (candle_low <= retest_level * (1 + RETEST_TOLERANCE_PCT) and
+                      candle_high >= retest_level * (1 - RETEST_TOLERANCE_PCT))
+
+    if not level_in_range:
+        return False
+
+    hammer         = is_hammer(latest)
+    inv_hammer     = is_inverted_hammer(latest)
+    engulfing      = is_bullish_engulfing(prev, latest)
+
+    if hammer:
+        sb_log(f"🔨 Hammer detected at retest level ${retest_level:.2f}")
+    if inv_hammer:
+        sb_log(f"🔄 Inverted Hammer detected at retest level ${retest_level:.2f}")
+    if engulfing:
+        sb_log(f"🟰 Bullish Engulfing detected at retest level ${retest_level:.2f}")
+
+    return hammer or inv_hammer or engulfing
 
 # ─────────────────────────────────────────────
-# SELLS (helper)
+# BREAKOUT CONFIRMATION (15-min)
 # ─────────────────────────────────────────────
-def sell_market(symbol, qty, current_price, reason, entry_price=0.0):
-    global local_cash
+def check_breakout_confirmed(symbol: str, box_high: float) -> bool:
+    """
+    Returns True if a 15-min candle has CLOSED above box_high today.
+    """
+    df_15m = get_bars(symbol, timeframe_minutes=15, days_back=2)
+    if df_15m.empty:
+        return False
+
+    today_et    = datetime.now(ET).date()
+    today_bars  = df_15m[df_15m.index.date == today_et]
+
+    if today_bars.empty:
+        return False
+
+    # Only look at bars within trade window
+    window_bars = today_bars[
+        today_bars.index.time >= pd.Timestamp(
+            f"{TRADE_WINDOW_START_H:02d}:{TRADE_WINDOW_START_M:02d}").time()
+    ]
+
+    # A closed candle above box_high (close > box_high)
+    breakout_bars = window_bars[window_bars["close"] > box_high]
+    return not breakout_bars.empty
+
+# ─────────────────────────────────────────────
+# RETEST CHECK (5-min)
+# ─────────────────────────────────────────────
+def check_retest(symbol: str, box_high: float) -> bool:
+    """
+    Returns True if price has pulled back to retest the box_high level
+    (within tolerance) after the breakout.
+    """
+    df_5m = get_bars(symbol, timeframe_minutes=5, days_back=2)
+    if df_5m.empty:
+        return False
+
+    today_et   = datetime.now(ET).date()
+    today_bars = df_5m[df_5m.index.date == today_et]
+
+    if today_bars.empty:
+        return False
+
+    latest_low  = float(today_bars["low"].iloc[-1])
+    latest_high = float(today_bars["high"].iloc[-1])
+
+    # Price has come back down to touch or near the box_high level
+    touched_level = (latest_low <= box_high * (1 + RETEST_TOLERANCE_PCT) and
+                     latest_high >= box_high * (1 - RETEST_TOLERANCE_PCT))
+    return touched_level
+
+# ─────────────────────────────────────────────
+# TRADE EXECUTION
+# ─────────────────────────────────────────────
+def enter_trade(symbol: str, entry_price: float, stop_price: float,
+                target_price: float, cash: float) -> float:
+    """
+    Submit a market buy order with bracket (stop loss + take profit).
+    Returns actual cost deducted from cash, or 0 if failed.
+    """
+    risk_per_share = entry_price - stop_price
+    if risk_per_share <= 0:
+        sb_log(f"⚠️ SKIP {symbol} — invalid risk (entry ${entry_price:.2f} <= stop ${stop_price:.2f})")
+        return 0.0
+
+    qty         = round(MAX_TRADE_USD / entry_price, 6)
+    actual_cost = round(qty * entry_price, 2)
+
+    if qty <= 0:
+        sb_log(f"⚠️ SKIP {symbol} — qty too small")
+        return 0.0
+    if cash - actual_cost < CASH_BUFFER:
+        sb_log(f"💤 SKIP {symbol} — would breach cash buffer")
+        return 0.0
+
     try:
         trading_client.submit_order(MarketOrderRequest(
-            symbol=symbol, qty=qty,
-            side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            order_class="bracket",
+            stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
+            take_profit=TakeProfitRequest(limit_price=round(target_price, 2)),
         ))
-        peak_prices.pop(symbol, None)
-        local_cash = None   # force re-fetch after sell
-        msg = f"{reason} | SELL {qty} {symbol} @ MARKET (last ${current_price:.2f})"
-        sb_log(msg)
-        if entry_price > 0:
-            save_trade(symbol, entry_price, current_price, qty, entry_price, current_price, reason)
+        sb_log(
+            f"🟢 ORB-R BUY {qty} {symbol} | "
+            f"Entry:${entry_price:.2f} | "
+            f"Stop:${stop_price:.2f} | "
+            f"Target:${target_price:.2f} | "
+            f"Risk:${risk_per_share*qty:.2f} | "
+            f"R:R 3:1"
+        )
+        return actual_cost
     except Exception as e:
-        sb_log(f"⚠️ Sell error {symbol}: {e}")
+        sb_log(f"⚠️ Order error {symbol}: {e}")
+        return 0.0
+
+def exit_trade(symbol: str, qty, current_price: float, entry_price: float, reason: str):
+    """Emergency exit — cancel open orders and sell at market."""
+    try:
+        # Cancel any open bracket orders for this symbol
+        trading_client.cancel_orders()
+        time.sleep(1)
+        trading_client.submit_order(MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+        ))
+        sb_log(f"🔴 EXIT {symbol} @ ${current_price:.2f} — {reason}")
+        save_trade(symbol, entry_price, current_price, qty, reason)
+    except Exception as e:
+        sb_log(f"⚠️ Exit error {symbol}: {e}")
+
+# ─────────────────────────────────────────────
+# RESET DAILY STATE
+# ─────────────────────────────────────────────
+def reset_daily_state():
+    """
+    Clear all symbol states at start of each new trading day.
+    Called once before the trade window opens.
+    """
+    global symbol_state
+    symbol_state = {}
+    sb_log("🔄 Daily state reset — new trading day")
 
 # ─────────────────────────────────────────────
 # MAIN STRATEGY
 # ─────────────────────────────────────────────
-def run_strategy():
-    global local_cash, baseline
+_last_reset_date = None
 
-    # ── Weekly baseline reset (Monday 21:30 SGT) ────────────────────────
-    now = datetime.now(SGT)
-    if now.weekday() == 0 and now.hour == 21 and now.minute == 30:
+def run_strategy():
+    global local_cash, baseline, _last_reset_date
+
+    # ── Weekly baseline reset ────────────────────────────────────────
+    now_et = datetime.now(ET)
+    if now_et.weekday() == 0 and now_et.hour == 9 and now_et.minute == 30:
         new_bl = float(trading_client.get_account().equity)
         baseline = new_bl
         save_baseline(new_bl)
-        sb_log("🔄 Weekly baseline reset — Monday 21:30 SGT")
+        sb_log("🔄 Weekly baseline reset — Monday market open")
 
-    # ── Market hours guard ───────────────────────────────────────────────
+    # ── Daily state reset (once per day before market open) ─────────
+    today = datetime.now(ET).date()
+    if _last_reset_date != today:
+        reset_daily_state()
+        _last_reset_date = today
+
+    # ── Market hours guard ───────────────────────────────────────────
     if not is_market_open():
         log.info("💤 Market closed — skipping scan")
         return
 
-    # ── Fetch account ────────────────────────────────────────────────────
+    # ── Fetch account ────────────────────────────────────────────────
     try:
         account   = trading_client.get_account()
         alpaca_bp = float(account.buying_power)
@@ -394,78 +500,168 @@ def run_strategy():
         sb_log(f"⚠️ Account fetch error: {e}")
         return
 
-    # ── End-of-week liquidation ──────────────────────────────────────────
+    # ── End-of-week liquidation ──────────────────────────────────────
     if is_eod_window():
         for p in positions:
             try:
+                trading_client.cancel_orders()
+                time.sleep(0.5)
                 trading_client.submit_order(MarketOrderRequest(
                     symbol=p.symbol, qty=p.qty,
                     side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
                 ))
-                peak_prices.pop(p.symbol, None)
                 sb_log(f"🔔 EOW liquidation: SELL {p.qty} {p.symbol}")
+                if p.symbol in symbol_state:
+                    s = symbol_state[p.symbol]
+                    if s.get("in_trade"):
+                        save_trade(p.symbol, s["entry"], float(p.current_price),
+                                   p.qty, "EOW Liquidation")
+                        symbol_state[p.symbol]["in_trade"] = False
             except Exception as e:
-                sb_log(f"⚠️ EOW sell error {p.symbol}: {e}")
+                sb_log(f"⚠️ EOW error {p.symbol}: {e}")
         return
 
-    # ── LAYER 3: EXECUTION – Exit existing positions ─────────────────────
+    # ── Monitor existing positions (emergency exit only) ─────────────
+    # Note: bracket orders handle normal stop/target exits automatically.
+    # We only intervene if trade window has closed with position still open.
     for sym, p in held.items():
-        try:
-            df = get_bars(sym)
-            manage_exit(sym, p, df)
-        except Exception as e:
-            sb_log(f"⚠️ Exit error {sym}: {e}")
+        s = symbol_state.get(sym, {})
+        if not s.get("in_trade"):
+            continue
+        if not is_in_trade_window():
+            # Trade window closed — exit any open position
+            curr_p = float(p.current_price)
+            exit_trade(sym, p.qty, curr_p, s.get("entry", curr_p),
+                       "⏰ Trade window closed — forced exit")
+            symbol_state[sym]["in_trade"] = False
 
-    # ── LAYER 1: REGIME FILTER (check market before new buys) ────────────
-    if not get_market_regime():
-        log.info("⛔ Regime filter blocks new buys")
+    # ── Only look for new entries within trade window ─────────────────
+    if not is_in_trade_window():
+        log.info("⏰ Outside trade window (9:30–12:00 ET) — no new entries")
         return
 
-    # ── Buy logic (only if cash buffer allows) ───────────────────────────
     if cash <= CASH_BUFFER:
-        log.info(f"💤 Cash ${cash:.2f} below buffer — skipping buys")
+        log.info(f"💤 Cash ${cash:.2f} below buffer — skipping")
         return
 
+    # ── Scan watchlist for ORB-R setups ──────────────────────────────
     for symbol in WATCHLIST:
         if symbol in held:
+            continue  # already in a trade for this symbol
+
+        # Init state for symbol if needed
+        if symbol not in symbol_state:
+            symbol_state[symbol] = {
+                "box_high":           None,
+                "box_low":            None,
+                "breakout_confirmed": False,
+                "in_trade":           False,
+                "entry":              0.0,
+                "stop":               0.0,
+                "target":             0.0,
+                "qty":                0.0,
+                "traded_today":       False,
+            }
+
+        s = symbol_state[symbol]
+
+        # Only one trade per symbol per day
+        if s["traded_today"]:
             continue
+
         try:
-            # LAYER 2: SETUP LOGIC
-            setup_ok, curr_p = is_buy_setup(symbol)
-            if not setup_ok or curr_p is None:
+            # ── STEP 1: Get/cache yesterday's box ───────────────────
+            if s["box_high"] is None:
+                box_high, box_low = get_yesterday_box(symbol)
+                if box_high is None:
+                    continue
+                box_range = box_high - box_low
+                mid_price = (box_high + box_low) / 2
+                if box_range / mid_price < MIN_BOX_PCT:
+                    sb_log(f"⏭️ SKIP {symbol} — box too small (range {box_range/mid_price*100:.2f}%)")
+                    s["traded_today"] = True
+                    continue
+                s["box_high"] = box_high
+                s["box_low"]  = box_low
+                sb_log(f"📦 {symbol} box set: High=${box_high:.2f} Low=${box_low:.2f} Range=${box_range:.2f}")
+
+            box_high = s["box_high"]
+            box_low  = s["box_low"]
+
+            # ── STEP 2: Check for 15-min breakout ───────────────────
+            if not s["breakout_confirmed"]:
+                if check_breakout_confirmed(symbol, box_high):
+                    s["breakout_confirmed"] = True
+                    sb_log(f"🚀 {symbol} BREAKOUT confirmed above ${box_high:.2f} (15-min close)")
+                else:
+                    continue  # no breakout yet — keep waiting
+
+            # ── STEP 3: Wait for retest of box_high ─────────────────
+            if not check_retest(symbol, box_high):
+                log.info(f"⏳ {symbol} waiting for retest of ${box_high:.2f}")
                 continue
 
-            qty         = round(MAX_TRADE_USD / curr_p, 6)
-            actual_cost = round(qty * curr_p, 2)
-            if qty <= 0 or cash - actual_cost < CASH_BUFFER:
-                sb_log(f"💤 SKIP {symbol} — would breach buffer")
+            sb_log(f"🎯 {symbol} RETEST detected at ${box_high:.2f} — checking candle pattern...")
+
+            # ── STEP 4: Confirm reversal candle on 5-min ─────────────
+            df_5m = get_bars(symbol, timeframe_minutes=5, days_back=2)
+            if df_5m.empty:
+                continue
+            today_et   = datetime.now(ET).date()
+            df_5m_today = df_5m[df_5m.index.date == today_et]
+
+            if not check_reversal_candle(df_5m_today, box_high):
+                log.info(f"⏳ {symbol} retest but no reversal candle yet")
                 continue
 
-            trading_client.submit_order(MarketOrderRequest(
-                symbol=symbol, qty=qty,
-                side=OrderSide.BUY, time_in_force=TimeInForce.DAY,
-            ))
-            cash        -= actual_cost
-            local_cash   = cash
-            peak_prices[symbol] = curr_p
-            sb_log(f"🟢 BUY {qty} {symbol} @ ${curr_p:.2f} = ${actual_cost:.2f}")
+            # ── STEP 5: Calculate entry, stop, target ────────────────
+            confirm_candle = df_5m_today.iloc[-1]
+            entry_price    = round(float(confirm_candle["close"]), 4)
+            stop_price     = round(float(confirm_candle["low"]) * 0.999, 4)  # just below candle low
+            risk           = entry_price - stop_price
+
+            if risk <= 0 or risk / entry_price > 0.05:
+                sb_log(f"⚠️ SKIP {symbol} — risk invalid or too wide (${risk:.4f})")
+                continue
+
+            target_price = round(entry_price + (REWARD_RISK * risk), 4)
+            qty          = round(MAX_TRADE_USD / entry_price, 6)
+
+            sb_log(
+                f"📐 {symbol} setup: Entry=${entry_price:.2f} "
+                f"Stop=${stop_price:.2f} Target=${target_price:.2f} "
+                f"Risk/share=${risk:.4f} Qty={qty}"
+            )
+
+            # ── STEP 6: Enter trade ───────────────────────────────────
+            cost = enter_trade(symbol, entry_price, stop_price, target_price, cash)
+            if cost > 0:
+                cash                      -= cost
+                local_cash                 = cash
+                s["in_trade"]              = True
+                s["entry"]                 = entry_price
+                s["stop"]                  = stop_price
+                s["target"]                = target_price
+                s["qty"]                   = qty
+                s["traded_today"]          = True
+
         except Exception as e:
-            sb_log(f"⚠️ Buy error {symbol}: {e}")
-
-    save_peak_prices()
+            sb_log(f"⚠️ Scan error {symbol}: {e}")
 
 # ─────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    log.info("🤖 Trading bot started (3-layer + QQQ filter)")
+    sb_log("🤖 ORB-R Bot started (Opening Range Breakout with Retest)")
+    sb_log(f"   Watchlist: {len(WATCHLIST)} stocks | R:R {REWARD_RISK}:1 | Window: 9:30–12:00 ET")
+
     baseline = load_baseline()
-    log.info(f"📊 Weekly baseline loaded: ${baseline:,.2f}")
+    sb_log(f"📊 Weekly baseline: ${baseline:,.2f}")
 
     while True:
         try:
             run_strategy()
             send_heartbeat()
         except Exception as e:
-            sb_log(f"🔥 Unhandled error in run_strategy: {e}")
+            sb_log(f"🔥 Unhandled error: {e}")
         time.sleep(SCAN_INTERVAL)
