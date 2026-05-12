@@ -25,8 +25,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 from supabase import create_client, Client
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, StopLossRequest, TakeProfitRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
+from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -47,10 +47,10 @@ log = logging.getLogger(__name__)
 ET            = pytz.timezone("US/Eastern")
 SGT           = pytz.timezone("Asia/Singapore")
 SCAN_INTERVAL = 30           # seconds between scans (slower — pattern-based)
-MAX_TRADE_USD = 300.0        # max dollars per trade
-CASH_BUFFER   = 95_000.0    # min buying power before buying
-REWARD_RISK   = 3.0         # 3:1 R:R
-TARGET_PROFIT = 200.0       # weekly target USD
+MAX_TRADE_USD = 300.0        # max dollars per trade (supports fractional shares)
+CASH_BUFFER   = 95_000.0      # min buying power before buying
+REWARD_RISK   = 3.0           # 3:1 R:R
+TARGET_PROFIT = 200.0         # weekly target USD (not enforced, only baseline)
 
 # Trade window: first 2.5 hours of US market (9:30–12:00 ET)
 TRADE_WINDOW_START_H = 9
@@ -70,20 +70,40 @@ RETEST_TOLERANCE_PCT = 0.002   # within 0.2% of the breakout level
 # Minimum box size to trade (avoid tiny ranges)
 MIN_BOX_PCT = 0.003            # yesterday's range must be >= 0.3% of price
 
+# ── Full watchlist (12 original + 10 new Shariah-compliant) ─────────────
 WATCHLIST = [
-    "NVDA",
-    "AMD",
-    "AVGO",
-    "QCOM",
-    "AMAT",
-    "ASML",
-    "MU",
-    "KLAC",
-    "SMCI",
-    "ARM",
-    "MSTR",
-    "PANW",
+    "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM", "MSTR", "PANW",
+    "TSM", "LRCX", "ON", "MPWR", "MRVL", "NXPI", "TEAM", "INTA", "CRWD", "ZS"
 ]
+
+# ── Per-stock volatility profiles (hard_stop_pct, trailing_stop_pct, buy_trend_pct) ──
+# Note: trailing_stop_pct not used in ORB-R (we use fixed stop/target), but kept for future
+STOCK_PROFILES = {
+    # Original 12
+    "NVDA": (0.018, 0.010, 0.008),
+    "AMD":  (0.015, 0.009, 0.007),
+    "AVGO": (0.013, 0.008, 0.006),
+    "QCOM": (0.013, 0.008, 0.006),
+    "AMAT": (0.013, 0.008, 0.006),
+    "ASML": (0.013, 0.008, 0.006),
+    "MU":   (0.015, 0.009, 0.007),
+    "KLAC": (0.013, 0.008, 0.006),
+    "SMCI": (0.020, 0.012, 0.009),
+    "ARM":  (0.018, 0.010, 0.008),
+    "MSTR": (0.022, 0.014, 0.010),
+    "PANW": (0.012, 0.007, 0.005),
+    # New 10 Shariah-compliant
+    "TSM":  (0.013, 0.008, 0.006),   # Taiwan Semi
+    "LRCX": (0.013, 0.008, 0.006),   # Lam Research
+    "ON":   (0.015, 0.009, 0.007),   # ON Semi
+    "MPWR": (0.013, 0.008, 0.006),   # Monolithic Power
+    "MRVL": (0.013, 0.008, 0.006),   # Marvell
+    "NXPI": (0.013, 0.008, 0.006),   # NXP
+    "TEAM": (0.018, 0.010, 0.008),   # Atlassian (volatile)
+    "INTA": (0.018, 0.010, 0.008),   # Intapp
+    "CRWD": (0.018, 0.010, 0.008),   # CrowdStrike
+    "ZS":   (0.018, 0.010, 0.008),   # Zscaler
+}
 
 # ─────────────────────────────────────────────
 # CLIENTS
@@ -273,10 +293,6 @@ def get_yesterday_box(symbol: str) -> tuple:
 # CANDLESTICK PATTERN DETECTION
 # ─────────────────────────────────────────────
 def is_hammer(candle: pd.Series) -> bool:
-    """
-    Hammer: small body at the top, long lower wick (>= 2x body).
-    Bullish reversal signal at support.
-    """
     body      = abs(candle["close"] - candle["open"])
     total     = candle["high"] - candle["low"]
     lower_wick = candle["open"] - candle["low"] if candle["close"] >= candle["open"] \
@@ -286,10 +302,6 @@ def is_hammer(candle: pd.Series) -> bool:
     return (lower_wick >= 2 * body) and (body / total <= 0.35)
 
 def is_inverted_hammer(candle: pd.Series) -> bool:
-    """
-    Inverted Hammer: small body at the bottom, long upper wick (>= 2x body).
-    Bullish reversal at support after downtrend/pullback.
-    """
     body       = abs(candle["close"] - candle["open"])
     total      = candle["high"] - candle["low"]
     upper_wick = candle["high"] - max(candle["close"], candle["open"])
@@ -298,10 +310,6 @@ def is_inverted_hammer(candle: pd.Series) -> bool:
     return (upper_wick >= 2 * body) and (body / total <= 0.35)
 
 def is_bullish_engulfing(prev: pd.Series, curr: pd.Series) -> bool:
-    """
-    Bullish Engulfing: current bullish candle's body fully engulfs
-    the previous bearish candle's body.
-    """
     prev_bearish = prev["close"] < prev["open"]
     curr_bullish = curr["close"] > curr["open"]
     if not prev_bearish or not curr_bullish:
@@ -309,18 +317,12 @@ def is_bullish_engulfing(prev: pd.Series, curr: pd.Series) -> bool:
     return (curr["open"] <= prev["close"]) and (curr["close"] >= prev["open"])
 
 def check_reversal_candle(df_5m: pd.DataFrame, retest_level: float) -> bool:
-    """
-    Check if the latest 5-min candle(s) show a bullish reversal pattern
-    at or near the retest level.
-    Returns True if any valid pattern is detected.
-    """
     if df_5m is None or len(df_5m) < 2:
         return False
 
     latest = df_5m.iloc[-1]
     prev   = df_5m.iloc[-2]
 
-    # Check candle is near the retest level
     candle_low  = latest["low"]
     candle_high = latest["high"]
     level_in_range = (candle_low <= retest_level * (1 + RETEST_TOLERANCE_PCT) and
@@ -346,9 +348,6 @@ def check_reversal_candle(df_5m: pd.DataFrame, retest_level: float) -> bool:
 # BREAKOUT CONFIRMATION (15-min)
 # ─────────────────────────────────────────────
 def check_breakout_confirmed(symbol: str, box_high: float) -> bool:
-    """
-    Returns True if a 15-min candle has CLOSED above box_high today.
-    """
     df_15m = get_bars(symbol, timeframe_minutes=15, days_back=2)
     if df_15m.empty:
         return False
@@ -359,13 +358,11 @@ def check_breakout_confirmed(symbol: str, box_high: float) -> bool:
     if today_bars.empty:
         return False
 
-    # Only look at bars within trade window
     window_bars = today_bars[
         today_bars.index.time >= pd.Timestamp(
             f"{TRADE_WINDOW_START_H:02d}:{TRADE_WINDOW_START_M:02d}").time()
     ]
 
-    # A closed candle above box_high (close > box_high)
     breakout_bars = window_bars[window_bars["close"] > box_high]
     return not breakout_bars.empty
 
@@ -373,10 +370,6 @@ def check_breakout_confirmed(symbol: str, box_high: float) -> bool:
 # RETEST CHECK (5-min)
 # ─────────────────────────────────────────────
 def check_retest(symbol: str, box_high: float) -> bool:
-    """
-    Returns True if price has pulled back to retest the box_high level
-    (within tolerance) after the breakout.
-    """
     df_5m = get_bars(symbol, timeframe_minutes=5, days_back=2)
     if df_5m.empty:
         return False
@@ -390,31 +383,26 @@ def check_retest(symbol: str, box_high: float) -> bool:
     latest_low  = float(today_bars["low"].iloc[-1])
     latest_high = float(today_bars["high"].iloc[-1])
 
-    # Price has come back down to touch or near the box_high level
     touched_level = (latest_low <= box_high * (1 + RETEST_TOLERANCE_PCT) and
                      latest_high >= box_high * (1 - RETEST_TOLERANCE_PCT))
     return touched_level
 
 # ─────────────────────────────────────────────
-# TRADE EXECUTION
+# TRADE EXECUTION (NO BRACKET – fractional shares allowed)
 # ─────────────────────────────────────────────
 def enter_trade(symbol: str, entry_price: float, stop_price: float,
                 target_price: float, cash: float) -> float:
     """
-    Submit a market buy order with bracket (stop loss + take profit).
+    Submit a simple market buy order (supports fractional shares).
     Returns actual cost deducted from cash, or 0 if failed.
+    No bracket – exit will be managed manually in run_strategy().
     """
-    risk_per_share = entry_price - stop_price
-    if risk_per_share <= 0:
-        sb_log(f"⚠️ SKIP {symbol} — invalid risk (entry ${entry_price:.2f} <= stop ${stop_price:.2f})")
-        return 0.0
-
-    qty         = round(MAX_TRADE_USD / entry_price, 6)
-    actual_cost = round(qty * entry_price, 2)
-
+    qty = MAX_TRADE_USD / entry_price   # fractional allowed
     if qty <= 0:
         sb_log(f"⚠️ SKIP {symbol} — qty too small")
         return 0.0
+
+    actual_cost = round(qty * entry_price, 2)
     if cash - actual_cost < CASH_BUFFER:
         sb_log(f"💤 SKIP {symbol} — would breach cash buffer")
         return 0.0
@@ -425,16 +413,13 @@ def enter_trade(symbol: str, entry_price: float, stop_price: float,
             qty=qty,
             side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
-            order_class="bracket",
-            stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
-            take_profit=TakeProfitRequest(limit_price=round(target_price, 2)),
         ))
         sb_log(
-            f"🟢 ORB-R BUY {qty} {symbol} | "
+            f"🟢 ORB-R BUY {qty:.4f} {symbol} | "
             f"Entry:${entry_price:.2f} | "
             f"Stop:${stop_price:.2f} | "
             f"Target:${target_price:.2f} | "
-            f"Risk:${risk_per_share*qty:.2f} | "
+            f"Risk:${(entry_price - stop_price)*qty:.2f} | "
             f"R:R 3:1"
         )
         return actual_cost
@@ -442,12 +427,9 @@ def enter_trade(symbol: str, entry_price: float, stop_price: float,
         sb_log(f"⚠️ Order error {symbol}: {e}")
         return 0.0
 
-def exit_trade(symbol: str, qty, current_price: float, entry_price: float, reason: str):
-    """Emergency exit — cancel open orders and sell at market."""
+def exit_trade(symbol: str, qty: float, current_price: float, entry_price: float, reason: str):
+    """Sell at market (emergency or planned exit)."""
     try:
-        # Cancel any open bracket orders for this symbol
-        trading_client.cancel_orders()
-        time.sleep(1)
         trading_client.submit_order(MarketOrderRequest(
             symbol=symbol,
             qty=qty,
@@ -463,10 +445,6 @@ def exit_trade(symbol: str, qty, current_price: float, entry_price: float, reaso
 # RESET DAILY STATE
 # ─────────────────────────────────────────────
 def reset_daily_state():
-    """
-    Clear all symbol states at start of each new trading day.
-    Called once before the trade window opens.
-    """
     global symbol_state
     symbol_state = {}
     sb_log("🔄 Daily state reset — new trading day")
@@ -513,35 +491,42 @@ def run_strategy():
     if is_eod_window():
         for p in positions:
             try:
-                trading_client.cancel_orders()
-                time.sleep(0.5)
-                trading_client.submit_order(MarketOrderRequest(
-                    symbol=p.symbol, qty=p.qty,
-                    side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
-                ))
-                sb_log(f"🔔 EOW liquidation: SELL {p.qty} {p.symbol}")
-                if p.symbol in symbol_state:
-                    s = symbol_state[p.symbol]
-                    if s.get("in_trade"):
-                        save_trade(p.symbol, s["entry"], float(p.current_price),
-                                   p.qty, "EOW Liquidation")
-                        symbol_state[p.symbol]["in_trade"] = False
+                exit_trade(p.symbol, float(p.qty), float(p.current_price),
+                           float(p.avg_entry_price), "EOW Liquidation")
+                symbol_state.pop(p.symbol, None)
             except Exception as e:
                 sb_log(f"⚠️ EOW error {p.symbol}: {e}")
         return
 
-    # ── Monitor existing positions (emergency exit only) ─────────────
-    # Note: bracket orders handle normal stop/target exits automatically.
-    # We only intervene if trade window has closed with position still open.
+    # ── Monitor existing positions (manual stop/target) ──────────────
     for sym, p in held.items():
         s = symbol_state.get(sym, {})
         if not s.get("in_trade"):
             continue
+        entry = s.get("entry", 0.0)
+        stop  = s.get("stop", 0.0)
+        target = s.get("target", 0.0)
+        qty   = s.get("qty", 0.0)
+        curr_p = float(p.current_price)
+
+        if entry == 0:
+            continue
+
+        # Stop loss hit
+        if curr_p <= stop:
+            exit_trade(sym, qty, curr_p, entry, f"🛑 STOP LOSS (hit ${stop:.2f})")
+            symbol_state[sym]["in_trade"] = False
+            continue
+
+        # Take profit hit
+        if curr_p >= target:
+            exit_trade(sym, qty, curr_p, entry, f"🎯 TAKE PROFIT (hit ${target:.2f})")
+            symbol_state[sym]["in_trade"] = False
+            continue
+
+        # Trade window closed but position still open -> forced exit
         if not is_in_trade_window():
-            # Trade window closed — exit any open position
-            curr_p = float(p.current_price)
-            exit_trade(sym, p.qty, curr_p, s.get("entry", curr_p),
-                       "⏰ Trade window closed — forced exit")
+            exit_trade(sym, qty, curr_p, entry, "⏰ Trade window closed — forced exit")
             symbol_state[sym]["in_trade"] = False
 
     # ── Only look for new entries within trade window ─────────────────
@@ -627,6 +612,9 @@ def run_strategy():
             confirm_candle = df_5m_today.iloc[-1]
             entry_price    = round(float(confirm_candle["close"]), 4)
             stop_price     = round(float(confirm_candle["low"]) * 0.999, 4)  # just below candle low
+            # Ensure stop is at least $0.01 below entry (Alpaca rule)
+            if entry_price - stop_price < 0.01:
+                stop_price = entry_price - 0.01
             risk           = entry_price - stop_price
 
             if risk <= 0 or risk / entry_price > 0.05:
@@ -634,15 +622,15 @@ def run_strategy():
                 continue
 
             target_price = round(entry_price + (REWARD_RISK * risk), 4)
-            qty          = round(MAX_TRADE_USD / entry_price, 6)
+            qty          = MAX_TRADE_USD / entry_price   # fractional allowed
 
             sb_log(
                 f"📐 {symbol} setup: Entry=${entry_price:.2f} "
                 f"Stop=${stop_price:.2f} Target=${target_price:.2f} "
-                f"Risk/share=${risk:.4f} Qty={qty}"
+                f"Risk/share=${risk:.4f} Qty={qty:.4f}"
             )
 
-            # ── STEP 6: Enter trade ───────────────────────────────────
+            # ── STEP 6: Enter trade (simple market order, no bracket) ──
             cost = enter_trade(symbol, entry_price, stop_price, target_price, cash)
             if cost > 0:
                 cash                      -= cost
