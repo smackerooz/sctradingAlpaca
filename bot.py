@@ -5,14 +5,15 @@ Strategy 1 (9:30–12:00 ET): Opening Range Breakout with Retest
     - Box yesterday's high/low
     - Wait for 15-min close above box high
     - Wait for retest + 5-min reversal candle
-    - Entry at reversal candle close, stop below candle low, target 3x risk
+    - Entry at reversal candle close, stop below candle low with minimum 0.5% (1% for volatile)
+    - Target 3x risk
 
 Strategy 2 (12:00–15:30 ET): VWAP Retest & Continuation
     - Calculate intraday VWAP from 5-min bars
-    - Price must be above VWAP (uptrend) then pull back to touch VWAP
-    - Wait for bullish reversal candle (hammer, inverted hammer, engulfing) AT VWAP
-    - Entry at candle close, stop 0.2% below VWAP (or candle low, whichever is lower)
-    - Target 1.5x risk or 15:30 ET forced exit
+    - Price must be above VWAP then pull back to touch VWAP
+    - Wait for bullish reversal candle at VWAP
+    - Entry at candle close, stop with minimum 0.3% (0.6% for volatile) below VWAP or candle low
+    - Target 1.5x risk
 
 Run on Railway:
     Start command: python trading_bot.py
@@ -63,8 +64,8 @@ MIN_BOX_PCT = 0.003
 # VWAP config
 VWAP_TF_MINUTES = 5
 VWAP_LOOKBACK_DAYS = 2
-VWAP_STOP_PCT = 0.002        # 0.2% below VWAP
-VWAP_REWARD_RISK = 1.5       # 1.5:1 R:R (tighter targets for afternoon)
+VWAP_STOP_PCT = 0.002        # 0.2% below VWAP (baseline, will be adjusted)
+VWAP_REWARD_RISK = 1.5       # 1.5:1 R:R
 VWAP_END_HOUR = 15
 VWAP_END_MINUTE = 30
 
@@ -73,6 +74,12 @@ ORB_WINDOW_START = (9, 30)
 ORB_WINDOW_END   = (12, 0)
 VWAP_WINDOW_START = (12, 0)
 VWAP_WINDOW_END   = (15, 30)
+
+# High-volatility stocks that need wider stops
+HIGH_VOL_STOCKS = [
+    "NVDA", "AMD", "SMCI", "MSTR", "TSLA", "ARM", "SHOP", "DASH", "CRWD", "ZS", "TEAM",
+    "MU", "AVGO", "QCOM"  # also moderately volatile
+]
 
 # ── FINAL WATCHLIST (50 Shariah-compliant stocks) ──────────────────────────
 WATCHLIST = [
@@ -89,7 +96,7 @@ WATCHLIST = [
     "MDT"
 ]
 
-# ── Per-stock volatility profiles (unchanged from previous) ────────────────
+# ── Per-stock volatility profiles (kept for reference, but stops are now dynamic) ──
 STOCK_PROFILES = {
     "NVDA": (0.018, 0.010, 0.008), "AMD": (0.015, 0.009, 0.007),
     "AVGO": (0.013, 0.008, 0.006), "QCOM": (0.013, 0.008, 0.006),
@@ -133,7 +140,6 @@ supabase: Client = create_client(SB_URL, SB_KEY)
 # ─────────────────────────────────────────────
 # BOT STATE
 # ─────────────────────────────────────────────
-# Each symbol stores: strategy, entry, stop, target, qty, breakout_confirmed (for ORB), box_high/low (for ORB)
 symbol_state: dict = {}
 baseline: float = None
 
@@ -168,8 +174,9 @@ def save_trade(symbol, entry_price, exit_price, qty, reason, strategy):
             "time_sgt":   datetime.now(SGT).strftime("%H:%M:%S"),
             "reason":     reason,
         }).execute()
+        sb_log(f"💾 Trade saved: {symbol} {reason}")
     except Exception as e:
-        log.error(f"save_trade error: {e}")
+        sb_log(f"❌ save_trade error: {e}")
 
 def load_baseline() -> float:
     try:
@@ -228,7 +235,6 @@ def is_market_open() -> bool:
         return weekday < 5 and after_open and before_close
 
 def get_current_session() -> str:
-    """Returns 'ORB', 'VWAP', or 'CLOSED'."""
     now_et = datetime.now(ET)
     orb_start = now_et.replace(hour=ORB_WINDOW_START[0], minute=ORB_WINDOW_START[1], second=0, microsecond=0)
     orb_end   = now_et.replace(hour=ORB_WINDOW_END[0], minute=ORB_WINDOW_END[1], second=0, microsecond=0)
@@ -273,7 +279,6 @@ def get_bars(symbol: str, timeframe_minutes: int, days_back: int = 3) -> pd.Data
         return pd.DataFrame()
 
 def calculate_vwap(df: pd.DataFrame) -> float:
-    """Calculate VWAP from intraday bars (cumulative typical price * volume / volume)."""
     if df.empty or len(df) < 5:
         return None
     typical_price = (df["high"] + df["low"] + df["close"]) / 3
@@ -368,10 +373,6 @@ def check_orb_retest(symbol: str, box_high: float) -> bool:
 # VWAP SPECIFIC FUNCTIONS
 # ─────────────────────────────────────────────
 def check_vwap_retest(symbol: str, current_vwap: float) -> tuple:
-    """
-    Checks if price has pulled back to VWAP and formed a bullish reversal candle.
-    Returns (is_retest, entry_price, stop_price, target_price, confirm_candle_low)
-    """
     df_5m = get_bars(symbol, timeframe_minutes=5, days_back=VWAP_LOOKBACK_DAYS)
     if df_5m.empty or len(df_5m) < 10:
         return False, 0, 0, 0, 0
@@ -384,7 +385,6 @@ def check_vwap_retest(symbol: str, current_vwap: float) -> tuple:
     latest = today_bars.iloc[-1]
     prev = today_bars.iloc[-2] if len(today_bars) > 1 else latest
     
-    # Check if price is near VWAP (within 0.1%)
     candle_low = float(latest["low"])
     candle_high = float(latest["high"])
     vwap_near = (candle_low <= current_vwap * 1.001 and candle_high >= current_vwap * 0.999)
@@ -392,7 +392,6 @@ def check_vwap_retest(symbol: str, current_vwap: float) -> tuple:
     if not vwap_near:
         return False, 0, 0, 0, 0
     
-    # Check for bullish reversal candle
     hammer = is_hammer(latest)
     inv_hammer = is_inverted_hammer(latest)
     engulfing = is_bullish_engulfing(prev, latest) if len(today_bars) > 1 else False
@@ -400,16 +399,29 @@ def check_vwap_retest(symbol: str, current_vwap: float) -> tuple:
     if not (hammer or inv_hammer or engulfing):
         return False, 0, 0, 0, 0
     
-    # Calculate entry, stop, target
     entry_price = round(float(latest["close"]), 4)
+    # Base stop: min(0.2% below VWAP, candle low)
     stop_price = round(min(current_vwap * (1 - VWAP_STOP_PCT), float(latest["low"])), 4)
-    if entry_price - stop_price < 0.01:
-        stop_price = entry_price - 0.01
+    
+    # Enforce minimum stop percentage
+    min_stop_pct = 0.003  # 0.3% for normal stocks
+    if symbol in HIGH_VOL_STOCKS:
+        min_stop_pct = 0.006  # 0.6% for volatile stocks
+    
+    min_stop_distance = entry_price * min_stop_pct
+    if entry_price - stop_price < min_stop_distance:
+        stop_price = entry_price - min_stop_distance
+        # Recalculate risk and target if stop changed
+        risk = entry_price - stop_price
+        if risk <= 0:
+            return False, 0, 0, 0, 0
+        target_price = round(entry_price + (VWAP_REWARD_RISK * risk), 4)
+        sb_log(f"⚠️ Adjusted VWAP {symbol} stop to {stop_price:.2f} (min {min_stop_pct*100:.1f}%)")
+        return True, entry_price, stop_price, target_price, float(latest["low"])
     
     risk = entry_price - stop_price
     if risk <= 0:
         return False, 0, 0, 0, 0
-    
     target_price = round(entry_price + (VWAP_REWARD_RISK * risk), 4)
     
     return True, entry_price, stop_price, target_price, float(latest["low"])
@@ -419,7 +431,6 @@ def check_vwap_retest(symbol: str, current_vwap: float) -> tuple:
 # ─────────────────────────────────────────────
 def enter_trade(symbol: str, entry_price: float, stop_price: float,
                 target_price: float, cash: float, strategy: str) -> float:
-    """Returns actual cost of the trade, or 0.0 if failed."""
     qty = MAX_TRADE_USD / entry_price
     if qty <= 0:
         sb_log(f"⚠️ SKIP {symbol} — qty too small")
@@ -491,7 +502,6 @@ def monitor_positions(held: dict):
 # STRATEGY: ORB-R (morning)
 # ─────────────────────────────────────────────
 def run_orb_strategy(cash: float, held: dict) -> float:
-    """Returns total cost of all trades placed in this scan cycle."""
     total_cost = 0.0
     for symbol in WATCHLIST:
         if symbol in held:
@@ -556,14 +566,30 @@ def run_orb_strategy(cash: float, held: dict) -> float:
         # Calculate entry, stop, target
         confirm_candle = df_5m_today.iloc[-1]
         entry_price = round(float(confirm_candle["close"]), 4)
+        # Base stop: 0.1% below candle low
         stop_price = round(float(confirm_candle["low"]) * 0.999, 4)
         if entry_price - stop_price < 0.01:
             stop_price = entry_price - 0.01
-        risk = entry_price - stop_price
-        if risk <= 0 or risk / entry_price > 0.05:
-            continue
         
-        target_price = round(entry_price + (ORB_REWARD_RISK * risk), 4)
+        # Enforce minimum stop percentage
+        min_stop_pct = 0.005  # 0.5% for normal stocks
+        if symbol in HIGH_VOL_STOCKS:
+            min_stop_pct = 0.01  # 1% for volatile stocks
+        
+        min_stop_distance = entry_price * min_stop_pct
+        if entry_price - stop_price < min_stop_distance:
+            stop_price = entry_price - min_stop_distance
+            # Recalculate risk and target
+            risk = entry_price - stop_price
+            if risk <= 0:
+                continue
+            target_price = round(entry_price + (ORB_REWARD_RISK * risk), 4)
+            sb_log(f"⚠️ Adjusted {symbol} stop to {stop_price:.2f} (min {min_stop_pct*100:.1f}%)")
+        else:
+            risk = entry_price - stop_price
+            if risk <= 0 or risk / entry_price > 0.05:
+                continue
+            target_price = round(entry_price + (ORB_REWARD_RISK * risk), 4)
         
         # Enter trade
         cost = enter_trade(symbol, entry_price, stop_price, target_price, cash - total_cost, "ORB-R")
@@ -582,7 +608,6 @@ def run_orb_strategy(cash: float, held: dict) -> float:
 # STRATEGY: VWAP Retest (afternoon)
 # ─────────────────────────────────────────────
 def run_vwap_strategy(cash: float, held: dict) -> float:
-    """Returns total cost of all trades placed in this scan cycle."""
     total_cost = 0.0
     for symbol in WATCHLIST:
         if symbol in held:
@@ -603,29 +628,24 @@ def run_vwap_strategy(cash: float, held: dict) -> float:
         if s.get("vwap_traded_today") or s.get("in_trade"):
             continue
         
-        # Get intraday bars for VWAP calculation
         df_5m = get_bars(symbol, timeframe_minutes=5, days_back=1)
         if df_5m.empty or len(df_5m) < 10:
             continue
         
-        # Calculate VWAP
         vwap = calculate_vwap(df_5m)
         if vwap is None:
             continue
         
-        # Check if price is currently above VWAP (uptrend context)
         current_price = float(df_5m["close"].iloc[-1])
         if current_price < vwap:
-            continue  # Only trade when price is above VWAP
+            continue
         
-        # Check for retest + reversal candle
         is_retest, entry_price, stop_price, target_price, _ = check_vwap_retest(symbol, vwap)
         if not is_retest:
             continue
         
         sb_log(f"📊 {symbol} VWAP retest detected at ${vwap:.2f}")
         
-        # Enter trade
         cost = enter_trade(symbol, entry_price, stop_price, target_price, cash - total_cost, "VWAP")
         if cost > 0:
             total_cost += cost
@@ -643,13 +663,11 @@ def run_vwap_strategy(cash: float, held: dict) -> float:
 # ─────────────────────────────────────────────
 def reset_daily_state():
     global symbol_state
-    # Keep only persistent position tracking, reset trade flags
     to_delete = []
     for sym, state in symbol_state.items():
         if not state.get("in_trade"):
             to_delete.append(sym)
         else:
-            # Keep but reset daily flags
             state["traded_today"] = False
             state["vwap_traded_today"] = False
     for sym in to_delete:
@@ -664,7 +682,6 @@ _last_reset_date = None
 def run_strategy():
     global baseline, _last_reset_date
     
-    # Weekly baseline reset
     now_et = datetime.now(ET)
     if now_et.weekday() == 0 and now_et.hour == 9 and now_et.minute == 30:
         new_bl = float(trading_client.get_account().equity)
@@ -672,28 +689,24 @@ def run_strategy():
         save_baseline(new_bl)
         sb_log("🔄 Weekly baseline reset")
     
-    # Daily reset
     today = datetime.now(ET).date()
     if _last_reset_date != today:
         reset_daily_state()
         _last_reset_date = today
     
-    # Market closed
     if not is_market_open():
         log.info("💤 Market closed")
         return
     
-    # Fetch account
     try:
         account = trading_client.get_account()
-        cash = float(account.buying_power)   # real-time buying power
+        cash = float(account.buying_power)
         positions = trading_client.get_all_positions()
         held = {p.symbol: p for p in positions}
     except Exception as e:
         sb_log(f"⚠️ Account error: {e}")
         return
     
-    # EOD Friday liquidation
     if is_eod_window():
         for p in positions:
             try:
@@ -705,21 +718,17 @@ def run_strategy():
                 sb_log(f"⚠️ EOW error {p.symbol}: {e}")
         return
     
-    # Monitor existing positions
     monitor_positions(held)
     
-    # Check cash buffer before new trades
     if cash <= CASH_BUFFER:
         log.info(f"💤 Cash ${cash:.2f} below buffer")
         return
     
-    # Run strategy based on current session
     session = get_current_session()
     
     if session == "ORB":
         total_cost = run_orb_strategy(cash, held)
         if total_cost:
-            # Optional: log that we spent money; no need to track cash further (will refetch next scan)
             sb_log(f"💰 ORB-R trades placed, total cost: ${total_cost:.2f}")
     elif session == "VWAP":
         total_cost = run_vwap_strategy(cash, held)
@@ -736,6 +745,7 @@ if __name__ == "__main__":
     sb_log(f"   Watchlist: {len(WATCHLIST)} stocks | Max trade: ${MAX_TRADE_USD}")
     sb_log(f"   ORB-R window: {ORB_WINDOW_START[0]}:{ORB_WINDOW_START[1]:02d}–{ORB_WINDOW_END[0]}:{ORB_WINDOW_END[1]:02d} ET")
     sb_log(f"   VWAP window: {VWAP_WINDOW_START[0]}:{VWAP_WINDOW_START[1]:02d}–{VWAP_WINDOW_END[0]}:{VWAP_WINDOW_END[1]:02d} ET")
+    sb_log(f"   Stop loss: minimum 0.5% for normal, 1.0% for volatile stocks")
     
     baseline = load_baseline()
     sb_log(f"📊 Weekly baseline: ${baseline:,.2f}")
