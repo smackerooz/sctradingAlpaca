@@ -135,7 +135,6 @@ supabase: Client = create_client(SB_URL, SB_KEY)
 # ─────────────────────────────────────────────
 # Each symbol stores: strategy, entry, stop, target, qty, breakout_confirmed (for ORB), box_high/low (for ORB)
 symbol_state: dict = {}
-local_cash: float = None
 baseline: float = None
 
 # ─────────────────────────────────────────────
@@ -420,13 +419,14 @@ def check_vwap_retest(symbol: str, current_vwap: float) -> tuple:
 # ─────────────────────────────────────────────
 def enter_trade(symbol: str, entry_price: float, stop_price: float,
                 target_price: float, cash: float, strategy: str) -> float:
+    """Returns actual cost of the trade, or 0.0 if failed."""
     qty = MAX_TRADE_USD / entry_price
     if qty <= 0:
         sb_log(f"⚠️ SKIP {symbol} — qty too small")
         return 0.0
     actual_cost = round(qty * entry_price, 2)
     if cash - actual_cost < CASH_BUFFER:
-        sb_log(f"💤 SKIP {symbol} — would breach cash buffer")
+        sb_log(f"💤 SKIP {symbol} — would breach cash buffer (cash ${cash:.2f} - ${actual_cost:.2f} < ${CASH_BUFFER})")
         return 0.0
     try:
         trading_client.submit_order(MarketOrderRequest(
@@ -462,8 +462,7 @@ def exit_trade(symbol: str, qty: float, current_price: float, entry_price: float
 # ─────────────────────────────────────────────
 # MONITOR OPEN POSITIONS (shared)
 # ─────────────────────────────────────────────
-def monitor_positions(held: dict, cash: float):
-    global local_cash
+def monitor_positions(held: dict):
     for sym, p in held.items():
         s = symbol_state.get(sym, {})
         if not s.get("in_trade"):
@@ -491,7 +490,9 @@ def monitor_positions(held: dict, cash: float):
 # ─────────────────────────────────────────────
 # STRATEGY: ORB-R (morning)
 # ─────────────────────────────────────────────
-def run_orb_strategy(cash: float, held: dict):
+def run_orb_strategy(cash: float, held: dict) -> float:
+    """Returns total cost of all trades placed in this scan cycle."""
+    total_cost = 0.0
     for symbol in WATCHLIST:
         if symbol in held:
             continue
@@ -565,10 +566,9 @@ def run_orb_strategy(cash: float, held: dict):
         target_price = round(entry_price + (ORB_REWARD_RISK * risk), 4)
         
         # Enter trade
-        cost = enter_trade(symbol, entry_price, stop_price, target_price, cash, "ORB-R")
+        cost = enter_trade(symbol, entry_price, stop_price, target_price, cash - total_cost, "ORB-R")
         if cost > 0:
-            cash -= cost
-            local_cash = cash
+            total_cost += cost
             s["in_trade"] = True
             s["strategy"] = "ORB-R"
             s["entry"] = entry_price
@@ -576,11 +576,14 @@ def run_orb_strategy(cash: float, held: dict):
             s["target"] = target_price
             s["qty"] = MAX_TRADE_USD / entry_price
             s["traded_today"] = True
+    return total_cost
 
 # ─────────────────────────────────────────────
 # STRATEGY: VWAP Retest (afternoon)
 # ─────────────────────────────────────────────
-def run_vwap_strategy(cash: float, held: dict):
+def run_vwap_strategy(cash: float, held: dict) -> float:
+    """Returns total cost of all trades placed in this scan cycle."""
+    total_cost = 0.0
     for symbol in WATCHLIST:
         if symbol in held:
             continue
@@ -623,10 +626,9 @@ def run_vwap_strategy(cash: float, held: dict):
         sb_log(f"📊 {symbol} VWAP retest detected at ${vwap:.2f}")
         
         # Enter trade
-        cost = enter_trade(symbol, entry_price, stop_price, target_price, cash, "VWAP")
+        cost = enter_trade(symbol, entry_price, stop_price, target_price, cash - total_cost, "VWAP")
         if cost > 0:
-            cash -= cost
-            local_cash = cash
+            total_cost += cost
             s["in_trade"] = True
             s["strategy"] = "VWAP"
             s["entry"] = entry_price
@@ -634,6 +636,7 @@ def run_vwap_strategy(cash: float, held: dict):
             s["target"] = target_price
             s["qty"] = MAX_TRADE_USD / entry_price
             s["vwap_traded_today"] = True
+    return total_cost
 
 # ─────────────────────────────────────────────
 # RESET DAILY STATE
@@ -641,13 +644,16 @@ def run_vwap_strategy(cash: float, held: dict):
 def reset_daily_state():
     global symbol_state
     # Keep only persistent position tracking, reset trade flags
-    for sym in list(symbol_state.keys()):
-        if not symbol_state[sym].get("in_trade"):
-            del symbol_state[sym]
+    to_delete = []
+    for sym, state in symbol_state.items():
+        if not state.get("in_trade"):
+            to_delete.append(sym)
         else:
             # Keep but reset daily flags
-            symbol_state[sym]["traded_today"] = False
-            symbol_state[sym]["vwap_traded_today"] = False
+            state["traded_today"] = False
+            state["vwap_traded_today"] = False
+    for sym in to_delete:
+        del symbol_state[sym]
     sb_log("🔄 Daily state reset")
 
 # ─────────────────────────────────────────────
@@ -656,7 +662,7 @@ def reset_daily_state():
 _last_reset_date = None
 
 def run_strategy():
-    global local_cash, baseline, _last_reset_date
+    global baseline, _last_reset_date
     
     # Weekly baseline reset
     now_et = datetime.now(ET)
@@ -680,8 +686,7 @@ def run_strategy():
     # Fetch account
     try:
         account = trading_client.get_account()
-        alpaca_bp = float(account.buying_power)
-        cash = min(alpaca_bp, local_cash) if local_cash is not None else alpaca_bp
+        cash = float(account.buying_power)   # real-time buying power
         positions = trading_client.get_all_positions()
         held = {p.symbol: p for p in positions}
     except Exception as e:
@@ -701,7 +706,7 @@ def run_strategy():
         return
     
     # Monitor existing positions
-    monitor_positions(held, cash)
+    monitor_positions(held)
     
     # Check cash buffer before new trades
     if cash <= CASH_BUFFER:
@@ -712,9 +717,14 @@ def run_strategy():
     session = get_current_session()
     
     if session == "ORB":
-        run_orb_strategy(cash, held)
+        total_cost = run_orb_strategy(cash, held)
+        if total_cost:
+            # Optional: log that we spent money; no need to track cash further (will refetch next scan)
+            sb_log(f"💰 ORB-R trades placed, total cost: ${total_cost:.2f}")
     elif session == "VWAP":
-        run_vwap_strategy(cash, held)
+        total_cost = run_vwap_strategy(cash, held)
+        if total_cost:
+            sb_log(f"💰 VWAP trades placed, total cost: ${total_cost:.2f}")
     else:
         log.info("⏰ Outside trading hours")
 
