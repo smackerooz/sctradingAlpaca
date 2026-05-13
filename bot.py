@@ -1,5 +1,5 @@
 """
-botbounce.py — Opening Range Breakout with Retest (ORB-R)
+botbounce.py v2 with 50 stocks — Opening Range Breakout with Retest (ORB-R)
 ──────────────────────────────────────────────────────────
 Strategy: Box yesterday's regular session high/low as key levels.
           Wait for a 15-min candle to CLOSE above yesterday's high (breakout).
@@ -46,11 +46,11 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 ET            = pytz.timezone("US/Eastern")
 SGT           = pytz.timezone("Asia/Singapore")
-SCAN_INTERVAL = 30           # seconds between scans (slower — pattern-based)
-MAX_TRADE_USD = 300.0        # max dollars per trade (supports fractional shares)
-CASH_BUFFER   = 95_000.0      # min buying power before buying
-REWARD_RISK   = 3.0           # 3:1 R:R
-TARGET_PROFIT = 200.0         # weekly target USD (not enforced, only baseline)
+SCAN_INTERVAL = 45           # seconds (increased for 50 stocks)
+MAX_TRADE_USD = 750.0        # max dollars per trade (fractional allowed)
+CASH_BUFFER   = 95000.0      # min buying power before buying
+REWARD_RISK   = 3.0          # 3:1 R:R
+TARGET_PROFIT = 200.0        # weekly target USD (not enforced, only baseline)
 
 # Trade window: first 2.5 hours of US market (9:30–12:00 ET)
 TRADE_WINDOW_START_H = 9
@@ -70,16 +70,25 @@ RETEST_TOLERANCE_PCT = 0.002   # within 0.2% of the breakout level
 # Minimum box size to trade (avoid tiny ranges)
 MIN_BOX_PCT = 0.003            # yesterday's range must be >= 0.3% of price
 
-# ── Full watchlist (12 original + 10 new Shariah-compliant) ─────────────
+# ── FINAL WATCHLIST (50 Shariah-compliant stocks) ──────────────────────────
 WATCHLIST = [
+    # Original 22
     "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM", "MSTR", "PANW",
-    "TSM", "LRCX", "ON", "MPWR", "MRVL", "NXPI", "TEAM", "INTA", "CRWD", "ZS"
+    "TSM", "LRCX", "ON", "MPWR", "MRVL", "NXPI", "TEAM", "INTA", "CRWD", "ZS",
+    # Priority picks (11)
+    "ADBE", "WDAY", "SNPS", "NOW", "SHOP", "TXN", "CDNS", "MCHP", "SWKS", "FTNT", "ANET",
+    # Secondary expansion (7)
+    "UBER", "DASH", "TSLA", "ISRG", "VRTX", "LLY", "MRK",
+    # New additions (9)
+    "AAPL", "JNJ", "PEP", "LIN", "REGN", "INTC", "PG", "NKE", "ADSK",
+    # Final stock (1)
+    "MDT"
 ]
 
 # ── Per-stock volatility profiles (hard_stop_pct, trailing_stop_pct, buy_trend_pct) ──
 # Note: trailing_stop_pct not used in ORB-R (we use fixed stop/target), but kept for future
 STOCK_PROFILES = {
-    # Original 12
+    # Original 22
     "NVDA": (0.018, 0.010, 0.008),
     "AMD":  (0.015, 0.009, 0.007),
     "AVGO": (0.013, 0.008, 0.006),
@@ -92,17 +101,48 @@ STOCK_PROFILES = {
     "ARM":  (0.018, 0.010, 0.008),
     "MSTR": (0.022, 0.014, 0.010),
     "PANW": (0.012, 0.007, 0.005),
-    # New 10 Shariah-compliant
-    "TSM":  (0.013, 0.008, 0.006),   # Taiwan Semi
-    "LRCX": (0.013, 0.008, 0.006),   # Lam Research
-    "ON":   (0.015, 0.009, 0.007),   # ON Semi
-    "MPWR": (0.013, 0.008, 0.006),   # Monolithic Power
-    "MRVL": (0.013, 0.008, 0.006),   # Marvell
-    "NXPI": (0.013, 0.008, 0.006),   # NXP
-    "TEAM": (0.018, 0.010, 0.008),   # Atlassian (volatile)
-    "INTA": (0.018, 0.010, 0.008),   # Intapp
-    "CRWD": (0.018, 0.010, 0.008),   # CrowdStrike
-    "ZS":   (0.018, 0.010, 0.008),   # Zscaler
+    "TSM":  (0.013, 0.008, 0.006),
+    "LRCX": (0.013, 0.008, 0.006),
+    "ON":   (0.015, 0.009, 0.007),
+    "MPWR": (0.013, 0.008, 0.006),
+    "MRVL": (0.013, 0.008, 0.006),
+    "NXPI": (0.013, 0.008, 0.006),
+    "TEAM": (0.018, 0.010, 0.008),
+    "INTA": (0.018, 0.010, 0.008),
+    "CRWD": (0.018, 0.010, 0.008),
+    "ZS":   (0.018, 0.010, 0.008),
+    # Priority picks
+    "ADBE": (0.013, 0.008, 0.006),
+    "WDAY": (0.013, 0.008, 0.006),
+    "SNPS": (0.013, 0.008, 0.006),
+    "NOW":  (0.013, 0.008, 0.006),
+    "SHOP": (0.018, 0.010, 0.008),
+    "TXN":  (0.012, 0.007, 0.005),
+    "CDNS": (0.013, 0.008, 0.006),
+    "MCHP": (0.013, 0.008, 0.006),
+    "SWKS": (0.013, 0.008, 0.006),
+    "FTNT": (0.015, 0.009, 0.007),
+    "ANET": (0.013, 0.008, 0.006),
+    # Secondary picks
+    "UBER": (0.015, 0.009, 0.007),
+    "DASH": (0.018, 0.010, 0.008),
+    "TSLA": (0.020, 0.012, 0.009),
+    "ISRG": (0.015, 0.009, 0.007),
+    "VRTX": (0.013, 0.008, 0.006),
+    "LLY":  (0.013, 0.008, 0.006),
+    "MRK":  (0.012, 0.007, 0.005),
+    # New additions
+    "AAPL": (0.012, 0.007, 0.005),
+    "JNJ":  (0.010, 0.006, 0.004),
+    "PEP":  (0.010, 0.006, 0.004),
+    "LIN":  (0.012, 0.007, 0.005),
+    "REGN": (0.013, 0.008, 0.006),
+    "INTC": (0.013, 0.008, 0.006),
+    "PG":   (0.010, 0.006, 0.004),
+    "NKE":  (0.015, 0.009, 0.007),
+    "ADSK": (0.013, 0.008, 0.006),
+    # Final stock
+    "MDT":  (0.012, 0.007, 0.005),
 }
 
 # ─────────────────────────────────────────────
@@ -120,16 +160,12 @@ supabase: Client = create_client(SB_URL, SB_KEY)
 # ─────────────────────────────────────────────
 # BOT STATE
 # ─────────────────────────────────────────────
-# Tracks per-symbol state across scans
-# {symbol: {"box_high": float, "box_low": float, "breakout_confirmed": bool,
-#            "retest_zone": float, "in_trade": bool, "entry": float,
-#            "stop": float, "target": float, "qty": float}}
 symbol_state: dict = {}
 local_cash: float  = None
 baseline: float    = None
 
 # ─────────────────────────────────────────────
-# SUPABASE HELPERS
+# SUPABASE HELPERS (unchanged from original)
 # ─────────────────────────────────────────────
 def sb_log(msg: str):
     try:
@@ -199,10 +235,9 @@ def send_heartbeat():
         pass
 
 # ─────────────────────────────────────────────
-# MARKET HOURS
+# MARKET HOURS (unchanged)
 # ─────────────────────────────────────────────
 def is_market_open() -> bool:
-    """True only during regular US market hours."""
     try:
         clock = trading_client.get_clock()
         if not clock.is_open:
@@ -219,7 +254,6 @@ def is_market_open() -> bool:
         return weekday < 5 and after_open and before_close
 
 def is_in_trade_window() -> bool:
-    """True only within the first 2.5 hours of market open (9:30–12:00 ET)."""
     now_et  = datetime.now(ET)
     open_t  = now_et.replace(hour=TRADE_WINDOW_START_H, minute=TRADE_WINDOW_START_M,
                               second=0, microsecond=0)
@@ -232,10 +266,9 @@ def is_eod_window() -> bool:
     return now_et.weekday() == 4 and now_et.hour == 15 and 45 <= now_et.minute < 55
 
 # ─────────────────────────────────────────────
-# DATA FETCHERS
+# DATA FETCHERS (unchanged)
 # ─────────────────────────────────────────────
 def get_bars(symbol: str, timeframe_minutes: int, days_back: int = 3) -> pd.DataFrame:
-    """Fetch intraday bars from Alpaca."""
     try:
         end   = datetime.now(pytz.utc)
         start = end - timedelta(days=days_back)
@@ -252,7 +285,6 @@ def get_bars(symbol: str, timeframe_minutes: int, days_back: int = 3) -> pd.Data
         if isinstance(bars.index, pd.MultiIndex):
             bars = bars.xs(symbol, level="symbol")
         bars.index = pd.to_datetime(bars.index, utc=True)
-        # Convert to ET for session filtering
         bars.index = bars.index.tz_convert(ET)
         return bars[["open", "high", "low", "close", "volume"]].copy()
     except Exception as e:
@@ -260,50 +292,39 @@ def get_bars(symbol: str, timeframe_minutes: int, days_back: int = 3) -> pd.Data
         return pd.DataFrame()
 
 def get_yesterday_box(symbol: str) -> tuple:
-    """
-    Get yesterday's regular session high and low (9:30–16:00 ET).
-    Returns (box_high, box_low) or (None, None) if insufficient data.
-    """
     df = get_bars(symbol, timeframe_minutes=15, days_back=5)
     if df.empty:
         return None, None
-
     today_et    = datetime.now(ET).date()
     yesterday   = today_et - timedelta(days=1)
-    # Skip weekends — find last trading day
     while yesterday.weekday() >= 5:
         yesterday -= timedelta(days=1)
-
-    # Filter yesterday's regular session bars
     session_bars = df[
         (df.index.date == yesterday) &
         (df.index.time >= pd.Timestamp("09:30").time()) &
         (df.index.time <= pd.Timestamp("16:00").time())
     ]
-
     if session_bars.empty or len(session_bars) < 4:
         log.warning(f"{symbol}: insufficient yesterday bars ({len(session_bars)})")
         return None, None
-
     box_high = round(float(session_bars["high"].max()), 4)
     box_low  = round(float(session_bars["low"].min()), 4)
     return box_high, box_low
 
 # ─────────────────────────────────────────────
-# CANDLESTICK PATTERN DETECTION
+# CANDLESTICK PATTERN DETECTION (unchanged)
 # ─────────────────────────────────────────────
 def is_hammer(candle: pd.Series) -> bool:
-    body      = abs(candle["close"] - candle["open"])
-    total     = candle["high"] - candle["low"]
-    lower_wick = candle["open"] - candle["low"] if candle["close"] >= candle["open"] \
-                 else candle["close"] - candle["low"]
+    body = abs(candle["close"] - candle["open"])
+    total = candle["high"] - candle["low"]
+    lower_wick = candle["open"] - candle["low"] if candle["close"] >= candle["open"] else candle["close"] - candle["low"]
     if total == 0 or body == 0:
         return False
     return (lower_wick >= 2 * body) and (body / total <= 0.35)
 
 def is_inverted_hammer(candle: pd.Series) -> bool:
-    body       = abs(candle["close"] - candle["open"])
-    total      = candle["high"] - candle["low"]
+    body = abs(candle["close"] - candle["open"])
+    total = candle["high"] - candle["low"]
     upper_wick = candle["high"] - max(candle["close"], candle["open"])
     if total == 0 or body == 0:
         return False
@@ -319,70 +340,49 @@ def is_bullish_engulfing(prev: pd.Series, curr: pd.Series) -> bool:
 def check_reversal_candle(df_5m: pd.DataFrame, retest_level: float) -> bool:
     if df_5m is None or len(df_5m) < 2:
         return False
-
     latest = df_5m.iloc[-1]
     prev   = df_5m.iloc[-2]
-
     candle_low  = latest["low"]
     candle_high = latest["high"]
     level_in_range = (candle_low <= retest_level * (1 + RETEST_TOLERANCE_PCT) and
                       candle_high >= retest_level * (1 - RETEST_TOLERANCE_PCT))
-
     if not level_in_range:
         return False
-
-    hammer         = is_hammer(latest)
-    inv_hammer     = is_inverted_hammer(latest)
-    engulfing      = is_bullish_engulfing(prev, latest)
-
+    hammer = is_hammer(latest)
+    inv_hammer = is_inverted_hammer(latest)
+    engulfing = is_bullish_engulfing(prev, latest)
     if hammer:
         sb_log(f"🔨 Hammer detected at retest level ${retest_level:.2f}")
     if inv_hammer:
         sb_log(f"🔄 Inverted Hammer detected at retest level ${retest_level:.2f}")
     if engulfing:
         sb_log(f"🟰 Bullish Engulfing detected at retest level ${retest_level:.2f}")
-
     return hammer or inv_hammer or engulfing
 
-# ─────────────────────────────────────────────
-# BREAKOUT CONFIRMATION (15-min)
-# ─────────────────────────────────────────────
 def check_breakout_confirmed(symbol: str, box_high: float) -> bool:
     df_15m = get_bars(symbol, timeframe_minutes=15, days_back=2)
     if df_15m.empty:
         return False
-
     today_et    = datetime.now(ET).date()
     today_bars  = df_15m[df_15m.index.date == today_et]
-
     if today_bars.empty:
         return False
-
     window_bars = today_bars[
-        today_bars.index.time >= pd.Timestamp(
-            f"{TRADE_WINDOW_START_H:02d}:{TRADE_WINDOW_START_M:02d}").time()
+        today_bars.index.time >= pd.Timestamp(f"{TRADE_WINDOW_START_H:02d}:{TRADE_WINDOW_START_M:02d}").time()
     ]
-
     breakout_bars = window_bars[window_bars["close"] > box_high]
     return not breakout_bars.empty
 
-# ─────────────────────────────────────────────
-# RETEST CHECK (5-min)
-# ─────────────────────────────────────────────
 def check_retest(symbol: str, box_high: float) -> bool:
     df_5m = get_bars(symbol, timeframe_minutes=5, days_back=2)
     if df_5m.empty:
         return False
-
     today_et   = datetime.now(ET).date()
     today_bars = df_5m[df_5m.index.date == today_et]
-
     if today_bars.empty:
         return False
-
     latest_low  = float(today_bars["low"].iloc[-1])
     latest_high = float(today_bars["high"].iloc[-1])
-
     touched_level = (latest_low <= box_high * (1 + RETEST_TOLERANCE_PCT) and
                      latest_high >= box_high * (1 - RETEST_TOLERANCE_PCT))
     return touched_level
@@ -392,21 +392,14 @@ def check_retest(symbol: str, box_high: float) -> bool:
 # ─────────────────────────────────────────────
 def enter_trade(symbol: str, entry_price: float, stop_price: float,
                 target_price: float, cash: float) -> float:
-    """
-    Submit a simple market buy order (supports fractional shares).
-    Returns actual cost deducted from cash, or 0 if failed.
-    No bracket – exit will be managed manually in run_strategy().
-    """
     qty = MAX_TRADE_USD / entry_price   # fractional allowed
     if qty <= 0:
         sb_log(f"⚠️ SKIP {symbol} — qty too small")
         return 0.0
-
     actual_cost = round(qty * entry_price, 2)
     if cash - actual_cost < CASH_BUFFER:
         sb_log(f"💤 SKIP {symbol} — would breach cash buffer")
         return 0.0
-
     try:
         trading_client.submit_order(MarketOrderRequest(
             symbol=symbol,
@@ -428,7 +421,6 @@ def enter_trade(symbol: str, entry_price: float, stop_price: float,
         return 0.0
 
 def exit_trade(symbol: str, qty: float, current_price: float, entry_price: float, reason: str):
-    """Sell at market (emergency or planned exit)."""
     try:
         trading_client.submit_order(MarketOrderRequest(
             symbol=symbol,
@@ -457,7 +449,6 @@ _last_reset_date = None
 def run_strategy():
     global local_cash, baseline, _last_reset_date
 
-    # ── Weekly baseline reset ────────────────────────────────────────
     now_et = datetime.now(ET)
     if now_et.weekday() == 0 and now_et.hour == 9 and now_et.minute == 30:
         new_bl = float(trading_client.get_account().equity)
@@ -465,18 +456,15 @@ def run_strategy():
         save_baseline(new_bl)
         sb_log("🔄 Weekly baseline reset — Monday market open")
 
-    # ── Daily state reset (once per day before market open) ─────────
     today = datetime.now(ET).date()
     if _last_reset_date != today:
         reset_daily_state()
         _last_reset_date = today
 
-    # ── Market hours guard ───────────────────────────────────────────
     if not is_market_open():
         log.info("💤 Market closed — skipping scan")
         return
 
-    # ── Fetch account ────────────────────────────────────────────────
     try:
         account   = trading_client.get_account()
         alpaca_bp = float(account.buying_power)
@@ -487,7 +475,6 @@ def run_strategy():
         sb_log(f"⚠️ Account fetch error: {e}")
         return
 
-    # ── End-of-week liquidation ──────────────────────────────────────
     if is_eod_window():
         for p in positions:
             try:
@@ -498,7 +485,7 @@ def run_strategy():
                 sb_log(f"⚠️ EOW error {p.symbol}: {e}")
         return
 
-    # ── Monitor existing positions (manual stop/target) ──────────────
+    # Monitor existing positions (manual stop/target)
     for sym, p in held.items():
         s = symbol_state.get(sym, {})
         if not s.get("in_trade"):
@@ -512,24 +499,18 @@ def run_strategy():
         if entry == 0:
             continue
 
-        # Stop loss hit
         if curr_p <= stop:
             exit_trade(sym, qty, curr_p, entry, f"🛑 STOP LOSS (hit ${stop:.2f})")
             symbol_state[sym]["in_trade"] = False
             continue
-
-        # Take profit hit
         if curr_p >= target:
             exit_trade(sym, qty, curr_p, entry, f"🎯 TAKE PROFIT (hit ${target:.2f})")
             symbol_state[sym]["in_trade"] = False
             continue
-
-        # Trade window closed but position still open -> forced exit
         if not is_in_trade_window():
             exit_trade(sym, qty, curr_p, entry, "⏰ Trade window closed — forced exit")
             symbol_state[sym]["in_trade"] = False
 
-    # ── Only look for new entries within trade window ─────────────────
     if not is_in_trade_window():
         log.info("⏰ Outside trade window (9:30–12:00 ET) — no new entries")
         return
@@ -538,12 +519,10 @@ def run_strategy():
         log.info(f"💤 Cash ${cash:.2f} below buffer — skipping")
         return
 
-    # ── Scan watchlist for ORB-R setups ──────────────────────────────
     for symbol in WATCHLIST:
         if symbol in held:
-            continue  # already in a trade for this symbol
+            continue
 
-        # Init state for symbol if needed
         if symbol not in symbol_state:
             symbol_state[symbol] = {
                 "box_high":           None,
@@ -559,12 +538,10 @@ def run_strategy():
 
         s = symbol_state[symbol]
 
-        # Only one trade per symbol per day
         if s["traded_today"]:
             continue
 
         try:
-            # ── STEP 1: Get/cache yesterday's box ───────────────────
             if s["box_high"] is None:
                 box_high, box_low = get_yesterday_box(symbol)
                 if box_high is None:
@@ -582,22 +559,19 @@ def run_strategy():
             box_high = s["box_high"]
             box_low  = s["box_low"]
 
-            # ── STEP 2: Check for 15-min breakout ───────────────────
             if not s["breakout_confirmed"]:
                 if check_breakout_confirmed(symbol, box_high):
                     s["breakout_confirmed"] = True
                     sb_log(f"🚀 {symbol} BREAKOUT confirmed above ${box_high:.2f} (15-min close)")
                 else:
-                    continue  # no breakout yet — keep waiting
+                    continue
 
-            # ── STEP 3: Wait for retest of box_high ─────────────────
             if not check_retest(symbol, box_high):
                 log.info(f"⏳ {symbol} waiting for retest of ${box_high:.2f}")
                 continue
 
             sb_log(f"🎯 {symbol} RETEST detected at ${box_high:.2f} — checking candle pattern...")
 
-            # ── STEP 4: Confirm reversal candle on 5-min ─────────────
             df_5m = get_bars(symbol, timeframe_minutes=5, days_back=2)
             if df_5m.empty:
                 continue
@@ -608,21 +582,19 @@ def run_strategy():
                 log.info(f"⏳ {symbol} retest but no reversal candle yet")
                 continue
 
-            # ── STEP 5: Calculate entry, stop, target ────────────────
             confirm_candle = df_5m_today.iloc[-1]
             entry_price    = round(float(confirm_candle["close"]), 4)
-            stop_price     = round(float(confirm_candle["low"]) * 0.999, 4)  # just below candle low
-            # Ensure stop is at least $0.01 below entry (Alpaca rule)
+            stop_price     = round(float(confirm_candle["low"]) * 0.999, 4)
             if entry_price - stop_price < 0.01:
                 stop_price = entry_price - 0.01
-            risk           = entry_price - stop_price
+            risk = entry_price - stop_price
 
             if risk <= 0 or risk / entry_price > 0.05:
                 sb_log(f"⚠️ SKIP {symbol} — risk invalid or too wide (${risk:.4f})")
                 continue
 
             target_price = round(entry_price + (REWARD_RISK * risk), 4)
-            qty          = MAX_TRADE_USD / entry_price   # fractional allowed
+            qty          = MAX_TRADE_USD / entry_price
 
             sb_log(
                 f"📐 {symbol} setup: Entry=${entry_price:.2f} "
@@ -630,7 +602,6 @@ def run_strategy():
                 f"Risk/share=${risk:.4f} Qty={qty:.4f}"
             )
 
-            # ── STEP 6: Enter trade (simple market order, no bracket) ──
             cost = enter_trade(symbol, entry_price, stop_price, target_price, cash)
             if cost > 0:
                 cash                      -= cost
