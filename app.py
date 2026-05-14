@@ -779,130 +779,123 @@ try:
 except Exception:
     st.info("👁️ DASHBOARD MODE — Bot is running autonomously on Railway.", icon="🤖")
 
-# Active strategy display and manual override
-st.markdown("---")
+# ============================================
+# MANUAL STRATEGY OVERRIDE (Main Window)
+# ============================================
+st.write("### 🔧 Manual Strategy Override")
 
-# Get current active strategy (respecting manual override)
-forced = st.session_state.get("forced_strategy", "AUTO")
-now_et = datetime.now(ET)
-orb_active = (now_et.hour >= 9 and now_et.hour < 12) or (now_et.hour == 9 and now_et.minute >= 30)
-vwap_active = (now_et.hour >= 12 and now_et.hour < 15) or (now_et.hour == 15 and now_et.minute <= 30)
+# Initialize session state for override flow
+if "override_step" not in st.session_state:
+    st.session_state.override_step = "idle"  # idle, pin_entered, authorized
+if "override_authorized" not in st.session_state:
+    st.session_state.override_authorized = False
 
-if forced == "ORB-R":
-    active = "ORB-R"
-    mode = "🔧 FORCED MODE (Manual Override)"
-elif forced == "VWAP":
-    active = "VWAP"
-    mode = "🔧 FORCED MODE (Manual Override)"
-else:
-    mode = "🤖 AUTO MODE (Time-Based)"
-    if orb_active:
-        active = "ORB-R"
-    elif vwap_active:
-        active = "VWAP"
-    else:
-        active = "MARKET CLOSED"
+# Step 1: Show initial button
+if st.session_state.override_step == "idle" and not st.session_state.override_authorized:
+    if st.button("🔧 Change Strategy", use_container_width=True, type="secondary"):
+        st.session_state.override_step = "pin_entered"
+        st.rerun()
 
-# Display strategy card
-if active == "ORB-R":
-    st.info(f"**{mode} | Active Strategy: 🚀 ORB-R**")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("""
-        **📈 Entry Conditions:**
-        - Yesterday's high/low = "box"
-        - 15-min candle closes **above** box high
-        - Price retests box high from above
-        - Bullish reversal candle at retest
-        - **Enter at candle close**
-        """)
-    with col2:
-        st.markdown("""
-        **🏁 Exit Rules:**
-        - Stop loss: 0.5-1% below entry
-        - Take profit: **3 × risk** (3:1 R:R)
-        - Force exit at **12:00 ET**
-        """)
-elif active == "VWAP":
-    st.info(f"**{mode} | Active Strategy: 📊 VWAP Retest**")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("""
-        **📈 Entry Conditions:**
-        - Price must be **above VWAP** (uptrend)
-        - Price pulls back to touch VWAP
-        - Bullish reversal candle at VWAP
-        - **Enter at candle close**
-        """)
-    with col2:
-        st.markdown("""
-        **🏁 Exit Rules:**
-        - Stop loss: 0.3-0.6% below VWAP
-        - Take profit: **1.5 × risk**
-        - Force exit at **15:30 ET**
-        """)
-else:
-    st.warning(f"**{mode} | 🕒 Market Closed – No Active Strategy**")
-    st.caption("Trading hours: ORB-R 9:30–12:00 ET | VWAP 12:00–15:30 ET")
-
-st.markdown("---")
-
-# Manual Strategy Override (keep this section as is)
-with st.expander("🔧 Manual Strategy Override", expanded=False):
-    # PIN verification
-    if "override_authorized" not in st.session_state:
-        st.session_state.override_authorized = False
+# Step 2: Show PIN entry
+elif st.session_state.override_step == "pin_entered" and not st.session_state.override_authorized:
+    st.warning("🔒 Enter PIN to change strategy")
     
-    if not st.session_state.override_authorized:
-        with st.form("pin_form"):
-            entered_pin = st.text_input("Enter PIN to change strategy:", type="password", key="pin_input")
-            submitted = st.form_submit_button("Unlock")
-            if submitted:
-                try:
-                    row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
-                    if row.data and row.data[0]["pin"] == entered_pin:
-                        st.session_state.override_authorized = True
-                        st.success("Access granted!")
-                        st.rerun()
-                    else:
-                        st.error("Incorrect PIN")
-                except Exception:
-                    st.error("Could not verify PIN")
-        st.info("🔒 Strategy override is locked. Enter PIN to unlock.")
-    else:
-        st.success("✅ Access granted – you can change the strategy")
-        col_a, col_b, col_c, col_d = st.columns(4)
+    with st.form("override_pin_form"):
+        override_pin = st.text_input("PIN:", type="password", key="override_pin_input")
+        col_a, col_b = st.columns(2)
         with col_a:
-            if st.button("🤖 AUTO", use_container_width=True):
-                set_forced_strategy("AUTO")
+            verify_btn = st.form_submit_button("🔓 Verify PIN", use_container_width=True)
         with col_b:
-            if st.button("🚀 FORCE ORB‑R", use_container_width=True):
-                set_forced_strategy("ORB-R")
-        with col_c:
-            if st.button("📊 FORCE VWAP", use_container_width=True):
-                set_forced_strategy("VWAP")
-        with col_d:
-            st.caption(f"Current: **{st.session_state.forced_strategy}**")
+            cancel_btn = st.form_submit_button("❌ Cancel", use_container_width=True)
         
-        # Lock button
-        if st.button("🔒 Lock Again", use_container_width=True):
+        if verify_btn:
+            try:
+                row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
+                if row.data and row.data[0]["pin"] == override_pin:
+                    st.session_state.override_authorized = True
+                    st.session_state.override_step = "authorized"
+                    st.success("PIN verified! You can now change the strategy.")
+                    st.rerun()
+                else:
+                    st.error("Incorrect PIN")
+            except Exception:
+                st.error("Could not verify PIN")
+        
+        if cancel_btn:
+            st.session_state.override_step = "idle"
             st.session_state.override_authorized = False
             st.rerun()
 
-        # ─── CHANGE PIN EXPANDER (paste here, after lock button, before any other code) ───
-        with st.expander("Change PIN (admin only)", expanded=False):
-            with st.form("change_pin_form"):
-                new_pin = st.text_input("New PIN (4-6 digits)", type="password", max_chars=6)
-                confirm_pin = st.text_input("Confirm PIN", type="password", max_chars=6)
-                if st.form_submit_button("Update PIN"):
-                    if new_pin and new_pin == confirm_pin and new_pin.isdigit() and 4 <= len(new_pin) <= 6:
-                        try:
+# Step 3: Show strategy selection buttons after PIN verified
+elif st.session_state.override_step == "authorized" and st.session_state.override_authorized:
+    st.success("✅ Access granted – you can change the strategy")
+    
+    col_a, col_b, col_c, col_d = st.columns(4)
+    with col_a:
+        if st.button("🤖 AUTO", use_container_width=True, type="primary"):
+            set_forced_strategy("AUTO")
+            st.session_state.override_step = "idle"
+            st.session_state.override_authorized = False
+            st.rerun()
+    with col_b:
+        if st.button("🚀 FORCE ORB‑R", use_container_width=True):
+            set_forced_strategy("ORB-R")
+            st.session_state.override_step = "idle"
+            st.session_state.override_authorized = False
+            st.rerun()
+    with col_c:
+        if st.button("📊 FORCE VWAP", use_container_width=True):
+            set_forced_strategy("VWAP")
+            st.session_state.override_step = "idle"
+            st.session_state.override_authorized = False
+            st.rerun()
+    with col_d:
+        st.caption(f"Current: **{st.session_state.forced_strategy}**")
+    
+    # Confirm and Relock button
+    if st.button("✅ Confirm and Relock", use_container_width=True):
+        st.session_state.override_step = "idle"
+        st.session_state.override_authorized = False
+        st.success("Strategy locked. Changes are active.")
+        st.rerun()
+    
+    # ─────────────────────────────────────────
+    # PIN CHANGER (admin only)
+    # ─────────────────────────────────────────
+    with st.expander("🔐 Change PIN (admin only)", expanded=False):
+        st.caption("Change the PIN used for both Strategy Override and Liquidation")
+        
+        with st.form("change_pin_form"):
+            current_pin = st.text_input("Current PIN:", type="password", key="current_pin")
+            new_pin = st.text_input("New PIN (4-6 digits):", type="password", max_chars=6, key="new_pin")
+            confirm_pin = st.text_input("Confirm New PIN:", type="password", max_chars=6, key="confirm_pin")
+            
+            col_pin1, col_pin2 = st.columns(2)
+            with col_pin1:
+                change_submitted = st.form_submit_button("✅ Update PIN", use_container_width=True)
+            with col_pin2:
+                change_cancel = st.form_submit_button("❌ Cancel", use_container_width=True)
+            
+            if change_submitted:
+                try:
+                    row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
+                    if row.data and row.data[0]["pin"] == current_pin:
+                        if new_pin and new_pin == confirm_pin and new_pin.isdigit() and 4 <= len(new_pin) <= 6:
                             supabase.table("bot_config").update({"pin": new_pin}).eq("id", 1).execute()
-                            st.success("PIN updated successfully!")
-                        except Exception:
-                            st.error("Failed to update PIN")
+                            st.success("✅ PIN updated successfully!")
+                            st.info("New PIN will be required for future overrides and liquidation.")
+                            st.rerun()
+                        else:
+                            st.error("New PIN must be 4-6 digits and match")
                     else:
-                        st.error("PIN must be 4-6 digits and match")
+                        st.error("Current PIN is incorrect")
+                except Exception:
+                    st.error("Could not verify current PIN")
+            
+            if change_cancel:
+                st.rerun()
+
+st.markdown("---")
 
 # Tabs
 tab_live, tab_signals, tab_backtest, tab_portfolio = st.tabs(["Live Trading", "Signal Scanner", "Backtesting", "Portfolio Backtest"])
