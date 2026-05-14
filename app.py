@@ -816,8 +816,24 @@ def get_current_strategy_display():
 
 # Display current strategy (always visible)
 strategy_title, strategy_desc = get_current_strategy_display()
-st.markdown(f"📌 **Current Strategy:** {strategy_title}")
-st.markdown(f"{strategy_desc}")
+st.markdown(
+    f"""
+    <div style="
+        background-color: #d4edda;
+        padding: 12px 15px;
+        border-radius: 8px;
+        border-left: 4px solid #28a745;
+        margin: 10px 0;
+        color: #000000;
+    ">
+        <span style="font-size: 16px;">📌</span>
+        <strong>Current Strategy:</strong> {strategy_title}<br>
+        <span style="font-size: 14px;">📖 {strategy_desc}</span>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+st.markdown("---")
 
 # Initialize session state for override flow
 if "override_step" not in st.session_state:
