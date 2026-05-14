@@ -785,7 +785,6 @@ except Exception:
 st.write("### 🔧 Manual Strategy Override")
 
 # Helper function to get current strategy display (without requiring override)
-# Helper function to get current strategy display (without requiring override)
 def get_current_strategy_display():
     forced = st.session_state.get("forced_strategy", "AUTO")
     if forced == "ORB-R":
@@ -818,7 +817,7 @@ def get_current_strategy_display():
 # Display current strategy (always visible)
 strategy_title, strategy_desc = get_current_strategy_display()
 st.info(f"📌 **Current Strategy:** {strategy_title}")
-st.caption(f"{strategy_desc}")
+st.markdown(f"{strategy_desc}")
 
 # Initialize session state for override flow
 if "override_step" not in st.session_state:
