@@ -117,8 +117,10 @@ ET = pytz.timezone('US/Eastern')
 if "last_trade_refresh" not in st.session_state:
     st.session_state.last_trade_refresh = datetime.now(SGT)
 
+# Force load trades immediately on every script run
+st.session_state.realized_trades = load_realized_trades()
+
 if (datetime.now(SGT) - st.session_state.last_trade_refresh).seconds >= 60:
-    st.session_state.realized_trades = load_realized_trades()
     st.session_state.last_trade_refresh = datetime.now(SGT)
     st.rerun()
 
