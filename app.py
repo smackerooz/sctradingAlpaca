@@ -638,7 +638,7 @@ with st.sidebar:
     if st.button("Run Single Scan", use_container_width=True):
         run_strategy()
         st.rerun()
-  st.divider()
+    st.divider()
 st.write("### 🧹 Manual Liquidation")
 
 # Initialize session state for liquidation steps
