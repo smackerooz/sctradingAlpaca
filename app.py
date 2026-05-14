@@ -816,7 +816,7 @@ def get_current_strategy_display():
 
 # Display current strategy (always visible)
 strategy_title, strategy_desc = get_current_strategy_display()
-st.info(f"📌 **Current Strategy:** {strategy_title}")
+st.markdown(f"📌 **Current Strategy:** {strategy_title}")
 st.markdown(f"{strategy_desc}")
 
 # Initialize session state for override flow
