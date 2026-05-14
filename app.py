@@ -220,16 +220,16 @@ def get_trading_session_date_from_string(date_str: str, time_str: str) -> str:
 def load_realized_trades() -> list:
     """Load trades from the current trading session (9:30pm SGT → 4:00am SGT)."""
     try:
-        # Load trades from the last 3 days (covers any session)
-        three_days_ago = (datetime.now(SGT) - timedelta(days=3)).date().isoformat()
+        # Load trades from the last 7 days (covers any session)
         rows = supabase.table("realized_trades") \
                    .select("*") \
-                   .gte("date", three_days_ago) \
                    .order("id", desc=True) \
+                   .limit(500) \
                    .execute()
         result = []
         current_session = get_trading_session_date()
         for r in rows.data:
+            # Compute the trading session date for this trade
             trade_session = get_trading_session_date_from_string(r["date"], r["time_sgt"])
             if trade_session == current_session:
                 result.append({
@@ -245,7 +245,7 @@ def load_realized_trades() -> list:
                     "Reason": r["reason"],
                     "_pl_usd": float(r["pl_usd"]),
                 })
-        # If no trades for current session, show all recent trades (fallback)
+        # If no trades found for current session, fallback to all recent trades (for debugging)
         if not result:
             for r in rows.data:
                 result.append({
@@ -1016,19 +1016,20 @@ with tab_live:
         st.caption(f"📅 Trading session: {session_date} (9:30 PM SGT → 4:00 AM SGT)")
         trades = st.session_state.realized_trades
         if trades:
-            orb_trades = [t for t in trades if t.get("Strategy", "").upper() == "ORB-R"]
-            vwap_trades = [t for t in trades if t.get("Strategy", "").upper() == "VWAP"]
+            # Safe filtering: ensure each trade is a dictionary
+            orb_trades = [t for t in trades if isinstance(t, dict) and t.get("Strategy", "").upper() == "ORB-R"]
+            vwap_trades = [t for t in trades if isinstance(t, dict) and t.get("Strategy", "").upper() == "VWAP"]
             if orb_trades:
                 st.markdown("**🚀 ORB‑R Trades**")
                 orb_df = pd.DataFrame(orb_trades)[["Symbol", "Buy Price", "Sell Price", "Qty", "P&L ($)", "P&L (%)", "Time (SGT)", "Reason"]]
                 st.dataframe(orb_df, use_container_width=True, hide_index=True)
-                total_orb = sum(t["_pl_usd"] for t in orb_trades)
+                total_orb = sum(t["_pl_usd"] for t in orb_trades if "_pl_usd" in t)
                 st.write(f"**Total ORB‑R P&L: ${total_orb:+.2f}**")
             if vwap_trades:
                 st.markdown("**📊 VWAP Trades**")
                 vwap_df = pd.DataFrame(vwap_trades)[["Symbol", "Buy Price", "Sell Price", "Qty", "P&L ($)", "P&L (%)", "Time (SGT)", "Reason"]]
                 st.dataframe(vwap_df, use_container_width=True, hide_index=True)
-                total_vwap = sum(t["_pl_usd"] for t in vwap_trades)
+                total_vwap = sum(t["_pl_usd"] for t in vwap_trades if "_pl_usd" in t)
                 st.write(f"**Total VWAP P&L: ${total_vwap:+.2f}**")
             if not orb_trades and not vwap_trades:
                 st.info("No completed trades in this session yet.")
