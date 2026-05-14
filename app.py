@@ -633,96 +633,108 @@ combined = round(unrealized + realized, 2)
 with st.sidebar:
     st.header("Bot Controls")
     st.metric("Weekly Baseline", f"${st.session_state.nightly_baseline:,.2f}")
+
     st.caption("Bot runs on Railway — start/stop from Railway dashboard.")
+
     st.divider()
-    if st.button("Run Single Scan", use_container_width=True):
+
+    if st.button("▶️ Run Single Scan", use_container_width=True):
         run_strategy()
         st.rerun()
+
     st.divider()
-st.write("### 🧹 Manual Liquidation")
 
-# Initialize session state for liquidation steps
-if "show_liq_pin" not in st.session_state:
-    st.session_state.show_liq_pin = False
-if "liquidate_authorized" not in st.session_state:
-    st.session_state.liquidate_authorized = False
+    # ============================================
+    # MANUAL LIQUIDATION WITH PIN (IN SIDEBAR)
+    # ============================================
+    st.write("### 🧹 Manual Liquidation")
 
-# Step 1: Show initial button
-if not st.session_state.show_liq_pin and not st.session_state.liquidate_authorized:
-    if st.button("⚠️ Manual Liquidation", use_container_width=True, type="secondary"):
-        st.session_state.show_liq_pin = True
-        st.rerun()
+    # Initialize session state for liquidation
+    if "show_liq_pin" not in st.session_state:
+        st.session_state.show_liq_pin = False
+    if "liquidate_authorized" not in st.session_state:
+        st.session_state.liquidate_authorized = False
 
-# Step 2: Show PIN entry after button click
-elif st.session_state.show_liq_pin and not st.session_state.liquidate_authorized:
-    st.warning("⚠️ Enter PIN to confirm liquidation – this will sell ALL positions")
-    
-    with st.form("liquidate_pin_form"):
-        liq_pin = st.text_input("PIN:", type="password", key="liq_pin")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            submitted = st.form_submit_button("✅ Confirm Liquidation", use_container_width=True)
-        with col_b:
-            cancel = st.form_submit_button("❌ Cancel", use_container_width=True)
-        
-        if submitted:
-            try:
-                row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
-                if row.data and row.data[0]["pin"] == liq_pin:
-                    st.session_state.liquidate_authorized = True
-                    st.session_state.show_liq_pin = False
-                    # Execute liquidation immediately
-                    try:
-                        trading_client.cancel_orders()
-                        time.sleep(1)
-                        positions = trading_client.get_all_positions()
-                        if positions:
-                            for p in positions:
-                                trading_client.submit_order(MarketOrderRequest(
-                                    symbol=p.symbol, qty=p.qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY
-                                ))
-                            st.session_state.peak_prices = {}
-                            log("🔴 Manual liquidation executed")
-                            st.success(f"✅ Sold {len(positions)} position(s)!")
-                        else:
-                            st.info("No positions to sell.")
-                        st.session_state.liquidate_authorized = False  # Reset after execution
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Liquidation error: {e}")
-                        st.session_state.liquidate_authorized = False
-                        st.session_state.show_liq_pin = False
-                        st.rerun()
-                else:
-                    st.error("Incorrect PIN")
-            except Exception:
-                st.error("Could not verify PIN")
-        
-        if cancel:
-            st.session_state.show_liq_pin = False
+    # Step 1: Show the liquidation button
+    if not st.session_state.show_liq_pin and not st.session_state.liquidate_authorized:
+        if st.button("⚠️ Manual Liquidation", use_container_width=True, type="secondary"):
+            st.session_state.show_liq_pin = True
             st.rerun()
 
-# Step 3: Show confirmation when unlocked (fallback, should not stay here)
-elif st.session_state.liquidate_authorized:
-    st.warning("⚠️ Liquidation in progress...")
-    st.session_state.liquidate_authorized = False
-    st.rerun()
+    # Step 2: Show PIN form after button click
+    elif st.session_state.show_liq_pin and not st.session_state.liquidate_authorized:
+        st.warning("⚠️ Enter PIN to confirm – this will sell ALL positions")
+
+        with st.form("liquidate_pin_form"):
+            liq_pin = st.text_input("PIN:", type="password", key="liq_pin")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                submitted = st.form_submit_button("✅ Confirm", use_container_width=True)
+            with col_b:
+                cancel = st.form_submit_button("❌ Cancel", use_container_width=True)
+
+            if submitted:
+                try:
+                    row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
+                    if row.data and row.data[0]["pin"] == liq_pin:
+                        # Execute liquidation immediately
+                        try:
+                            trading_client.cancel_orders()
+                            time.sleep(1)
+                            positions = trading_client.get_all_positions()
+                            if positions:
+                                for p in positions:
+                                    trading_client.submit_order(MarketOrderRequest(
+                                        symbol=p.symbol, qty=p.qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY
+                                    ))
+                                st.session_state.peak_prices = {}
+                                log("🔴 Manual liquidation executed")
+                                st.success(f"✅ Sold {len(positions)} position(s)!")
+                            else:
+                                st.info("No positions to sell.")
+                        except Exception as e:
+                            st.error(f"Liquidation error: {e}")
+                        # Reset state after attempt
+                        st.session_state.show_liq_pin = False
+                        st.session_state.liquidate_authorized = False
+                        st.rerun()
+                    else:
+                        st.error("Incorrect PIN")
+                except Exception:
+                    st.error("Could not verify PIN")
+
+            if cancel:
+                st.session_state.show_liq_pin = False
+                st.rerun()
+
+    # Step 3: Fallback (should not stay here)
+    elif st.session_state.liquidate_authorized:
+        st.session_state.liquidate_authorized = False
+        st.session_state.show_liq_pin = False
+        st.rerun()
+
     st.divider()
+
+    # Status and trade info
     status_color = "🟢" if st.session_state.bot_running else "🔴"
     st.write(f"**Status:** {status_color} {'AUTO-RUNNING' if st.session_state.bot_running else 'STOPPED'}")
     if st.session_state.last_scan:
         st.write(f"**Last scan:** {st.session_state.last_scan.strftime('%H:%M:%S')} SGT")
     st.write(f"**Scan interval:** {SCAN_INTERVAL}s")
     st.write(f"**Trade budget:** ${MAX_TRADE_USD:,.0f} per trade")
+
     st.divider()
-    st.write("**Bot Logs (from Railway)**")
+
+    st.write("**📋 Bot Logs (from Railway)**")
     try:
         logs = supabase.table("bot_logs").select("message,created_at").order("created_at", desc=True).limit(30).execute()
         for l in logs.data:
             st.caption(l["message"])
     except:
         st.caption("No logs yet.")
+
     st.divider()
+
     st.write("**Per-stock profiles:**")
     profile_rows = [{"Symbol": sym, "Hard SL": f"-{v[0]*100:.1f}%",
                      "Trail": f"-{v[1]*100:.1f}%", "Buy Trend": f"+{v[2]*100:.1f}%"}
