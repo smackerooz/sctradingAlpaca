@@ -782,7 +782,7 @@ except Exception:
 # ============================================
 # MANUAL STRATEGY OVERRIDE (Main Window)
 # ============================================
-st.write("### 🔧 Manual Strategy Override")
+st.write("### 🔧 CURRENT STRATEGY")
 
 # Helper function to get current strategy display (without requiring override)
 def get_current_strategy_display():
