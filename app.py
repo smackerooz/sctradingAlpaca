@@ -628,7 +628,7 @@ progress_pct = min(max(realized / TARGET_PROFIT, 0.0), 1.0) if realized > 0 else
 combined = round(unrealized + realized, 2)
 
 # ─────────────────────────────────────────────
-# SIDEBAR (same as original, but with updated watchlist size)
+# SIDEBAR
 # ─────────────────────────────────────────────
 with st.sidebar:
     st.header("Bot Controls")
@@ -649,84 +649,84 @@ with st.sidebar:
     # ============================================
     st.write("### 🧹 Manual Liquidation")
 
-# Initialize session state for liquidation
-if "liq_step" not in st.session_state:
-    st.session_state.liq_step = "idle"  # idle, pin_entered, confirmed
-if "pin_verified" not in st.session_state:
-    st.session_state.pin_verified = False
+    # Initialize session state for liquidation
+    if "liq_step" not in st.session_state:
+        st.session_state.liq_step = "idle"  # idle, pin_entered, confirmed
+    if "pin_verified" not in st.session_state:
+        st.session_state.pin_verified = False
 
-# Step 1: Show initial button
-if st.session_state.liq_step == "idle":
-    if st.button("⚠️ Manual Liquidation", use_container_width=True, type="secondary"):
-        st.session_state.liq_step = "pin_entered"
-        st.rerun()
+    # Step 1: Show initial button
+    if st.session_state.liq_step == "idle":
+        if st.button("⚠️ Manual Liquidation", use_container_width=True, type="secondary"):
+            st.session_state.liq_step = "pin_entered"
+            st.rerun()
 
-# Step 2: Show PIN entry
-elif st.session_state.liq_step == "pin_entered" and not st.session_state.pin_verified:
-    st.warning("⚠️ Enter PIN to unlock liquidation")
-    
-    with st.form("liq_pin_form"):
-        liq_pin = st.text_input("PIN:", type="password", key="liq_pin_input")
+    # Step 2: Show PIN entry
+    elif st.session_state.liq_step == "pin_entered" and not st.session_state.pin_verified:
+        st.warning("⚠️ Enter PIN to unlock liquidation")
+        
+        with st.form("liq_pin_form"):
+            liq_pin = st.text_input("PIN:", type="password", key="liq_pin_input")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                verify_btn = st.form_submit_button("🔓 Verify PIN", use_container_width=True)
+            with col_b:
+                cancel_btn = st.form_submit_button("❌ Cancel", use_container_width=True)
+            
+            if verify_btn:
+                try:
+                    row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
+                    if row.data and row.data[0]["pin"] == liq_pin:
+                        st.session_state.pin_verified = True
+                        st.session_state.liq_step = "confirmed"
+                        st.success("PIN verified! Click final confirmation to sell.")
+                        st.rerun()
+                    else:
+                        st.error("Incorrect PIN")
+                except Exception:
+                    st.error("Could not verify PIN")
+            
+            if cancel_btn:
+                st.session_state.liq_step = "idle"
+                st.session_state.pin_verified = False
+                st.rerun()
+
+    # Step 3: Show final confirmation button after PIN verified
+    elif st.session_state.liq_step == "confirmed" and st.session_state.pin_verified:
+        st.error("⚠️⚠️⚠️ FINAL STEP ⚠️⚠️⚠️")
+        st.warning("You have verified your PIN. Click below to SELL ALL positions.")
+        
         col_a, col_b = st.columns(2)
         with col_a:
-            verify_btn = st.form_submit_button("🔓 Verify PIN", use_container_width=True)
-        with col_b:
-            cancel_btn = st.form_submit_button("❌ Cancel", use_container_width=True)
-        
-        if verify_btn:
-            try:
-                row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
-                if row.data and row.data[0]["pin"] == liq_pin:
-                    st.session_state.pin_verified = True
-                    st.session_state.liq_step = "confirmed"
-                    st.success("PIN verified! Click final confirmation to sell.")
+            if st.button("🔥 FINAL CONFIRM - SELL ALL", use_container_width=True, type="primary"):
+                try:
+                    trading_client.cancel_orders()
+                    time.sleep(1)
+                    positions = trading_client.get_all_positions()
+                    if positions:
+                        for p in positions:
+                            trading_client.submit_order(MarketOrderRequest(
+                                symbol=p.symbol, qty=p.qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY
+                            ))
+                        st.session_state.peak_prices = {}
+                        log("🔴 Manual liquidation executed")
+                        st.success(f"✅ Sold {len(positions)} position(s)!")
+                    else:
+                        st.info("No positions to sell.")
+                    # Reset all states
+                    st.session_state.liq_step = "idle"
+                    st.session_state.pin_verified = False
                     st.rerun()
-                else:
-                    st.error("Incorrect PIN")
-            except Exception:
-                st.error("Could not verify PIN")
-        
-        if cancel_btn:
-            st.session_state.liq_step = "idle"
-            st.session_state.pin_verified = False
-            st.rerun()
-
-# Step 3: Show final confirmation button after PIN verified
-elif st.session_state.liq_step == "confirmed" and st.session_state.pin_verified:
-    st.error("⚠️⚠️⚠️ FINAL STEP ⚠️⚠️⚠️")
-    st.warning("You have verified your PIN. Click below to SELL ALL positions.")
-    
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("🔥 FINAL CONFIRM - SELL ALL", use_container_width=True, type="primary"):
-            try:
-                trading_client.cancel_orders()
-                time.sleep(1)
-                positions = trading_client.get_all_positions()
-                if positions:
-                    for p in positions:
-                        trading_client.submit_order(MarketOrderRequest(
-                            symbol=p.symbol, qty=p.qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY
-                        ))
-                    st.session_state.peak_prices = {}
-                    log("🔴 Manual liquidation executed")
-                    st.success(f"✅ Sold {len(positions)} position(s)!")
-                else:
-                    st.info("No positions to sell.")
-                # Reset all states
+                except Exception as e:
+                    st.error(f"Liquidation error: {e}")
+                    st.session_state.liq_step = "idle"
+                    st.session_state.pin_verified = False
+                    st.rerun()
+        with col_b:
+            if st.button("❌ Cancel", use_container_width=True):
                 st.session_state.liq_step = "idle"
                 st.session_state.pin_verified = False
                 st.rerun()
-            except Exception as e:
-                st.error(f"Liquidation error: {e}")
-                st.session_state.liq_step = "idle"
-                st.session_state.pin_verified = False
-                st.rerun()
-    with col_b:
-        if st.button("❌ Cancel", use_container_width=True):
-            st.session_state.liq_step = "idle"
-            st.session_state.pin_verified = False
-            st.rerun()
 
     st.divider()
 
