@@ -638,21 +638,49 @@ with st.sidebar:
     if st.button("Run Single Scan", use_container_width=True):
         run_strategy()
         st.rerun()
-    st.divider()
-    if st.button("Manual Liquidation", use_container_width=True):
+   # Inside sidebar, where Manual Liquidation button is
+st.divider()
+
+# PIN state for liquidation
+if "liquidate_authorized" not in st.session_state:
+    st.session_state.liquidate_authorized = False
+
+if not st.session_state.liquidate_authorized:
+    with st.form("liquidate_pin_form"):
+        liq_pin = st.text_input("Enter PIN to liquidate:", type="password", key="liq_pin")
+        liq_submitted = st.form_submit_button("Unlock Liquidation")
+        if liq_submitted:
+            try:
+                row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
+                if row.data and row.data[0]["pin"] == liq_pin:
+                    st.session_state.liquidate_authorized = True
+                    st.success("Liquidation unlocked for this session")
+                    st.rerun()
+                else:
+                    st.error("Incorrect PIN")
+            except Exception:
+                st.error("Could not verify PIN")
+    st.warning("🔒 Manual liquidation is locked. Enter PIN to unlock.")
+else:
+    if st.button("⚠️ CONFIRM LIQUIDATION (SELL ALL)", use_container_width=True, type="primary"):
         try:
             trading_client.cancel_orders()
             time.sleep(1)
             for p in trading_client.get_all_positions():
-                lp = round(float(p.current_price) - 0.03, 2)
-                trading_client.submit_order(LimitOrderRequest(
-                    symbol=p.symbol, qty=p.qty, side=OrderSide.SELL,
-                    limit_price=lp, time_in_force=TimeInForce.DAY, extended_hours=True))
+                trading_client.submit_order(MarketOrderRequest(
+                    symbol=p.symbol, qty=p.qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY
+                ))
             st.session_state.peak_prices = {}
-            log("Manual liquidation sent")
-            st.sidebar.success("Liquidation orders sent.")
+            st.session_state.liquidate_authorized = False  # Re-lock after use
+            log("🔴 Manual liquidation executed")
+            st.sidebar.success("All positions sold!")
+            st.rerun()
         except Exception as e:
             st.sidebar.error(f"Error: {e}")
+    
+    if st.button("Cancel (re-lock)", use_container_width=True):
+        st.session_state.liquidate_authorized = False
+        st.rerun()
     st.divider()
     status_color = "🟢" if st.session_state.bot_running else "🔴"
     st.write(f"**Status:** {status_color} {'AUTO-RUNNING' if st.session_state.bot_running else 'STOPPED'}")
@@ -699,8 +727,74 @@ except Exception:
     st.info("👁️ DASHBOARD MODE — Bot is running autonomously on Railway.", icon="🤖")
 
 # Active strategy display and manual override
-active_strategy, display_text = get_active_strategy_display()
-st.info(f"🎯 **Active Strategy:** {display_text}")
+st.markdown("---")
+
+# Get current active strategy (respecting manual override)
+forced = st.session_state.get("forced_strategy", "AUTO")
+now_et = datetime.now(ET)
+orb_active = (now_et.hour >= 9 and now_et.hour < 12) or (now_et.hour == 9 and now_et.minute >= 30)
+vwap_active = (now_et.hour >= 12 and now_et.hour < 15) or (now_et.hour == 15 and now_et.minute <= 30)
+
+if forced == "ORB-R":
+    active = "ORB-R"
+    mode = "🔧 FORCED MODE (Manual Override)"
+elif forced == "VWAP":
+    active = "VWAP"
+    mode = "🔧 FORCED MODE (Manual Override)"
+else:
+    mode = "🤖 AUTO MODE (Time-Based)"
+    if orb_active:
+        active = "ORB-R"
+    elif vwap_active:
+        active = "VWAP"
+    else:
+        active = "MARKET CLOSED"
+
+# Display strategy card
+if active == "ORB-R":
+    st.info(f"**{mode} | Active Strategy: 🚀 ORB-R**")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("""
+        **📈 Entry Conditions:**
+        - Yesterday's high/low = "box"
+        - 15-min candle closes **above** box high
+        - Price retests box high from above
+        - Bullish reversal candle at retest
+        - **Enter at candle close**
+        """)
+    with col2:
+        st.markdown("""
+        **🏁 Exit Rules:**
+        - Stop loss: 0.5-1% below entry
+        - Take profit: **3 × risk** (3:1 R:R)
+        - Force exit at **12:00 ET**
+        """)
+elif active == "VWAP":
+    st.info(f"**{mode} | Active Strategy: 📊 VWAP Retest**")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("""
+        **📈 Entry Conditions:**
+        - Price must be **above VWAP** (uptrend)
+        - Price pulls back to touch VWAP
+        - Bullish reversal candle at VWAP
+        - **Enter at candle close**
+        """)
+    with col2:
+        st.markdown("""
+        **🏁 Exit Rules:**
+        - Stop loss: 0.3-0.6% below VWAP
+        - Take profit: **1.5 × risk**
+        - Force exit at **15:30 ET**
+        """)
+else:
+    st.warning(f"**{mode} | 🕒 Market Closed – No Active Strategy**")
+    st.caption("Trading hours: ORB-R 9:30–12:00 ET | VWAP 12:00–15:30 ET")
+
+st.markdown("---")
+
+# Manual Strategy Override (keep this section as is)
 with st.expander("🔧 Manual Strategy Override", expanded=False):
     # PIN verification
     if "override_authorized" not in st.session_state:
