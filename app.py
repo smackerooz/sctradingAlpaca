@@ -660,7 +660,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 # MAIN DASHBOARD
 # ─────────────────────────────────────────────
-st.title("Auto Trading Bot")
+st.title("Auto Shariah Compliant Trading Bot")
 
 # Bot health indicator
 try:
