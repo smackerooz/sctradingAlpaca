@@ -845,7 +845,7 @@ if "pending_strategy" not in st.session_state:
 
 # Step 1: Show initial button
 if st.session_state.override_step == "idle" and not st.session_state.override_authorized:
-    if st.button("🔧 Change Strategy", use_container_width=True, type="secondary"):
+    if st.button("🔧 Change Strategy", use_container_width=True, type="primary"):
         st.session_state.override_step = "pin_entered"
         st.rerun()
 
