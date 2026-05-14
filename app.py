@@ -784,6 +784,28 @@ except Exception:
 # ============================================
 st.write("### 🔧 Manual Strategy Override")
 
+# Helper function to get current strategy display (without requiring override)
+def get_current_strategy_display():
+    forced = st.session_state.get("forced_strategy", "AUTO")
+    if forced == "ORB-R":
+        return "🔧 FORCED: ORB‑R"
+    elif forced == "VWAP":
+        return "🔧 FORCED: VWAP"
+    else:
+        # AUTO mode - determine based on time
+        now_et = datetime.now(ET)
+        orb_active = (now_et.hour >= 9 and now_et.hour < 12) or (now_et.hour == 9 and now_et.minute >= 30)
+        vwap_active = (now_et.hour >= 12 and now_et.hour < 15) or (now_et.hour == 15 and now_et.minute <= 30)
+        if orb_active:
+            return "🤖 AUTO: ORB‑R (9:30–12:00 ET)"
+        elif vwap_active:
+            return "🤖 AUTO: VWAP (12:00–15:30 ET)"
+        else:
+            return "⏸️ Market Closed"
+
+# Display current strategy (always visible)
+st.info(f"📌 **Current Strategy:** {get_current_strategy_display()}")
+
 # Initialize session state for override flow
 if "override_step" not in st.session_state:
     st.session_state.override_step = "idle"  # idle, pin_entered, authorized
@@ -831,24 +853,6 @@ elif st.session_state.override_step == "pin_entered" and not st.session_state.ov
 # Step 3: Show strategy selection buttons after PIN verified
 elif st.session_state.override_step == "authorized" and st.session_state.override_authorized:
     st.success("✅ Access granted – you can change the strategy")
-    
-    # Display current strategy
-    current_strategy = st.session_state.forced_strategy
-    if current_strategy == "AUTO":
-        # Determine actual auto strategy based on time
-        now_et = datetime.now(ET)
-        orb_active = (now_et.hour >= 9 and now_et.hour < 12) or (now_et.hour == 9 and now_et.minute >= 30)
-        vwap_active = (now_et.hour >= 12 and now_et.hour < 15) or (now_et.hour == 15 and now_et.minute <= 30)
-        if orb_active:
-            current_display = "ORB-R (Auto)"
-        elif vwap_active:
-            current_display = "VWAP (Auto)"
-        else:
-            current_display = "Market Closed"
-    else:
-        current_display = current_strategy
-    
-    st.info(f"📌 **Current Strategy:** {current_display}")
     
     col_a, col_b, col_c = st.columns(3)
     with col_a:
