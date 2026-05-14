@@ -789,6 +789,8 @@ if "override_step" not in st.session_state:
     st.session_state.override_step = "idle"  # idle, pin_entered, authorized
 if "override_authorized" not in st.session_state:
     st.session_state.override_authorized = False
+if "pending_strategy" not in st.session_state:
+    st.session_state.pending_strategy = None
 
 # Step 1: Show initial button
 if st.session_state.override_step == "idle" and not st.session_state.override_authorized:
@@ -830,38 +832,39 @@ elif st.session_state.override_step == "pin_entered" and not st.session_state.ov
 elif st.session_state.override_step == "authorized" and st.session_state.override_authorized:
     st.success("✅ Access granted – you can change the strategy")
     
-    col_a, col_b, col_c, col_d = st.columns(4)
+    # Display current strategy
+    current_strategy = st.session_state.forced_strategy
+    if current_strategy == "AUTO":
+        # Determine actual auto strategy based on time
+        now_et = datetime.now(ET)
+        orb_active = (now_et.hour >= 9 and now_et.hour < 12) or (now_et.hour == 9 and now_et.minute >= 30)
+        vwap_active = (now_et.hour >= 12 and now_et.hour < 15) or (now_et.hour == 15 and now_et.minute <= 30)
+        if orb_active:
+            current_display = "ORB-R (Auto)"
+        elif vwap_active:
+            current_display = "VWAP (Auto)"
+        else:
+            current_display = "Market Closed"
+    else:
+        current_display = current_strategy
+    
+    st.info(f"📌 **Current Strategy:** {current_display}")
+    
+    col_a, col_b, col_c = st.columns(3)
     with col_a:
-        if st.button("🤖 AUTO", use_container_width=True, type="primary"):
-            set_forced_strategy("AUTO")
-            st.session_state.override_step = "idle"
-            st.session_state.override_authorized = False
+        if st.button("🤖 AUTO", use_container_width=True):
+            st.session_state.pending_strategy = "AUTO"
             st.rerun()
     with col_b:
         if st.button("🚀 FORCE ORB‑R", use_container_width=True):
-            set_forced_strategy("ORB-R")
-            st.session_state.override_step = "idle"
-            st.session_state.override_authorized = False
+            st.session_state.pending_strategy = "ORB-R"
             st.rerun()
     with col_c:
         if st.button("📊 FORCE VWAP", use_container_width=True):
-            set_forced_strategy("VWAP")
-            st.session_state.override_step = "idle"
-            st.session_state.override_authorized = False
+            st.session_state.pending_strategy = "VWAP"
             st.rerun()
-    with col_d:
-        st.caption(f"Current: **{st.session_state.forced_strategy}**")
     
-    # Confirm and Relock button
-    if st.button("✅ Confirm and Relock", use_container_width=True):
-        st.session_state.override_step = "idle"
-        st.session_state.override_authorized = False
-        st.success("Strategy locked. Changes are active.")
-        st.rerun()
-    
-    # ─────────────────────────────────────────
-    # PIN CHANGER (admin only)
-    # ─────────────────────────────────────────
+    # PIN Changer (admin only)
     with st.expander("🔐 Change PIN (admin only)", expanded=False):
         st.caption("Change the PIN used for both Strategy Override and Liquidation")
         
@@ -894,6 +897,37 @@ elif st.session_state.override_step == "authorized" and st.session_state.overrid
             
             if change_cancel:
                 st.rerun()
+
+# Step 4: Confirmation dialog for strategy change
+if st.session_state.pending_strategy is not None:
+    strategy_name = st.session_state.pending_strategy
+    if strategy_name == "AUTO":
+        strategy_display = "AUTO (time‑based)"
+    elif strategy_name == "ORB-R":
+        strategy_display = "ORB‑R (Opening Range Breakout)"
+    else:
+        strategy_display = "VWAP (Volume Weighted Avg Price)"
+    
+    st.markdown("---")
+    st.warning(f"⚠️ **You are changing the strategy to: {strategy_display}**")
+    st.caption("Please confirm this action.")
+    
+    col_confirm, col_cancel = st.columns(2)
+    with col_confirm:
+        if st.button("✅ Confirm", use_container_width=True, type="primary"):
+            set_forced_strategy(st.session_state.pending_strategy)
+            st.session_state.override_step = "idle"
+            st.session_state.override_authorized = False
+            st.session_state.pending_strategy = None
+            st.success(f"Strategy changed to {strategy_display}")
+            st.rerun()
+    with col_cancel:
+        if st.button("❌ Cancel", use_container_width=True):
+            st.session_state.override_step = "idle"
+            st.session_state.override_authorized = False
+            st.session_state.pending_strategy = None
+            st.info("Strategy change cancelled.")
+            st.rerun()
 
 st.markdown("---")
 
