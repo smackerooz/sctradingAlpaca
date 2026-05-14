@@ -211,19 +211,25 @@ def get_trading_session_date(dt: datetime = None) -> str:
     else:
         return dt.date().isoformat()
 
+def get_trading_session_date_from_string(date_str: str, time_str: str) -> str:
+    from datetime import datetime as dt
+    dt_obj = dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+    dt_obj = SGT.localize(dt_obj)
+    return get_trading_session_date(dt_obj)
+
 def load_realized_trades() -> list:
     """Load trades from the current trading session (9:30pm SGT → 4:00am SGT)."""
     try:
-        # Load trades from the last 7 days (covers any session)
+        # Load trades from the last 3 days (covers any session)
+        three_days_ago = (datetime.now(SGT) - timedelta(days=3)).date().isoformat()
         rows = supabase.table("realized_trades") \
                    .select("*") \
+                   .gte("date", three_days_ago) \
                    .order("id", desc=True) \
-                   .limit(500) \
                    .execute()
         result = []
         current_session = get_trading_session_date()
         for r in rows.data:
-            # Compute the trading session date for this trade
             trade_session = get_trading_session_date_from_string(r["date"], r["time_sgt"])
             if trade_session == current_session:
                 result.append({
@@ -239,10 +245,26 @@ def load_realized_trades() -> list:
                     "Reason": r["reason"],
                     "_pl_usd": float(r["pl_usd"]),
                 })
+        # If no trades for current session, show all recent trades (fallback)
+        if not result:
+            for r in rows.data:
+                result.append({
+                    "date": r["date"],
+                    "Symbol": r["symbol"],
+                    "Strategy": r.get("strategy", "Unknown"),
+                    "Buy Price": r["buy_price"],
+                    "Sell Price": r["sell_price"],
+                    "Qty": r["qty"],
+                    "P&L ($)": r["pl_display"],
+                    "P&L (%)": r["pl_pct"],
+                    "Time (SGT)": r["time_sgt"],
+                    "Reason": r["reason"],
+                    "_pl_usd": float(r["pl_usd"]),
+                })
         return result
-    except Exception:
+    except Exception as e:
+        print(f"Error loading trades: {e}")
         return []
-     
 
 def load_all_trades() -> list:
     """Load all realized trades (no date filter)."""
@@ -269,13 +291,6 @@ def load_all_trades() -> list:
         return result
     except Exception:
         return []
-
-def get_trading_session_date_from_string(date_str: str, time_str: str) -> str:
-    from datetime import datetime as dt
-    # date_str: "2026-05-15", time_str: "23:45:12"
-    dt_obj = dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
-    dt_obj = SGT.localize(dt_obj)
-    return get_trading_session_date(dt_obj)
 
 def compute_daily_pnl_overview() -> pd.DataFrame:
     all_trades = load_all_trades()
