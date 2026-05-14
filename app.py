@@ -1,7 +1,11 @@
 """
-Streamlit dashboard for Trading Bot with manual strategy override.
-Includes all original tabs: Live Trading, Signal Scanner, Backtesting, Portfolio Backtest.
-Run: streamlit run App_dashboard_manualoverride.py
+Complete Dashboard for Trading Bot (ORB-R + VWAP)
+- 50 Shariah-compliant stocks
+- Manual override with PIN
+- Manual liquidation with PIN
+- Auto-refresh trades every 60 seconds
+- Trading session P&L (9:30pm SGT → 4:00am SGT)
+- Daily P&L bar chart
 """
 
 import streamlit as st
@@ -21,8 +25,7 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 # ─────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────
-st.set_page_config(page_title="Trading Bot by Rooz", page_icon="📈", layout="wide")
-
+st.set_page_config(page_title="Trading Bot", page_icon="📈", layout="wide")
 
 # ─────────────────────────────────────────────
 # KEEPALIVE (prevents Streamlit Cloud sleep)
@@ -111,16 +114,14 @@ supabase = get_supabase()
 SGT = pytz.timezone('Asia/Singapore')
 ET = pytz.timezone('US/Eastern')
 
-
 # ─────────────────────────────────────────────
-# CONSTANTS & CONFIG (Updated to match 50 stocks)
+# CONSTANTS & WATCHLIST (50 stocks)
 # ─────────────────────────────────────────────
 TARGET_PROFIT = 200.0
 CASH_BUFFER = 95000.0
 SCAN_INTERVAL = 10
 MAX_TRADE_USD = 750.0
 
-# Full 50‑stock watchlist (as used in the bot)
 WATCHLIST = [
     "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM", "MSTR", "PANW",
     "TSM", "LRCX", "ON", "MPWR", "MRVL", "NXPI", "TEAM", "INTA", "CRWD", "ZS",
@@ -129,7 +130,6 @@ WATCHLIST = [
     "AAPL", "JNJ", "PEP", "LIN", "REGN", "INTC", "PG", "NKE", "ADSK", "MDT"
 ]
 
-# Simplified volatility profiles (used for display and backtesting)
 STOCK_PROFILES = {
     "NVDA": (0.018, 0.010, 0.008), "AMD": (0.015, 0.009, 0.007),
     "AVGO": (0.013, 0.008, 0.006), "QCOM": (0.013, 0.008, 0.006),
@@ -159,7 +159,7 @@ STOCK_PROFILES = {
 }
 
 # ─────────────────────────────────────────────
-# SESSION STATE INIT
+# SESSION STATE INITIALIZATION
 # ─────────────────────────────────────────────
 if "nightly_baseline" not in st.session_state:
     try:
@@ -172,10 +172,10 @@ if "nightly_baseline" not in st.session_state:
             if saved_date >= last_monday:
                 st.session_state.nightly_baseline = float(bl["baseline"])
             else:
-                raise ValueError("Baseline from previous week")
+                raise ValueError
         else:
-            raise ValueError("No baseline row yet")
-    except Exception:
+            raise ValueError
+    except:
         try:
             st.session_state.nightly_baseline = float(trading_client.get_account().last_equity)
         except:
@@ -190,14 +190,36 @@ if "live_signal_time" not in st.session_state: st.session_state.live_signal_time
 if "realized_trades" not in st.session_state: st.session_state.realized_trades = []
 if "forced_strategy" not in st.session_state: st.session_state.forced_strategy = "AUTO"
 
+# Override & liquidation session states
+if "override_step" not in st.session_state: st.session_state.override_step = "idle"
+if "override_authorized" not in st.session_state: st.session_state.override_authorized = False
+if "pending_strategy" not in st.session_state: st.session_state.pending_strategy = None
+if "liq_step" not in st.session_state: st.session_state.liq_step = "idle"
+if "pin_verified" not in st.session_state: st.session_state.pin_verified = False
+
 # ─────────────────────────────────────────────
 # HELPER FUNCTIONS
 # ─────────────────────────────────────────────
+def get_trading_session_date(dt: datetime = None) -> str:
+    """Trading session runs from 9:30pm SGT to 4:00am SGT next day."""
+    if dt is None:
+        dt = datetime.now(SGT)
+    if dt.hour >= 21 and dt.minute >= 30:
+        return dt.date().isoformat()
+    elif dt.hour < 4:
+        return (dt.date() - timedelta(days=1)).isoformat()
+    else:
+        return dt.date().isoformat()
+
 def load_realized_trades() -> list:
-    """Load today's realized trades from Supabase including strategy column."""
+    """Load trades from the current trading session (9:30pm SGT → 4:00am SGT)."""
     try:
-        today = datetime.now(SGT).date().isoformat()
-        rows = supabase.table("realized_trades").select("*").eq("date", today).order("id", desc=True).execute()
+        session_date = get_trading_session_date()
+        rows = supabase.table("realized_trades") \
+                   .select("*") \
+                   .eq("date", session_date) \
+                   .order("id", desc=True) \
+                   .execute()
         result = []
         for r in rows.data:
             result.append({
@@ -217,23 +239,76 @@ def load_realized_trades() -> list:
     except Exception:
         return []
 
+def load_all_trades() -> list:
+    """Load all realized trades (no date filter)."""
+    try:
+        rows = supabase.table("realized_trades") \
+                   .select("*") \
+                   .order("id", desc=True) \
+                   .execute()
+        result = []
+        for r in rows.data:
+            result.append({
+                "date": r["date"],
+                "Symbol": r["symbol"],
+                "Strategy": r.get("strategy", "Unknown"),
+                "Buy Price": r["buy_price"],
+                "Sell Price": r["sell_price"],
+                "Qty": r["qty"],
+                "P&L ($)": r["pl_display"],
+                "P&L (%)": r["pl_pct"],
+                "Time (SGT)": r["time_sgt"],
+                "Reason": r["reason"],
+                "_pl_usd": float(r["pl_usd"]),
+            })
+        return result
+    except Exception:
+        return []
 
+def get_trading_session_date_from_string(date_str: str, time_str: str) -> str:
+    from datetime import datetime as dt
+    dt_str = f"{date_str} {time_str}"
+    dt_obj = dt.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+    dt_obj = SGT.localize(dt_obj)
+    return get_trading_session_date(dt_obj)
 
-def get_active_strategy_display():
-    forced = st.session_state.forced_strategy
-    if forced != "AUTO":
-        return forced, f"🔧 MANUAL OVERRIDE: {forced}"
-    now_et = datetime.now(ET)
-    orb_start = now_et.replace(hour=9, minute=30, second=0)
-    orb_end = now_et.replace(hour=12, minute=0, second=0)
-    vwap_start = now_et.replace(hour=12, minute=0, second=0)
-    vwap_end = now_et.replace(hour=15, minute=30, second=0)
-    if orb_start <= now_et <= orb_end:
-        return "ORB-R", "⏰ ORB‑R (9:30–12:00 ET)"
-    elif vwap_start <= now_et <= vwap_end:
-        return "VWAP", "⏰ VWAP Retest (12:00–15:30 ET)"
+def compute_daily_pnl_overview() -> pd.DataFrame:
+    all_trades = load_all_trades()
+    if not all_trades:
+        return pd.DataFrame()
+    sessions = []
+    for trade in all_trades:
+        session_date = get_trading_session_date_from_string(trade["date"], trade["Time (SGT)"])
+        sessions.append({
+            "session": session_date,
+            "pl": trade["_pl_usd"],
+            "strategy": trade.get("Strategy", "Unknown"),
+        })
+    df = pd.DataFrame(sessions)
+    if df.empty:
+        return pd.DataFrame()
+    pivot = df.groupby(["session", "strategy"])["pl"].sum().unstack(fill_value=0)
+    pivot["Total"] = pivot.sum(axis=1)
+    pivot = pivot.sort_index(ascending=False)
+    pivot = pivot.reset_index().rename(columns={"session": "Trading Session Date"})
+    return pivot
+
+def get_current_strategy_display():
+    forced = st.session_state.get("forced_strategy", "AUTO")
+    if forced == "ORB-R":
+        return "🔧 FORCED: ORB‑R", "📈 3:1 risk‑reward (risk $1 → target $3 profit) | Exit at 12:00 ET (midnight SGT)"
+    elif forced == "VWAP":
+        return "🔧 FORCED: VWAP", "📈 1.5:1 risk‑reward (risk $1 → target $1.50 profit) | Exit at 15:30 ET (3:30am SGT)"
     else:
-        return "CLOSED", "⏸️ Market Closed / Off Hours"
+        now_et = datetime.now(ET)
+        orb_active = (now_et.hour >= 9 and now_et.hour < 12) or (now_et.hour == 9 and now_et.minute >= 30)
+        vwap_active = (now_et.hour >= 12 and now_et.hour < 15) or (now_et.hour == 15 and now_et.minute <= 30)
+        if orb_active:
+            return "🤖 AUTO: ORB‑R (9:30am–12:00pm ET)", "📈 3:1 risk‑reward (risk $1 → target $3 profit) | Exit at 00:00 SGT"
+        elif vwap_active:
+            return "🤖 AUTO: VWAP (12:00pm–3:30pm ET)", "📈 1.5:1 risk‑reward (risk $1 → target $1.50 profit) | Exit at 03:30 SGT"
+        else:
+            return "⏸️ Market Closed", "No active strategy. Trading hours: 9:30pm–4:00am SGT (Mon–Fri night)"
 
 def set_forced_strategy(strategy):
     try:
@@ -596,20 +671,6 @@ def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy
     return results, pd.DataFrame(trades)
 
 # ─────────────────────────────────────────────
-# AUTO-REFRESH FOR TRADES (every 60 seconds)
-# ─────────────────────────────────────────────
-if "last_trade_refresh" not in st.session_state:
-    st.session_state.last_trade_refresh = datetime.now(SGT)
-
-# Force load trades immediately on every script run
-st.session_state.realized_trades = load_realized_trades()
-
-if (datetime.now(SGT) - st.session_state.last_trade_refresh).seconds >= 60:
-    st.session_state.last_trade_refresh = datetime.now(SGT)
-    st.rerun()
-
-
-# ─────────────────────────────────────────────
 # FETCH LIVE ACCOUNT DATA
 # ─────────────────────────────────────────────
 try:
@@ -628,43 +689,40 @@ progress_pct = min(max(realized / TARGET_PROFIT, 0.0), 1.0) if realized > 0 else
 combined = round(unrealized + realized, 2)
 
 # ─────────────────────────────────────────────
+# AUTO-REFRESH TRADES (every 60 seconds)
+# ─────────────────────────────────────────────
+if "last_trade_refresh" not in st.session_state:
+    st.session_state.last_trade_refresh = datetime.now(SGT)
+
+if (datetime.now(SGT) - st.session_state.last_trade_refresh).seconds >= 60:
+    st.session_state.realized_trades = load_realized_trades()
+    st.session_state.last_trade_refresh = datetime.now(SGT)
+    st.rerun()
+
+# Force load trades on script run
+st.session_state.realized_trades = load_realized_trades()
+
+# ─────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────
 with st.sidebar:
     st.header("Bot Controls")
     st.metric("Weekly Baseline", f"${st.session_state.nightly_baseline:,.2f}")
-
     st.caption("Bot runs on Railway — start/stop from Railway dashboard.")
-
     st.divider()
-
     if st.button("▶️ Run Single Scan", use_container_width=True):
         run_strategy()
         st.rerun()
-
     st.divider()
 
-    # ============================================
-    # MANUAL LIQUIDATION WITH PIN (IN SIDEBAR)
-    # ============================================
+    # Manual Liquidation with PIN (3-step)
     st.write("### 🧹 Manual Liquidation")
-
-    # Initialize session state for liquidation
-    if "liq_step" not in st.session_state:
-        st.session_state.liq_step = "idle"  # idle, pin_entered, confirmed
-    if "pin_verified" not in st.session_state:
-        st.session_state.pin_verified = False
-
-    # Step 1: Show initial button
-    if st.session_state.liq_step == "idle":
+    if st.session_state.liq_step == "idle" and not st.session_state.pin_verified:
         if st.button("⚠️ Manual Liquidation", use_container_width=True, type="secondary"):
             st.session_state.liq_step = "pin_entered"
             st.rerun()
-
-    # Step 2: Show PIN entry
     elif st.session_state.liq_step == "pin_entered" and not st.session_state.pin_verified:
         st.warning("⚠️ Enter PIN to unlock liquidation")
-        
         with st.form("liq_pin_form"):
             liq_pin = st.text_input("PIN:", type="password", key="liq_pin_input")
             col_a, col_b = st.columns(2)
@@ -672,7 +730,6 @@ with st.sidebar:
                 verify_btn = st.form_submit_button("🔓 Verify PIN", use_container_width=True)
             with col_b:
                 cancel_btn = st.form_submit_button("❌ Cancel", use_container_width=True)
-            
             if verify_btn:
                 try:
                     row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
@@ -685,17 +742,13 @@ with st.sidebar:
                         st.error("Incorrect PIN")
                 except Exception:
                     st.error("Could not verify PIN")
-            
             if cancel_btn:
                 st.session_state.liq_step = "idle"
                 st.session_state.pin_verified = False
                 st.rerun()
-
-    # Step 3: Show final confirmation button after PIN verified
     elif st.session_state.liq_step == "confirmed" and st.session_state.pin_verified:
         st.error("⚠️⚠️⚠️ FINAL STEP ⚠️⚠️⚠️")
         st.warning("You have verified your PIN. Click below to SELL ALL positions.")
-        
         col_a, col_b = st.columns(2)
         with col_a:
             if st.button("🔥 FINAL CONFIRM - SELL ALL", use_container_width=True, type="primary"):
@@ -713,7 +766,6 @@ with st.sidebar:
                         st.success(f"✅ Sold {len(positions)} position(s)!")
                     else:
                         st.info("No positions to sell.")
-                    # Reset all states
                     st.session_state.liq_step = "idle"
                     st.session_state.pin_verified = False
                     st.rerun()
@@ -729,17 +781,13 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
-
-    # Status and trade info
     status_color = "🟢" if st.session_state.bot_running else "🔴"
     st.write(f"**Status:** {status_color} {'AUTO-RUNNING' if st.session_state.bot_running else 'STOPPED'}")
     if st.session_state.last_scan:
         st.write(f"**Last scan:** {st.session_state.last_scan.strftime('%H:%M:%S')} SGT")
     st.write(f"**Scan interval:** {SCAN_INTERVAL}s")
     st.write(f"**Trade budget:** ${MAX_TRADE_USD:,.0f} per trade")
-
     st.divider()
-
     st.write("**📋 Bot Logs (from Railway)**")
     try:
         logs = supabase.table("bot_logs").select("message,created_at").order("created_at", desc=True).limit(30).execute()
@@ -747,9 +795,7 @@ with st.sidebar:
             st.caption(l["message"])
     except:
         st.caption("No logs yet.")
-
     st.divider()
-
     st.write("**Per-stock profiles:**")
     profile_rows = [{"Symbol": sym, "Hard SL": f"-{v[0]*100:.1f}%",
                      "Trail": f"-{v[1]*100:.1f}%", "Buy Trend": f"+{v[2]*100:.1f}%"}
@@ -759,14 +805,15 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 # MAIN DASHBOARD
 # ─────────────────────────────────────────────
-st.title("Auto Shariah Compliant Trading Bot")
+st.title("📈 Auto Trading Bot")
 
 # Bot health indicator
 try:
     hb_row = supabase.table("bot_state").select("last_heartbeat").eq("id", 1).execute()
     if hb_row.data and hb_row.data[0].get("last_heartbeat"):
         last_hb = datetime.fromisoformat(hb_row.data[0]["last_heartbeat"])
-        if last_hb.tzinfo is None: last_hb = SGT.localize(last_hb)
+        if last_hb.tzinfo is None:
+            last_hb = SGT.localize(last_hb)
         seconds_ago = (datetime.now(SGT) - last_hb).total_seconds()
         if seconds_ago < 60:
             st.success(f"🟢 BOT ALIVE — Last heartbeat {int(seconds_ago)}s ago", icon="🤖")
@@ -779,80 +826,21 @@ try:
 except Exception:
     st.info("👁️ DASHBOARD MODE — Bot is running autonomously on Railway.", icon="🤖")
 
-# ============================================
-# MANUAL STRATEGY OVERRIDE (Main Window)
-# ============================================
-st.write("### 🔧 CURRENT STRATEGY")
-
-# Helper function to get current strategy display (without requiring override)
-def get_current_strategy_display():
-    forced = st.session_state.get("forced_strategy", "AUTO")
-    if forced == "ORB-R":
-        return "🔧 FORCED: ORB‑R", "📈 Target 3x your risk (e.g., risk $1 → aim for $3 profit) | Exit at 12:00 ET (midnight SGT)"
-    elif forced == "VWAP":
-        return "🔧 FORCED: VWAP", "📈 Target 1.5x your risk (e.g., risk $1 → aim for $1.50 profit) | Exit at 15:30 ET (3:30am SGT)"
-    else:
-        # AUTO mode - determine based on time
-        now_et = datetime.now(ET)
-        orb_active = (now_et.hour >= 9 and now_et.hour < 12) or (now_et.hour == 9 and now_et.minute >= 30)
-        vwap_active = (now_et.hour >= 12 and now_et.hour < 15) or (now_et.hour == 15 and now_et.minute <= 30)
-        
-        # Convert ET to SGT for display
-        def et_to_sgt(hour_et, minute_et=0):
-            """Convert ET time to SGT (ET + 12 hours, but careful with date)"""
-            sgt_hour = hour_et + 12
-            if sgt_hour >= 24:
-                sgt_hour -= 24
-            return f"{sgt_hour:02d}:{minute_et:02d}"
-        
-        if orb_active:
-            exit_sgt = et_to_sgt(12, 0)  # 12:00 ET = 00:00 SGT (midnight)
-            return "🤖 AUTO: ORB‑R (9:30am–12:00pm ET)", f"📈 Target 3x your risk (e.g., risk $1 → aim for $3 profit) | Exit at {exit_sgt} SGT"
-        elif vwap_active:
-            exit_sgt = et_to_sgt(15, 30)  # 15:30 ET = 03:30 SGT
-            return "🤖 AUTO: VWAP (12:00pm–3:30pm ET)", f"📈 Target 1.5x your risk (e.g., risk $1 → aim for $1.50 profit) | Exit at {exit_sgt} SGT"
-        else:
-            return "⏸️ Market Closed", "No active strategy. Trading hours: 9:30pm–4:00am SGT (Mon–Fri night)"
-
-# Display current strategy (always visible)
+# Strategy Description Card (always visible)
+st.markdown("---")
 strategy_title, strategy_desc = get_current_strategy_display()
-st.markdown(
-    f"""
-    <div style="
-        background-color: #d4edda;
-        padding: 12px 15px;
-        border-radius: 8px;
-        border-left: 4px solid #28a745;
-        margin: 10px 0;
-        color: #000000;
-    ">
-        <span style="font-size: 16px;">📌</span>
-        <strong>Current Strategy:</strong> {strategy_title}<br>
-        <span style="font-size: 14px;">📖 {strategy_desc}</span>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+st.markdown(f"📌 **Current Strategy:** {strategy_title}")
+st.markdown(f"{strategy_desc}")
 st.markdown("---")
 
-# Initialize session state for override flow
-if "override_step" not in st.session_state:
-    st.session_state.override_step = "idle"  # idle, pin_entered, authorized
-if "override_authorized" not in st.session_state:
-    st.session_state.override_authorized = False
-if "pending_strategy" not in st.session_state:
-    st.session_state.pending_strategy = None
-
-# Step 1: Show initial button
+# Manual Strategy Override (3-step)
+st.write("### 🔧 Manual Strategy Override")
 if st.session_state.override_step == "idle" and not st.session_state.override_authorized:
     if st.button("🔧 Change Strategy", use_container_width=True, type="primary"):
         st.session_state.override_step = "pin_entered"
         st.rerun()
-
-# Step 2: Show PIN entry
 elif st.session_state.override_step == "pin_entered" and not st.session_state.override_authorized:
     st.warning("🔒 Enter PIN to change strategy")
-    
     with st.form("override_pin_form"):
         override_pin = st.text_input("PIN:", type="password", key="override_pin_input")
         col_a, col_b = st.columns(2)
@@ -860,7 +848,6 @@ elif st.session_state.override_step == "pin_entered" and not st.session_state.ov
             verify_btn = st.form_submit_button("🔓 Verify PIN", use_container_width=True)
         with col_b:
             cancel_btn = st.form_submit_button("❌ Cancel", use_container_width=True)
-        
         if verify_btn:
             try:
                 row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
@@ -873,16 +860,15 @@ elif st.session_state.override_step == "pin_entered" and not st.session_state.ov
                     st.error("Incorrect PIN")
             except Exception:
                 st.error("Could not verify PIN")
-        
         if cancel_btn:
             st.session_state.override_step = "idle"
             st.session_state.override_authorized = False
             st.rerun()
-
-# Step 3: Show strategy selection buttons after PIN verified
 elif st.session_state.override_step == "authorized" and st.session_state.override_authorized:
     st.success("✅ Access granted – you can change the strategy")
-    
+    # Display current strategy (again for clarity)
+    cur_title, _ = get_current_strategy_display()
+    st.info(f"Current strategy: {cur_title}")
     col_a, col_b, col_c = st.columns(3)
     with col_a:
         if st.button("🤖 AUTO", use_container_width=True):
@@ -896,22 +882,17 @@ elif st.session_state.override_step == "authorized" and st.session_state.overrid
         if st.button("📊 FORCE VWAP", use_container_width=True):
             st.session_state.pending_strategy = "VWAP"
             st.rerun()
-    
     # PIN Changer (admin only)
     with st.expander("🔐 Change PIN (admin only)", expanded=False):
-        st.caption("Change the PIN used for both Strategy Override and Liquidation")
-        
         with st.form("change_pin_form"):
             current_pin = st.text_input("Current PIN:", type="password", key="current_pin")
             new_pin = st.text_input("New PIN (4-6 digits):", type="password", max_chars=6, key="new_pin")
             confirm_pin = st.text_input("Confirm New PIN:", type="password", max_chars=6, key="confirm_pin")
-            
             col_pin1, col_pin2 = st.columns(2)
             with col_pin1:
                 change_submitted = st.form_submit_button("✅ Update PIN", use_container_width=True)
             with col_pin2:
                 change_cancel = st.form_submit_button("❌ Cancel", use_container_width=True)
-            
             if change_submitted:
                 try:
                     row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
@@ -919,7 +900,6 @@ elif st.session_state.override_step == "authorized" and st.session_state.overrid
                         if new_pin and new_pin == confirm_pin and new_pin.isdigit() and 4 <= len(new_pin) <= 6:
                             supabase.table("bot_config").update({"pin": new_pin}).eq("id", 1).execute()
                             st.success("✅ PIN updated successfully!")
-                            st.info("New PIN will be required for future overrides and liquidation.")
                             st.rerun()
                         else:
                             st.error("New PIN must be 4-6 digits and match")
@@ -927,11 +907,15 @@ elif st.session_state.override_step == "authorized" and st.session_state.overrid
                         st.error("Current PIN is incorrect")
                 except Exception:
                     st.error("Could not verify current PIN")
-            
             if change_cancel:
                 st.rerun()
+    if st.button("✅ Confirm and Relock", use_container_width=True):
+        st.session_state.override_step = "idle"
+        st.session_state.override_authorized = False
+        st.success("Strategy locked. Changes are active.")
+        st.rerun()
 
-# Step 4: Confirmation dialog for strategy change
+# Confirmation dialog for pending strategy change
 if st.session_state.pending_strategy is not None:
     strategy_name = st.session_state.pending_strategy
     if strategy_name == "AUTO":
@@ -940,11 +924,9 @@ if st.session_state.pending_strategy is not None:
         strategy_display = "ORB‑R (Opening Range Breakout)"
     else:
         strategy_display = "VWAP (Volume Weighted Avg Price)"
-    
     st.markdown("---")
     st.warning(f"⚠️ **You are changing the strategy to: {strategy_display}**")
     st.caption("Please confirm this action.")
-    
     col_confirm, col_cancel = st.columns(2)
     with col_confirm:
         if st.button("✅ Confirm", use_container_width=True, type="primary"):
@@ -964,14 +946,14 @@ if st.session_state.pending_strategy is not None:
 
 st.markdown("---")
 
-# Tabs
+# TABS
 tab_live, tab_signals, tab_backtest, tab_portfolio = st.tabs(["Live Trading", "Signal Scanner", "Backtesting", "Portfolio Backtest"])
 
 # ════════════════════════════════════════════
 # TAB 1 — LIVE TRADING
 # ════════════════════════════════════════════
 with tab_live:
-    st.write(f"## Weekly Goal: ${TARGET_PROFIT:.0f} USD")
+    st.write(f"## 🎯 Weekly Goal: ${TARGET_PROFIT:.0f} USD")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Total Equity", f"${EQUITY:,.2f}", delta=float(combined))
     c2.metric("Cash Balance", f"${CASH:,.2f}")
@@ -980,7 +962,7 @@ with tab_live:
     c5.metric("Unrealized P&L", f"${unrealized:,.2f}")
     st.progress(progress_pct, text=f"Weekly Goal Progress: ${realized:.2f} / ${TARGET_PROFIT:.0f} ({int(progress_pct*100)}%)")
 
-    st.write("### Live Holdings")
+    st.write("### 📦 Live Holdings")
     if positions:
         pos_data = []
         for p in positions:
@@ -999,23 +981,23 @@ with tab_live:
                 "P&L (%)": f"{float(p.unrealized_plpc)*100:+.2f}%",
             })
         st.dataframe(pd.DataFrame(pos_data), use_container_width=True, height=280)
-        st.caption(f"Total holdings value: **${total_holdings:,.2f}** across {len(positions)} position(s)")
+        st.caption(f"📊 Total holdings value: **${total_holdings:,.2f}** across {len(positions)} position(s)")
     else:
-        st.success("Account is 100% Cash.")
+        st.success("✅ Account is 100% Cash.")
 
     # Today's Completed Trades (split by strategy)
-    with st.expander("Today's Completed Trades", expanded=True):
+    with st.expander("📊 Today's Completed Trades", expanded=True):
         col_refresh, _ = st.columns([4, 1])
         with col_refresh:
-            if st.button("Refresh Trades", use_container_width=True):
+            if st.button("🔄 Refresh Trades", use_container_width=True):
                 st.session_state.realized_trades = load_realized_trades()
                 st.rerun()
+        session_date = get_trading_session_date()
+        st.caption(f"📅 Trading session: {session_date} (9:30 PM SGT → 4:00 AM SGT)")
         trades = st.session_state.realized_trades
-        today = datetime.now(SGT).date().isoformat()
-        trades_today = [t for t in trades if t.get("date") == today]
-        if trades_today:
-            orb_trades = [t for t in trades_today if t.get("Strategy", "").upper() == "ORB-R"]
-            vwap_trades = [t for t in trades_today if t.get("Strategy", "").upper() == "VWAP"]
+        if trades:
+            orb_trades = [t for t in trades if t.get("Strategy", "").upper() == "ORB-R"]
+            vwap_trades = [t for t in trades if t.get("Strategy", "").upper() == "VWAP"]
             if orb_trades:
                 st.markdown("**🚀 ORB‑R Trades**")
                 orb_df = pd.DataFrame(orb_trades)[["Symbol", "Buy Price", "Sell Price", "Qty", "P&L ($)", "P&L (%)", "Time (SGT)", "Reason"]]
@@ -1029,12 +1011,54 @@ with tab_live:
                 total_vwap = sum(t["_pl_usd"] for t in vwap_trades)
                 st.write(f"**Total VWAP P&L: ${total_vwap:+.2f}**")
             if not orb_trades and not vwap_trades:
-                st.info("No completed trades today yet.")
+                st.info("No completed trades in this session yet.")
         else:
-            st.info("No completed trades today yet.")
+            st.info("No completed trades in this session yet.")
+
+    # Daily P&L Bar Chart (by trading session)
+    st.markdown("### 📊 Daily P&L by Trading Session")
+    daily_df = compute_daily_pnl_overview()
+    if not daily_df.empty:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=daily_df["Trading Session Date"],
+            y=daily_df["Total"],
+            name="Total P&L",
+            marker_color=["#26a65b" if x >= 0 else "#e74c3c" for x in daily_df["Total"]],
+            text=[f"${x:+.2f}" for x in daily_df["Total"]],
+            textposition="outside",
+        ))
+        if "ORB-R" in daily_df.columns:
+            fig.add_trace(go.Bar(
+                x=daily_df["Trading Session Date"],
+                y=daily_df["ORB-R"],
+                name="ORB‑R",
+                marker_color="#4f8ef7",
+                opacity=0.7,
+            ))
+        if "VWAP" in daily_df.columns:
+            fig.add_trace(go.Bar(
+                x=daily_df["Trading Session Date"],
+                y=daily_df["VWAP"],
+                name="VWAP",
+                marker_color="#f0a500",
+                opacity=0.7,
+            ))
+        fig.update_layout(
+            barmode="group",
+            height=400,
+            template="plotly_dark",
+            xaxis_title="Trading Session (start evening SGT)",
+            yaxis_title="P&L (USD)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            margin=dict(l=0, r=0, t=30, b=0),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No trade data available yet for daily P&L chart.")
 
     # Open Positions (Unrealized)
-    with st.expander("Open Positions (Unrealized)", expanded=False):
+    with st.expander("📋 Open Positions (Unrealized)", expanded=False):
         try:
             positions = trading_client.get_all_positions()
             if positions:
@@ -1059,11 +1083,11 @@ with tab_live:
         except:
             st.info("Could not fetch positions.")
 
-    # Signal Rankings Widget
-    st.write("### Live Signal Rankings")
+    # Signal Rankings Widget (your existing code)
+    st.write("### 📡 Live Signal Rankings")
     lsr_col1, lsr_col2 = st.columns([3, 1])
     with lsr_col2:
-        if st.button("Refresh Rankings", use_container_width=True, key="live_sig_btn"):
+        if st.button("🔄 Refresh Rankings", use_container_width=True, key="live_sig_btn"):
             live_scan_rows = []
             live_bar = st.progress(0, text="Scanning signals...")
             for idx, sym in enumerate(WATCHLIST):
@@ -1110,14 +1134,14 @@ with tab_live:
             held_syms = [p.symbol for p in positions]
             held_sigs = df_ls_display[df_ls_display["Symbol"].isin(held_syms)][["Symbol", "Rank", "Score", "Signal", "RSI", "MACD Hist"]]
             if not held_sigs.empty:
-                st.markdown("**Signal Scores for Current Holdings**")
+                st.markdown("**📦 Signal Scores for Current Holdings**")
                 st.dataframe(held_sigs, use_container_width=True, hide_index=True)
     else:
-        st.info("Click **Refresh Rankings** to load signal scores.")
+        st.info("👆 Click **Refresh Rankings** to load signal scores for all stocks.")
 
     st.divider()
     # Activity log
-    with st.expander("Activity Log", expanded=True):
+    with st.expander("📋 Activity Log", expanded=True):
         try:
             logs = supabase.table("bot_logs").select("message, created_at").order("created_at", desc=True).limit(50).execute()
             if logs.data:
@@ -1131,19 +1155,16 @@ with tab_live:
             st.error(f"Could not load logs: {e}")
 
 # ════════════════════════════════════════════
-# TAB 2 — SIGNAL SCANNER (unchanged from original)
+# TAB 2 — SIGNAL SCANNER (preserved)
 # ════════════════════════════════════════════
 with tab_signals:
-    st.write("## Signal Scanner — Bullish/Bearish Rankings (1–100)")
-    st.write(
-        "Scores each stock from **1 (strongly bearish)** to **100 (strongly bullish)** "
-        "using 4 components: **Trend** (SMA20/50), **RSI**, **MACD**, and **Momentum**."
-    )
+    st.write("## 📡 Signal Scanner — Bullish/Bearish Rankings (1–100)")
+    st.write("Scores each stock from 1 to 100 using Trend, RSI, MACD, and Momentum.")
     sig_col1, sig_col2 = st.columns([2, 1])
     with sig_col1:
         sig_period = st.selectbox("Data period", ["5d", "1mo", "3mo"], index=1, key="sig_period")
     with sig_col2:
-        run_scanner = st.button("Run Signal Scan", type="primary", use_container_width=True)
+        run_scanner = st.button("🔍 Run Signal Scan", type="primary", use_container_width=True)
     if "signal_results" not in st.session_state:
         st.session_state.signal_results = None
     if run_scanner:
@@ -1166,7 +1187,7 @@ with tab_signals:
                     "Hard SL": f"-{hard_sl*100:.1f}%", "Trail Stop": f"-{trail_pct*100:.1f}%",
                     "Buy Trend": f"+{buy_trend*100:.1f}%",
                 })
-            except Exception as e:
+            except Exception:
                 scan_rows.append({
                     "Symbol": sym, "Score": 50, "Signal": "⚪ N/A", "RSI": None, "MACD Hist": None,
                     "Trend Pts": 0, "RSI Pts": 0, "MACD Pts": 0, "Momentum Pts": 0,
@@ -1189,9 +1210,9 @@ with tab_signals:
         sm3.metric("🔴 Bearish", bearish_count)
         sm4.metric("🥇 Top Bull", top_bull, delta=f"Score {df_sig_display.iloc[0]['Score']}" if len(df_sig_display) > 0 else "")
         sm5.metric("🥀 Top Bear", top_bear, delta=f"Score {df_sig_display.iloc[-1]['Score']}" if len(df_sig_display) > 0 else "")
-        st.write("### Full Rankings Table")
+        st.write("### 📋 Full Rankings Table")
         st.dataframe(df_sig_display, use_container_width=True, hide_index=True, height=500)
-        st.write("### Signal Score Chart (1–100)")
+        st.write("### 📊 Signal Score Chart (1–100)")
         bar_syms = df_sig_display["Symbol"].tolist()
         bar_scores = df_sig_display["Score"].tolist()
         bar_cols = []
@@ -1207,7 +1228,7 @@ with tab_signals:
         fig_sig.add_hline(y=30, line_dash="dot", line_color="#e74c3c", annotation_text="Bearish threshold (30)")
         fig_sig.update_layout(height=400, template="plotly_dark", yaxis_title="Signal Score", yaxis_range=[0,110], margin=dict(l=0,r=0,t=30,b=0))
         st.plotly_chart(fig_sig, use_container_width=True)
-        st.write("### RSI vs Score Scatter")
+        st.write("### 🔵 RSI vs Score Scatter")
         df_rsi_plot = df_sig_display.dropna(subset=["RSI"])
         fig_rsi = go.Figure(go.Scatter(
             x=df_rsi_plot["RSI"], y=df_rsi_plot["Score"],
@@ -1219,15 +1240,15 @@ with tab_signals:
         fig_rsi.update_layout(height=400, template="plotly_dark", xaxis_title="RSI", yaxis_title="Signal Score", margin=dict(l=0,r=0,t=30,b=0))
         st.plotly_chart(fig_rsi, use_container_width=True)
     else:
-        st.info("Click **Run Signal Scan** to score all stocks.")
+        st.info("👆 Click **Run Signal Scan** to score all stocks.")
 
 # ════════════════════════════════════════════
-# TAB 3 — BACKTESTING (unchanged from original)
+# TAB 3 — BACKTESTING (preserved)
 # ════════════════════════════════════════════
 with tab_backtest:
-    st.write("## Backtest Strategy on Yahoo Finance Data")
+    st.write("## 🧪 Backtest Strategy on Yahoo Finance Data")
     st.write("Simulates the trailing stop + hard stop strategy on historical hourly data.")
-    bt_mode = st.radio("Mode", ["All Stocks (Leaderboard)", "Single Stock (Deep Dive)"], horizontal=True)
+    bt_mode = st.radio("Mode", ["📊 All Stocks (Leaderboard)", "🔍 Single Stock (Deep Dive)"], horizontal=True)
     st.divider()
     cfg1, cfg2, cfg3 = st.columns(3)
     with cfg1:
@@ -1241,15 +1262,15 @@ with tab_backtest:
         with ov1: ov_hard_sl = st.slider("Hard Stop Loss %", 0.005, 0.05, 0.013, 0.001, format="%.3f")
         with ov2: ov_trail = st.slider("Trailing Stop %", 0.005, 0.05, 0.008, 0.001, format="%.3f")
         with ov3: ov_trend = st.slider("Buy Trend Signal %", 0.001, 0.02, 0.006, 0.001, format="%.3f")
-    if bt_mode == "Single Stock (Deep Dive)":
+    if bt_mode == "🔍 Single Stock (Deep Dive)":
         ss1, ss2 = st.columns([1, 3])
         with ss1:
             bt_symbol = st.selectbox("Symbol", WATCHLIST, index=0)
             if use_profile:
                 hard_sl_d, trail_d, trend_d = profile(bt_symbol)
                 st.caption(f"Profile: SL -{hard_sl_d*100:.1f}% | Trail -{trail_d*100:.1f}% | Trend +{trend_d*100:.1f}%")
-    run_bt = st.button("Run Backtest", type="primary", use_container_width=True)
-    if run_bt and bt_mode == "All Stocks (Leaderboard)":
+    run_bt = st.button("▶️ Run Backtest", type="primary", use_container_width=True)
+    if run_bt and bt_mode == "📊 All Stocks (Leaderboard)":
         all_results = []
         all_trades = {}
         progress_bar = st.progress(0, text="Starting...")
@@ -1264,7 +1285,7 @@ with tab_backtest:
         if not all_results:
             st.error("No data returned for any symbol.")
         else:
-            st.write("### Portfolio Summary")
+            st.write("### 🏆 Portfolio Summary")
             total_combined_pl = sum(r["total_pl"] for r in all_results)
             all_wins = sum(r["wins"] for r in all_results)
             all_trades_count = sum(r["total_trades"] for r in all_results)
@@ -1277,7 +1298,7 @@ with tab_backtest:
             h3.metric("Overall Win Rate", f"{overall_wr}%")
             h4.metric("🥇 Best Stock", best["symbol"], delta=f"${best['total_pl']:+,.2f}")
             h5.metric("🥀 Worst Stock", worst["symbol"], delta=f"${worst['total_pl']:+,.2f}")
-            st.write("### Leaderboard (ranked by P&L)")
+            st.write("### 📋 Leaderboard (ranked by P&L)")
             lb_rows = sorted(all_results, key=lambda r: r["total_pl"], reverse=True)
             lb_df = pd.DataFrame([{
                 "Rank": i+1, "Symbol": r["symbol"], "Total P&L ($)": f"${r['total_pl']:+,.2f}",
@@ -1286,14 +1307,14 @@ with tab_backtest:
                 "Avg Win ($)": f"${r['avg_win']:+,.2f}", "Avg Loss ($)": f"${r['avg_loss']:,.2f}",
             } for i, r in enumerate(lb_rows)])
             st.dataframe(lb_df, use_container_width=True, hide_index=True)
-            st.write("### P&L Comparison Chart")
+            st.write("### 📊 P&L Comparison Chart")
             sorted_syms = [r["symbol"] for r in lb_rows]
             sorted_pls = [r["total_pl"] for r in lb_rows]
             bar_colors = ["#26a65b" if v >= 0 else "#e74c3c" for v in sorted_pls]
             fig_bar = go.Figure(go.Bar(x=sorted_syms, y=sorted_pls, marker_color=bar_colors, text=[f"${v:+,.0f}" for v in sorted_pls], textposition="outside"))
             fig_bar.update_layout(height=350, template="plotly_dark", yaxis_title="Total P&L (USD)", margin=dict(l=0,r=0,t=30,b=0))
             st.plotly_chart(fig_bar, use_container_width=True)
-            st.write("### Win Rate by Stock")
+            st.write("### 🎯 Win Rate by Stock")
             wr_syms = [r["symbol"] for r in lb_rows]
             wr_vals = [r["win_rate"] for r in lb_rows]
             wr_colors = ["#26a65b" if v >= 50 else "#e74c3c" for v in wr_vals]
@@ -1301,7 +1322,7 @@ with tab_backtest:
             fig_wr.add_hline(y=50, line_dash="dot", line_color="white", annotation_text="50% break-even line")
             fig_wr.update_layout(height=320, template="plotly_dark", yaxis_title="Win Rate (%)", yaxis_range=[0,105], margin=dict(l=0,r=0,t=30,b=0))
             st.plotly_chart(fig_wr, use_container_width=True)
-            st.write("### Per-Stock Trade Logs")
+            st.write("### 🔎 Per-Stock Trade Logs")
             for r in lb_rows:
                 sym = r["symbol"]
                 tlog = all_trades.get(sym)
@@ -1311,14 +1332,14 @@ with tab_backtest:
                         st.dataframe(tlog, use_container_width=True)
                     else:
                         st.info("No trades triggered.")
-    elif run_bt and bt_mode == "Single Stock (Deep Dive)":
+    elif run_bt and bt_mode == "🔍 Single Stock (Deep Dive)":
         hard_sl, trail, trend = profile(bt_symbol) if use_profile else (ov_hard_sl, ov_trail, ov_trend)
         with st.spinner(f"Downloading {bt_symbol} data and simulating..."):
             results, trade_log = run_backtest(bt_symbol, bt_period, hard_sl, trail, trend, bt_max_usd)
         if results is None:
             st.error("No data returned. Try a different symbol or period.")
         else:
-            st.write(f"### Results — {bt_symbol}")
+            st.write(f"### 📊 Results — {bt_symbol}")
             m1, m2, m3, m4, m5, m6 = st.columns(6)
             m1.metric("Final Equity", f"${results['final_equity']:,.2f}", delta=f"${results['total_pl']:+,.2f}")
             m2.metric("Total Trades", results["total_trades"])
@@ -1326,7 +1347,7 @@ with tab_backtest:
             m4.metric("Avg Win", f"${results['avg_win']:+,.2f}")
             m5.metric("Avg Loss", f"${results['avg_loss']:,.2f}")
             m6.metric("Wins / Losses", f"{results['wins']} / {results['losses']}")
-            st.write("### Price Chart with Trades")
+            st.write("### 📈 Price Chart with Trades")
             df_chart = results["df"].copy()
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart["close"], mode="lines", name="Price", line=dict(color="#4f8ef7", width=1.5)))
@@ -1338,20 +1359,20 @@ with tab_backtest:
                 fig.add_trace(go.Scatter(x=pd.to_datetime(sells["Date"]), y=sells["Price"], mode="markers", name="Sell", marker=dict(color="red", size=9, symbol="triangle-down")))
             fig.update_layout(height=400, template="plotly_dark", margin=dict(l=0,r=0,t=30,b=0), legend=dict(orientation="h", yanchor="bottom", y=1.02))
             st.plotly_chart(fig, use_container_width=True)
-            with st.expander("Full Trade Log", expanded=False):
+            with st.expander("📋 Full Trade Log", expanded=False):
                 if trade_log is not None and not trade_log.empty:
                     st.dataframe(trade_log, use_container_width=True)
                 else:
                     st.info("No trades triggered.")
     elif not run_bt:
-        st.info("Choose a mode, configure settings, then click **Run Backtest**.")
+        st.info("👆 Choose a mode, configure settings, then click **Run Backtest**.")
 
 # ════════════════════════════════════════════
-# TAB 4 — PORTFOLIO BACKTEST (unchanged from original)
+# TAB 4 — PORTFOLIO BACKTEST (preserved)
 # ════════════════════════════════════════════
 with tab_portfolio:
-    st.write("## Portfolio Backtest — Shared Capital Simulation")
-    st.write("Simulates **all stocks trading simultaneously** from a single shared capital pool.")
+    st.write("## 📂 Portfolio Backtest — Shared Capital Simulation")
+    st.write("Simulates all stocks trading simultaneously from a single shared capital pool.")
     st.info("How it works: At each hourly bar, the engine checks every stock in the watchlist. It sells positions that hit their trailing/hard stop, then uses freed cash to buy new signals — all from the same shared $10,000 pool.")
     pcfg1, pcfg2, pcfg3, pcfg4 = st.columns(4)
     with pcfg1: p_period = st.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y"], index=1, key="p_period")
@@ -1363,9 +1384,9 @@ with tab_portfolio:
         with pov1: p_hard_sl = st.slider("Hard Stop Loss %", 0.005, 0.05, 0.013, 0.001, format="%.3f", key="p_hard_sl")
         with pov2: p_trail = st.slider("Trailing Stop %", 0.005, 0.05, 0.008, 0.001, format="%.3f", key="p_trail")
         with pov3: p_trend = st.slider("Buy Trend %", 0.001, 0.02, 0.006, 0.001, format="%.3f", key="p_trend")
-    run_portfolio = st.button("Run Portfolio Backtest", type="primary", use_container_width=True, key="run_portfolio")
+    run_portfolio = st.button("▶️ Run Portfolio Backtest", type="primary", use_container_width=True, key="run_portfolio")
     if run_portfolio:
-        with st.spinner("Downloading data for all stocks..."):
+        with st.spinner("📥 Downloading data for all stocks..."):
             all_data = {}
             dl_bar = st.progress(0, text="Downloading...")
             for idx, sym in enumerate(WATCHLIST):
@@ -1379,12 +1400,12 @@ with tab_portfolio:
                     df_raw.dropna(inplace=True)
                     all_data[sym] = df_raw
                 except: continue
-            dl_bar.progress(1.0, text=f"Downloaded {len(all_data)}/{len(WATCHLIST)} stocks")
+            dl_bar.progress(1.0, text=f"✅ Downloaded {len(all_data)}/{len(WATCHLIST)} stocks")
         if not all_data:
             st.error("No data downloaded.")
         else:
             all_timestamps = sorted(set(ts for df in all_data.values() for ts in df.index))
-            with st.spinner("Simulating portfolio..."):
+            with st.spinner("⚙️ Simulating portfolio..."):
                 cash = float(p_capital)
                 positions = {}
                 trade_log = []
@@ -1465,7 +1486,7 @@ with tab_portfolio:
                     peak_eq = max(peak_eq, eq)
                     dd = (peak_eq - eq) / peak_eq * 100
                     max_dd = max(max_dd, dd)
-            st.write("### Portfolio Results")
+            st.write("### 🏆 Portfolio Results")
             r1, r2, r3, r4, r5, r6 = st.columns(6)
             r1.metric("Final Equity", f"${final_equity:,.2f}", delta=f"${total_pl:+,.2f}")
             r2.metric("Total Return", f"{total_return:+.2f}%")
@@ -1477,29 +1498,29 @@ with tab_portfolio:
             r7.metric("Total Trades", len(sells_all))
             r8.metric("Wins", len(wins_all))
             r9.metric("Losses", len(losses_all))
-            st.write("### Portfolio Equity Curve")
+            st.write("### 📈 Portfolio Equity Curve")
             fig_eq = go.Figure()
             fig_eq.add_trace(go.Scatter(x=df_equity["timestamp"], y=df_equity["equity"], mode="lines", name="Portfolio Equity", line=dict(color="#4f8ef7", width=2), fill="tozeroy", fillcolor="rgba(79,142,247,0.08)"))
             fig_eq.add_hline(y=p_capital, line_dash="dot", line_color="gray", annotation_text=f"Start: ${p_capital:,}")
             fig_eq.update_layout(height=380, template="plotly_dark", yaxis_title="Portfolio Value ($)", margin=dict(l=0,r=0,t=30,b=0))
             st.plotly_chart(fig_eq, use_container_width=True)
-            st.write("### Cash & Open Positions Over Time")
+            st.write("### 💵 Cash & Open Positions Over Time")
             fig_cash = go.Figure()
             fig_cash.add_trace(go.Scatter(x=df_equity["timestamp"], y=df_equity["cash"], mode="lines", name="Cash", line=dict(color="#f0a500", width=1.5)))
             fig_cash.add_trace(go.Bar(x=df_equity["timestamp"], y=df_equity["positions"], name="Open Positions", yaxis="y2", marker_color="rgba(100,200,100,0.3)"))
             fig_cash.update_layout(height=280, template="plotly_dark", margin=dict(l=0,r=0,t=30,b=0), yaxis=dict(title="Cash ($)"), yaxis2=dict(title="# Positions", overlaying="y", side="right", showgrid=False), legend=dict(orientation="h", yanchor="bottom", y=1.02))
             st.plotly_chart(fig_cash, use_container_width=True)
-            st.write("### Per-Symbol P&L (Shared Capital)")
+            st.write("### 📋 Per-Symbol P&L (Shared Capital)")
             sym_rows = sorted([{"Symbol": s, "Realized P&L ($)": round(v, 2), "Result": "🟢 Profit" if v > 0 else ("🔴 Loss" if v < 0 else "⚪ Flat")} for s, v in sym_pl.items() if v != 0.0], key=lambda x: x["Realized P&L ($)"], reverse=True)
             if sym_rows:
                 st.dataframe(pd.DataFrame(sym_rows), use_container_width=True, hide_index=True)
-            with st.expander("Full Portfolio Trade Log", expanded=False):
+            with st.expander("📋 Full Portfolio Trade Log", expanded=False):
                 if not df_trades.empty:
                     st.dataframe(df_trades, use_container_width=True)
                 else:
                     st.info("No trades executed.")
     elif not run_portfolio:
-        st.info("Configure settings above and click **Run Portfolio Backtest**.")
+        st.info("👆 Configure settings above and click **Run Portfolio Backtest**.")
 
 # ─────────────────────────────────────────────
 # AUTO-REFRESH (dashboard only)
