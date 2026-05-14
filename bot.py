@@ -1,24 +1,9 @@
 """
-trading_bot.py — Combined ORB-R (morning) + VWAP Retest (afternoon)
-─────────────────────────────────────────────────────────────────────
-Strategy 1 (9:30–12:00 ET): Opening Range Breakout with Retest
-    - Box yesterday's high/low
-    - Wait for 15-min close above box high
-    - Wait for retest + 5-min reversal candle
-    - Entry at reversal candle close, stop below candle low with minimum 0.5% (1% for volatile)
-    - Target 3x risk
-
-Strategy 2 (12:00–15:30 ET): VWAP Retest & Continuation
-    - Calculate intraday VWAP from 5-min bars
-    - Price must be above VWAP then pull back to touch VWAP
-    - Wait for bullish reversal candle at VWAP
-    - Entry at candle close, stop with minimum 0.3% (0.6% for volatile) below VWAP or candle low
-    - Target 1.5x risk
-
+Tradingbot_manualoverride.py — Combined ORB-R + VWAP with manual override
+─────────────────────────────────────────────────────────────────────────
 Run on Railway:
-    Start command: python trading_bot.py
-    Environment variables: ALPACA_API_KEY, ALPACA_SECRET_KEY,
-                           SUPABASE_URL, SUPABASE_KEY
+    Start command: python Tradingbot_manualoverride.py
+    Environment: ALPACA_API_KEY, ALPACA_SECRET_KEY, SUPABASE_URL, SUPABASE_KEY
 """
 
 import os
@@ -51,23 +36,20 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 ET            = pytz.timezone("US/Eastern")
 SGT           = pytz.timezone("Asia/Singapore")
-SCAN_INTERVAL = 45           # seconds
-MAX_TRADE_USD = 750.0        # max dollars per trade (fractional)
-CASH_BUFFER   = 95000.0      # min buying power before buying
+SCAN_INTERVAL = 45
+MAX_TRADE_USD = 750.0
+CASH_BUFFER   = 95000.0
 
 # ORB-R config
-ORB_REWARD_RISK = 3.0        # 3:1 R:R
-ORB_BREAKOUT_TF = 15         # minutes
-ORB_RETEST_TOLERANCE_PCT = 0.002   # 0.2%
+ORB_REWARD_RISK = 3.0
+ORB_RETEST_TOLERANCE_PCT = 0.002
 MIN_BOX_PCT = 0.003
 
 # VWAP config
 VWAP_TF_MINUTES = 5
 VWAP_LOOKBACK_DAYS = 2
-VWAP_STOP_PCT = 0.002        # 0.2% below VWAP (baseline, will be adjusted)
-VWAP_REWARD_RISK = 1.5       # 1.5:1 R:R
-VWAP_END_HOUR = 15
-VWAP_END_MINUTE = 30
+VWAP_STOP_PCT = 0.002
+VWAP_REWARD_RISK = 1.5
 
 # Trade windows (ET)
 ORB_WINDOW_START = (9, 30)
@@ -75,28 +57,22 @@ ORB_WINDOW_END   = (12, 0)
 VWAP_WINDOW_START = (12, 0)
 VWAP_WINDOW_END   = (15, 30)
 
-# High-volatility stocks that need wider stops
+# High‑volatility stocks (wider stops)
 HIGH_VOL_STOCKS = [
     "NVDA", "AMD", "SMCI", "MSTR", "TSLA", "ARM", "SHOP", "DASH", "CRWD", "ZS", "TEAM",
-    "MU", "AVGO", "QCOM"  # also moderately volatile
+    "MU", "AVGO", "QCOM"
 ]
 
-# ── FINAL WATCHLIST (50 Shariah-compliant stocks) ──────────────────────────
+# ── FINAL WATCHLIST (50 stocks) ──────────────────────────────────────────
 WATCHLIST = [
-    # Original 22
     "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM", "MSTR", "PANW",
     "TSM", "LRCX", "ON", "MPWR", "MRVL", "NXPI", "TEAM", "INTA", "CRWD", "ZS",
-    # Priority picks (11)
     "ADBE", "WDAY", "SNPS", "NOW", "SHOP", "TXN", "CDNS", "MCHP", "SWKS", "FTNT", "ANET",
-    # Secondary expansion (7)
     "UBER", "DASH", "TSLA", "ISRG", "VRTX", "LLY", "MRK",
-    # New additions (9)
-    "AAPL", "JNJ", "PEP", "LIN", "REGN", "INTC", "PG", "NKE", "ADSK",
-    # Final stock (1)
-    "MDT"
+    "AAPL", "JNJ", "PEP", "LIN", "REGN", "INTC", "PG", "NKE", "ADSK", "MDT"
 ]
 
-# ── Per-stock volatility profiles (kept for reference, but stops are now dynamic) ──
+# ── Per-stock volatility profiles (used for display only) ────────────────
 STOCK_PROFILES = {
     "NVDA": (0.018, 0.010, 0.008), "AMD": (0.015, 0.009, 0.007),
     "AVGO": (0.013, 0.008, 0.006), "QCOM": (0.013, 0.008, 0.006),
@@ -138,86 +114,29 @@ data_client    = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 supabase: Client = create_client(SB_URL, SB_KEY)
 
 # ─────────────────────────────────────────────
-# BOT STATE
+# BOT STATE & OVERRIDE CACHE
 # ─────────────────────────────────────────────
 symbol_state: dict = {}
 baseline: float = None
+_forced_strategy_cache = "AUTO"
+_last_forced_check = None
 
-# ─────────────────────────────────────────────
-# SUPABASE HELPERS
-# ─────────────────────────────────────────────
-def sb_log(msg: str):
-    try:
-        supabase.table("bot_logs").insert({
-            "message":    msg,
-            "created_at": datetime.now(SGT).isoformat(),
-        }).execute()
-    except Exception:
-        pass
-    log.info(msg)
+def get_forced_strategy() -> str:
+    """Read manual override from Supabase bot_config table. Returns 'AUTO', 'ORB-R', or 'VWAP'."""
+    global _forced_strategy_cache, _last_forced_check
+    now = time.time()
+    if _last_forced_check is None or (now - _last_forced_check) > 10:
+        try:
+            row = supabase.table("bot_config").select("forced_strategy").eq("id", 1).execute()
+            if row.data:
+                _forced_strategy_cache = row.data[0]["forced_strategy"]
+            else:
+                _forced_strategy_cache = "AUTO"
+        except Exception as e:
+            log.warning(f"Failed to fetch forced_strategy: {e}")
+        _last_forced_check = now
+    return _forced_strategy_cache
 
-def save_trade(symbol, entry_price, exit_price, qty, reason, strategy):
-    try:
-        pl_usd = round((exit_price - entry_price) * float(qty), 2)
-        pl_pct = round((exit_price - entry_price) / entry_price * 100, 2)
-        today  = datetime.now(SGT).date().isoformat()
-        supabase.table("realized_trades").insert({
-            "date":       today,
-            "symbol":     symbol,
-            "strategy":   strategy,
-            "buy_price":  f"${entry_price:.2f}",
-            "sell_price": f"${exit_price:.2f}",
-            "qty":        round(float(qty), 4),
-            "pl_usd":     pl_usd,
-            "pl_display": f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}",
-            "pl_pct":     f"{pl_pct:+.2f}%",
-            "time_sgt":   datetime.now(SGT).strftime("%H:%M:%S"),
-            "reason":     reason,
-        }).execute()
-        sb_log(f"💾 Trade saved: {symbol} {reason}")
-    except Exception as e:
-        sb_log(f"❌ save_trade error: {e}")
-
-def load_baseline() -> float:
-    try:
-        row = supabase.table("weekly_baseline").select("*").eq("id", 1).execute()
-        if row.data:
-            bl = row.data[0]
-            saved_date = datetime.fromisoformat(bl["date"]).date()
-            today = datetime.now(SGT).date()
-            last_monday = today - timedelta(days=today.weekday())
-            if saved_date >= last_monday:
-                return float(bl["baseline"])
-    except Exception:
-        pass
-    try:
-        return float(trading_client.get_account().last_equity)
-    except Exception:
-        return 10_000.0
-
-def save_baseline(value: float):
-    try:
-        supabase.table("weekly_baseline").upsert({
-            "id": 1,
-            "baseline": value,
-            "date": datetime.now(SGT).date().isoformat(),
-        }).execute()
-    except Exception as e:
-        log.error(f"save_baseline error: {e}")
-
-def send_heartbeat():
-    try:
-        supabase.table("bot_state").upsert({
-            "id": 1,
-            "last_heartbeat": datetime.now(SGT).isoformat(),
-            "updated_at": datetime.now(SGT).isoformat(),
-        }).execute()
-    except Exception:
-        pass
-
-# ─────────────────────────────────────────────
-# MARKET HOURS & SESSION DETECTION
-# ─────────────────────────────────────────────
 def is_market_open() -> bool:
     try:
         clock = trading_client.get_clock()
@@ -235,12 +154,22 @@ def is_market_open() -> bool:
         return weekday < 5 and after_open and before_close
 
 def get_current_session() -> str:
+    """Returns 'ORB', 'VWAP', or 'CLOSED', respecting manual override if market open."""
+    forced = get_forced_strategy()
     now_et = datetime.now(ET)
+    market_open = is_market_open()
+
+    if market_open and forced == "ORB-R":
+        return "ORB"
+    if market_open and forced == "VWAP":
+        return "VWAP"
+
+    # Fallback to time-based
     orb_start = now_et.replace(hour=ORB_WINDOW_START[0], minute=ORB_WINDOW_START[1], second=0, microsecond=0)
     orb_end   = now_et.replace(hour=ORB_WINDOW_END[0], minute=ORB_WINDOW_END[1], second=0, microsecond=0)
     vwap_start = now_et.replace(hour=VWAP_WINDOW_START[0], minute=VWAP_WINDOW_START[1], second=0, microsecond=0)
     vwap_end   = now_et.replace(hour=VWAP_WINDOW_END[0], minute=VWAP_WINDOW_END[1], second=0, microsecond=0)
-    
+
     if orb_start <= now_et <= orb_end:
         return "ORB"
     elif vwap_start <= now_et <= vwap_end:
@@ -411,12 +340,11 @@ def check_vwap_retest(symbol: str, current_vwap: float) -> tuple:
     min_stop_distance = entry_price * min_stop_pct
     if entry_price - stop_price < min_stop_distance:
         stop_price = entry_price - min_stop_distance
-        # Recalculate risk and target if stop changed
         risk = entry_price - stop_price
         if risk <= 0:
             return False, 0, 0, 0, 0
         target_price = round(entry_price + (VWAP_REWARD_RISK * risk), 4)
-        sb_log(f"⚠️ Adjusted VWAP {symbol} stop to {stop_price:.2f} (min {min_stop_pct*100:.1f}%)")
+        log.info(f"Adjusted VWAP {symbol} stop to {stop_price:.2f} (min {min_stop_pct*100:.1f}%)")
         return True, entry_price, stop_price, target_price, float(latest["low"])
     
     risk = entry_price - stop_price
@@ -427,17 +355,49 @@ def check_vwap_retest(symbol: str, current_vwap: float) -> tuple:
     return True, entry_price, stop_price, target_price, float(latest["low"])
 
 # ─────────────────────────────────────────────
-# TRADE EXECUTION (shared)
+# TRADE EXECUTION
 # ─────────────────────────────────────────────
+def sb_log(msg: str):
+    try:
+        supabase.table("bot_logs").insert({
+            "message": msg,
+            "created_at": datetime.now(SGT).isoformat(),
+        }).execute()
+    except Exception:
+        pass
+    log.info(msg)
+
+def save_trade(symbol, entry_price, exit_price, qty, reason, strategy):
+    try:
+        pl_usd = round((exit_price - entry_price) * float(qty), 2)
+        pl_pct = round((exit_price - entry_price) / entry_price * 100, 2)
+        today = datetime.now(SGT).date().isoformat()
+        supabase.table("realized_trades").insert({
+            "date": today,
+            "symbol": symbol,
+            "strategy": strategy,
+            "buy_price": f"${entry_price:.2f}",
+            "sell_price": f"${exit_price:.2f}",
+            "qty": round(float(qty), 4),
+            "pl_usd": pl_usd,
+            "pl_display": f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}",
+            "pl_pct": f"{pl_pct:+.2f}%",
+            "time_sgt": datetime.now(SGT).strftime("%H:%M:%S"),
+            "reason": reason,
+        }).execute()
+        sb_log(f"Trade saved: {symbol} {reason}")
+    except Exception as e:
+        sb_log(f"Save trade error: {e}")
+
 def enter_trade(symbol: str, entry_price: float, stop_price: float,
                 target_price: float, cash: float, strategy: str) -> float:
     qty = MAX_TRADE_USD / entry_price
     if qty <= 0:
-        sb_log(f"⚠️ SKIP {symbol} — qty too small")
+        sb_log(f"SKIP {symbol} — qty too small")
         return 0.0
     actual_cost = round(qty * entry_price, 2)
     if cash - actual_cost < CASH_BUFFER:
-        sb_log(f"💤 SKIP {symbol} — would breach cash buffer (cash ${cash:.2f} - ${actual_cost:.2f} < ${CASH_BUFFER})")
+        sb_log(f"SKIP {symbol} — would breach cash buffer (cash ${cash:.2f} - ${actual_cost:.2f} < ${CASH_BUFFER})")
         return 0.0
     try:
         trading_client.submit_order(MarketOrderRequest(
@@ -446,15 +406,10 @@ def enter_trade(symbol: str, entry_price: float, stop_price: float,
             side=OrderSide.BUY,
             time_in_force=TimeInForce.DAY,
         ))
-        sb_log(
-            f"🟢 {strategy} BUY {qty:.4f} {symbol} | "
-            f"Entry:${entry_price:.2f} | "
-            f"Stop:${stop_price:.2f} | "
-            f"Target:${target_price:.2f}"
-        )
+        sb_log(f"🟢 {strategy} BUY {qty:.4f} {symbol} | Entry:${entry_price:.2f} | Stop:${stop_price:.2f} | Target:${target_price:.2f}")
         return actual_cost
     except Exception as e:
-        sb_log(f"⚠️ Order error {symbol}: {e}")
+        sb_log(f"Order error {symbol}: {e}")
         return 0.0
 
 def exit_trade(symbol: str, qty: float, current_price: float, entry_price: float, reason: str, strategy: str):
@@ -468,11 +423,8 @@ def exit_trade(symbol: str, qty: float, current_price: float, entry_price: float
         sb_log(f"🔴 EXIT {symbol} @ ${current_price:.2f} — {reason}")
         save_trade(symbol, entry_price, current_price, qty, reason, strategy)
     except Exception as e:
-        sb_log(f"⚠️ Exit error {symbol}: {e}")
+        sb_log(f"Exit error {symbol}: {e}")
 
-# ─────────────────────────────────────────────
-# MONITOR OPEN POSITIONS (shared)
-# ─────────────────────────────────────────────
 def monitor_positions(held: dict):
     for sym, p in held.items():
         s = symbol_state.get(sym, {})
@@ -489,17 +441,17 @@ def monitor_positions(held: dict):
             continue
         
         if curr_p <= stop:
-            exit_trade(sym, qty, curr_p, entry, f"🛑 STOP LOSS (hit ${stop:.2f})", strategy)
+            exit_trade(sym, qty, curr_p, entry, f"STOP LOSS (hit ${stop:.2f})", strategy)
             symbol_state[sym]["in_trade"] = False
         elif curr_p >= target:
-            exit_trade(sym, qty, curr_p, entry, f"🎯 TAKE PROFIT (hit ${target:.2f})", strategy)
+            exit_trade(sym, qty, curr_p, entry, f"TAKE PROFIT (hit ${target:.2f})", strategy)
             symbol_state[sym]["in_trade"] = False
         elif get_current_session() == "CLOSED":
-            exit_trade(sym, qty, curr_p, entry, "⏰ Market closed — forced exit", strategy)
+            exit_trade(sym, qty, curr_p, entry, "Market closed — forced exit", strategy)
             symbol_state[sym]["in_trade"] = False
 
 # ─────────────────────────────────────────────
-# STRATEGY: ORB-R (morning)
+# STRATEGIES
 # ─────────────────────────────────────────────
 def run_orb_strategy(cash: float, held: dict) -> float:
     total_cost = 0.0
@@ -525,7 +477,6 @@ def run_orb_strategy(cash: float, held: dict) -> float:
         if s["traded_today"] or s.get("in_trade"):
             continue
         
-        # Get box
         if s["box_high"] is None:
             box_high, box_low = get_yesterday_box(symbol)
             if box_high is None:
@@ -533,7 +484,7 @@ def run_orb_strategy(cash: float, held: dict) -> float:
             box_range = box_high - box_low
             mid_price = (box_high + box_low) / 2
             if box_range / mid_price < MIN_BOX_PCT:
-                sb_log(f"⏭️ SKIP {symbol} — box too small")
+                sb_log(f"SKIP {symbol} — box too small")
                 s["traded_today"] = True
                 continue
             s["box_high"] = box_high
@@ -541,7 +492,6 @@ def run_orb_strategy(cash: float, held: dict) -> float:
         
         box_high = s["box_high"]
         
-        # Check breakout
         if not s["breakout_confirmed"]:
             if check_orb_breakout(symbol, box_high):
                 s["breakout_confirmed"] = True
@@ -549,11 +499,9 @@ def run_orb_strategy(cash: float, held: dict) -> float:
             else:
                 continue
         
-        # Check retest
         if not check_orb_retest(symbol, box_high):
             continue
         
-        # Check reversal candle
         df_5m = get_bars(symbol, timeframe_minutes=5, days_back=2)
         if df_5m.empty:
             continue
@@ -563,35 +511,30 @@ def run_orb_strategy(cash: float, held: dict) -> float:
         if not check_orb_reversal_candle(df_5m_today, box_high):
             continue
         
-        # Calculate entry, stop, target
         confirm_candle = df_5m_today.iloc[-1]
         entry_price = round(float(confirm_candle["close"]), 4)
-        # Base stop: 0.1% below candle low
         stop_price = round(float(confirm_candle["low"]) * 0.999, 4)
         if entry_price - stop_price < 0.01:
             stop_price = entry_price - 0.01
         
-        # Enforce minimum stop percentage
-        min_stop_pct = 0.005  # 0.5% for normal stocks
+        # Enforce min stop %
+        min_stop_pct = 0.005
         if symbol in HIGH_VOL_STOCKS:
-            min_stop_pct = 0.01  # 1% for volatile stocks
-        
+            min_stop_pct = 0.01
         min_stop_distance = entry_price * min_stop_pct
         if entry_price - stop_price < min_stop_distance:
             stop_price = entry_price - min_stop_distance
-            # Recalculate risk and target
             risk = entry_price - stop_price
             if risk <= 0:
                 continue
             target_price = round(entry_price + (ORB_REWARD_RISK * risk), 4)
-            sb_log(f"⚠️ Adjusted {symbol} stop to {stop_price:.2f} (min {min_stop_pct*100:.1f}%)")
+            sb_log(f"Adjusted {symbol} stop to {stop_price:.2f} (min {min_stop_pct*100:.1f}%)")
         else:
             risk = entry_price - stop_price
             if risk <= 0 or risk / entry_price > 0.05:
                 continue
             target_price = round(entry_price + (ORB_REWARD_RISK * risk), 4)
         
-        # Enter trade
         cost = enter_trade(symbol, entry_price, stop_price, target_price, cash - total_cost, "ORB-R")
         if cost > 0:
             total_cost += cost
@@ -604,9 +547,6 @@ def run_orb_strategy(cash: float, held: dict) -> float:
             s["traded_today"] = True
     return total_cost
 
-# ─────────────────────────────────────────────
-# STRATEGY: VWAP Retest (afternoon)
-# ─────────────────────────────────────────────
 def run_vwap_strategy(cash: float, held: dict) -> float:
     total_cost = 0.0
     for symbol in WATCHLIST:
@@ -645,7 +585,6 @@ def run_vwap_strategy(cash: float, held: dict) -> float:
             continue
         
         sb_log(f"📊 {symbol} VWAP retest detected at ${vwap:.2f}")
-        
         cost = enter_trade(symbol, entry_price, stop_price, target_price, cash - total_cost, "VWAP")
         if cost > 0:
             total_cost += cost
@@ -658,9 +597,6 @@ def run_vwap_strategy(cash: float, held: dict) -> float:
             s["vwap_traded_today"] = True
     return total_cost
 
-# ─────────────────────────────────────────────
-# RESET DAILY STATE
-# ─────────────────────────────────────────────
 def reset_daily_state():
     global symbol_state
     to_delete = []
@@ -672,7 +608,44 @@ def reset_daily_state():
             state["vwap_traded_today"] = False
     for sym in to_delete:
         del symbol_state[sym]
-    sb_log("🔄 Daily state reset")
+    sb_log("Daily state reset")
+
+def load_baseline() -> float:
+    try:
+        row = supabase.table("weekly_baseline").select("*").eq("id", 1).execute()
+        if row.data:
+            bl = row.data[0]
+            saved_date = datetime.fromisoformat(bl["date"]).date()
+            today = datetime.now(SGT).date()
+            last_monday = today - timedelta(days=today.weekday())
+            if saved_date >= last_monday:
+                return float(bl["baseline"])
+    except Exception:
+        pass
+    try:
+        return float(trading_client.get_account().last_equity)
+    except Exception:
+        return 10000.0
+
+def save_baseline(value: float):
+    try:
+        supabase.table("weekly_baseline").upsert({
+            "id": 1,
+            "baseline": value,
+            "date": datetime.now(SGT).date().isoformat(),
+        }).execute()
+    except Exception as e:
+        log.error(f"save_baseline error: {e}")
+
+def send_heartbeat():
+    try:
+        supabase.table("bot_state").upsert({
+            "id": 1,
+            "last_heartbeat": datetime.now(SGT).isoformat(),
+            "updated_at": datetime.now(SGT).isoformat(),
+        }).execute()
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────
 # MAIN LOOP
@@ -687,7 +660,7 @@ def run_strategy():
         new_bl = float(trading_client.get_account().equity)
         baseline = new_bl
         save_baseline(new_bl)
-        sb_log("🔄 Weekly baseline reset")
+        sb_log("Weekly baseline reset")
     
     today = datetime.now(ET).date()
     if _last_reset_date != today:
@@ -695,7 +668,7 @@ def run_strategy():
         _last_reset_date = today
     
     if not is_market_open():
-        log.info("💤 Market closed")
+        log.info("Market closed")
         return
     
     try:
@@ -704,7 +677,7 @@ def run_strategy():
         positions = trading_client.get_all_positions()
         held = {p.symbol: p for p in positions}
     except Exception as e:
-        sb_log(f"⚠️ Account error: {e}")
+        sb_log(f"Account error: {e}")
         return
     
     if is_eod_window():
@@ -715,13 +688,13 @@ def run_strategy():
                 if p.symbol in symbol_state:
                     symbol_state[p.symbol]["in_trade"] = False
             except Exception as e:
-                sb_log(f"⚠️ EOW error {p.symbol}: {e}")
+                sb_log(f"EOW error {p.symbol}: {e}")
         return
     
     monitor_positions(held)
     
     if cash <= CASH_BUFFER:
-        log.info(f"💤 Cash ${cash:.2f} below buffer")
+        log.info(f"Cash ${cash:.2f} below buffer")
         return
     
     session = get_current_session()
@@ -729,31 +702,30 @@ def run_strategy():
     if session == "ORB":
         total_cost = run_orb_strategy(cash, held)
         if total_cost:
-            sb_log(f"💰 ORB-R trades placed, total cost: ${total_cost:.2f}")
+            sb_log(f"ORB-R trades placed, total cost: ${total_cost:.2f}")
     elif session == "VWAP":
         total_cost = run_vwap_strategy(cash, held)
         if total_cost:
-            sb_log(f"💰 VWAP trades placed, total cost: ${total_cost:.2f}")
+            sb_log(f"VWAP trades placed, total cost: ${total_cost:.2f}")
     else:
-        log.info("⏰ Outside trading hours")
+        log.info("Outside trading hours")
 
 # ─────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    sb_log("🤖 Combined Trading Bot started (ORB-R + VWAP Retest)")
-    sb_log(f"   Watchlist: {len(WATCHLIST)} stocks | Max trade: ${MAX_TRADE_USD}")
-    sb_log(f"   ORB-R window: {ORB_WINDOW_START[0]}:{ORB_WINDOW_START[1]:02d}–{ORB_WINDOW_END[0]}:{ORB_WINDOW_END[1]:02d} ET")
-    sb_log(f"   VWAP window: {VWAP_WINDOW_START[0]}:{VWAP_WINDOW_START[1]:02d}–{VWAP_WINDOW_END[0]}:{VWAP_WINDOW_END[1]:02d} ET")
-    sb_log(f"   Stop loss: minimum 0.5% for normal, 1.0% for volatile stocks")
+    sb_log("🤖 Trading Bot started (ORB-R + VWAP) with manual override support")
+    sb_log(f"Watchlist: {len(WATCHLIST)} stocks | Max trade: ${MAX_TRADE_USD}")
+    sb_log(f"ORB-R window: 9:30–12:00 ET | VWAP window: 12:00–15:30 ET")
+    sb_log(f"Stop loss: min 0.5% normal, 1.0% volatile")
     
     baseline = load_baseline()
-    sb_log(f"📊 Weekly baseline: ${baseline:,.2f}")
+    sb_log(f"Weekly baseline: ${baseline:,.2f}")
     
     while True:
         try:
             run_strategy()
             send_heartbeat()
         except Exception as e:
-            sb_log(f"🔥 Unhandled error: {e}")
+            sb_log(f"Unhandled error: {e}")
         time.sleep(SCAN_INTERVAL)
