@@ -111,18 +111,6 @@ supabase = get_supabase()
 SGT = pytz.timezone('Asia/Singapore')
 ET = pytz.timezone('US/Eastern')
 
-# ─────────────────────────────────────────────
-# AUTO-REFRESH FOR TRADES (every 60 seconds)
-# ─────────────────────────────────────────────
-if "last_trade_refresh" not in st.session_state:
-    st.session_state.last_trade_refresh = datetime.now(SGT)
-
-# Force load trades immediately on every script run
-st.session_state.realized_trades = load_realized_trades()
-
-if (datetime.now(SGT) - st.session_state.last_trade_refresh).seconds >= 60:
-    st.session_state.last_trade_refresh = datetime.now(SGT)
-    st.rerun()
 
 # ─────────────────────────────────────────────
 # CONSTANTS & CONFIG (Updated to match 50 stocks)
@@ -228,6 +216,8 @@ def load_realized_trades() -> list:
         return result
     except Exception:
         return []
+
+
 
 def get_active_strategy_display():
     forced = st.session_state.forced_strategy
@@ -604,6 +594,20 @@ def run_backtest(symbol: str, period: str, hard_sl: float, trail_pct: float, buy
         "df": df,
     }
     return results, pd.DataFrame(trades)
+
+# ─────────────────────────────────────────────
+# AUTO-REFRESH FOR TRADES (every 60 seconds)
+# ─────────────────────────────────────────────
+if "last_trade_refresh" not in st.session_state:
+    st.session_state.last_trade_refresh = datetime.now(SGT)
+
+# Force load trades immediately on every script run
+st.session_state.realized_trades = load_realized_trades()
+
+if (datetime.now(SGT) - st.session_state.last_trade_refresh).seconds >= 60:
+    st.session_state.last_trade_refresh = datetime.now(SGT)
+    st.rerun()
+
 
 # ─────────────────────────────────────────────
 # FETCH LIVE ACCOUNT DATA
