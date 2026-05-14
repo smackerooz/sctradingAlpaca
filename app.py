@@ -684,18 +684,60 @@ except Exception:
 active_strategy, display_text = get_active_strategy_display()
 st.info(f"🎯 **Active Strategy:** {display_text}")
 with st.expander("🔧 Manual Strategy Override", expanded=False):
-    col_a, col_b, col_c, col_d = st.columns(4)
-    with col_a:
-        if st.button("🤖 AUTO", use_container_width=True):
-            set_forced_strategy("AUTO")
-    with col_b:
-        if st.button("🚀 FORCE ORB‑R", use_container_width=True):
-            set_forced_strategy("ORB-R")
-    with col_c:
-        if st.button("📊 FORCE VWAP", use_container_width=True):
-            set_forced_strategy("VWAP")
-    with col_d:
-        st.caption(f"Current: **{st.session_state.forced_strategy}**")
+    # PIN verification
+    if "override_authorized" not in st.session_state:
+        st.session_state.override_authorized = False
+    
+    if not st.session_state.override_authorized:
+        with st.form("pin_form"):
+            entered_pin = st.text_input("Enter PIN to change strategy:", type="password", key="pin_input")
+            submitted = st.form_submit_button("Unlock")
+            if submitted:
+                try:
+                    row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
+                    if row.data and row.data[0]["pin"] == entered_pin:
+                        st.session_state.override_authorized = True
+                        st.success("Access granted!")
+                        st.rerun()
+                    else:
+                        st.error("Incorrect PIN")
+                except Exception:
+                    st.error("Could not verify PIN")
+        st.info("🔒 Strategy override is locked. Enter PIN to unlock.")
+    else:
+        st.success("✅ Access granted – you can change the strategy")
+        col_a, col_b, col_c, col_d = st.columns(4)
+        with col_a:
+            if st.button("🤖 AUTO", use_container_width=True):
+                set_forced_strategy("AUTO")
+        with col_b:
+            if st.button("🚀 FORCE ORB‑R", use_container_width=True):
+                set_forced_strategy("ORB-R")
+        with col_c:
+            if st.button("📊 FORCE VWAP", use_container_width=True):
+                set_forced_strategy("VWAP")
+        with col_d:
+            st.caption(f"Current: **{st.session_state.forced_strategy}**")
+        
+        # Lock button
+        if st.button("🔒 Lock Again", use_container_width=True):
+            st.session_state.override_authorized = False
+            st.rerun()
+
+        # ─── CHANGE PIN EXPANDER (paste here, after lock button, before any other code) ───
+        with st.expander("Change PIN (admin only)", expanded=False):
+            with st.form("change_pin_form"):
+                new_pin = st.text_input("New PIN (4-6 digits)", type="password", max_chars=6)
+                confirm_pin = st.text_input("Confirm PIN", type="password", max_chars=6)
+                if st.form_submit_button("Update PIN"):
+                    if new_pin and new_pin == confirm_pin and new_pin.isdigit() and 4 <= len(new_pin) <= 6:
+                        try:
+                            supabase.table("bot_config").update({"pin": new_pin}).eq("id", 1).execute()
+                            st.success("PIN updated successfully!")
+                        except Exception:
+                            st.error("Failed to update PIN")
+                    else:
+                        st.error("PIN must be 4-6 digits and match")
 
 # Tabs
 tab_live, tab_signals, tab_backtest, tab_portfolio = st.tabs(["Live Trading", "Signal Scanner", "Backtesting", "Portfolio Backtest"])
