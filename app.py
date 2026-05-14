@@ -785,26 +785,40 @@ except Exception:
 st.write("### 🔧 Manual Strategy Override")
 
 # Helper function to get current strategy display (without requiring override)
+# Helper function to get current strategy display (without requiring override)
 def get_current_strategy_display():
     forced = st.session_state.get("forced_strategy", "AUTO")
     if forced == "ORB-R":
-        return "🔧 FORCED: ORB‑R"
+        return "🔧 FORCED: ORB‑R", "📈 Target 3x your risk (e.g., risk $1 → aim for $3 profit) | Exit at 12:00 ET (midnight SGT)"
     elif forced == "VWAP":
-        return "🔧 FORCED: VWAP"
+        return "🔧 FORCED: VWAP", "📈 Target 1.5x your risk (e.g., risk $1 → aim for $1.50 profit) | Exit at 15:30 ET (3:30am SGT)"
     else:
         # AUTO mode - determine based on time
         now_et = datetime.now(ET)
         orb_active = (now_et.hour >= 9 and now_et.hour < 12) or (now_et.hour == 9 and now_et.minute >= 30)
         vwap_active = (now_et.hour >= 12 and now_et.hour < 15) or (now_et.hour == 15 and now_et.minute <= 30)
+        
+        # Convert ET to SGT for display
+        def et_to_sgt(hour_et, minute_et=0):
+            """Convert ET time to SGT (ET + 12 hours, but careful with date)"""
+            sgt_hour = hour_et + 12
+            if sgt_hour >= 24:
+                sgt_hour -= 24
+            return f"{sgt_hour:02d}:{minute_et:02d}"
+        
         if orb_active:
-            return "🤖 AUTO: ORB‑R (9:30–12:00 ET)"
+            exit_sgt = et_to_sgt(12, 0)  # 12:00 ET = 00:00 SGT (midnight)
+            return "🤖 AUTO: ORB‑R (9:30am–12:00pm ET)", f"📈 Target 3x your risk (e.g., risk $1 → aim for $3 profit) | Exit at {exit_sgt} SGT"
         elif vwap_active:
-            return "🤖 AUTO: VWAP (12:00–15:30 ET)"
+            exit_sgt = et_to_sgt(15, 30)  # 15:30 ET = 03:30 SGT
+            return "🤖 AUTO: VWAP (12:00pm–3:30pm ET)", f"📈 Target 1.5x your risk (e.g., risk $1 → aim for $1.50 profit) | Exit at {exit_sgt} SGT"
         else:
-            return "⏸️ Market Closed"
+            return "⏸️ Market Closed", "No active strategy. Trading hours: 9:30pm–4:00am SGT (Mon–Fri night)"
 
 # Display current strategy (always visible)
-st.info(f"📌 **Current Strategy:** {get_current_strategy_display()}")
+strategy_title, strategy_desc = get_current_strategy_display()
+st.info(f"📌 **Current Strategy:** {strategy_title}")
+st.caption(f"{strategy_desc}")
 
 # Initialize session state for override flow
 if "override_step" not in st.session_state:
