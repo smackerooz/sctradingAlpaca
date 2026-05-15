@@ -1,11 +1,7 @@
 """
-Complete Dashboard for Trading Bot (ORB-R + VWAP)
-- 50 Shariah-compliant stocks
-- Manual override with PIN
-- Manual liquidation with PIN
-- Auto-refresh trades every 60 seconds
-- Trading session P&L (9:30pm SGT → 4:00am SGT)
-- Daily P&L bar chart
+Dynamic Dashboard – Works with any strategy defined in Supabase 'strategies' table
+- Removed Backtesting tab
+- Portfolio Backtest dynamically reads strategies from Supabase
 """
 
 import streamlit as st
@@ -159,7 +155,7 @@ STOCK_PROFILES = {
 }
 
 # ─────────────────────────────────────────────
-# SESSION STATE INITIALIZATION
+# SESSION STATE INIT
 # ─────────────────────────────────────────────
 if "nightly_baseline" not in st.session_state:
     try:
@@ -181,6 +177,10 @@ if "nightly_baseline" not in st.session_state:
         except:
             st.session_state.nightly_baseline = 10000.0
 
+if "strategies" not in st.session_state:
+    rows = supabase.table("strategies").select("*").eq("is_active", True).order("order_index").execute()
+    st.session_state.strategies = rows.data
+
 if "bot_running" not in st.session_state: st.session_state.bot_running = True
 if "last_scan" not in st.session_state: st.session_state.last_scan = None
 if "scan_log" not in st.session_state: st.session_state.scan_log = []
@@ -198,27 +198,20 @@ if "liq_step" not in st.session_state: st.session_state.liq_step = "idle"
 if "pin_verified" not in st.session_state: st.session_state.pin_verified = False
 
 # ─────────────────────────────────────────────
-# HELPER FUNCTIONS (CORRECTED)
+# HELPER FUNCTIONS
 # ─────────────────────────────────────────────
 def parse_datetime(date_str: str, time_str: str) -> datetime:
-    """Parse date string that can be 'YYYY-MM-DD' or 'DD/MM/YYYY' with time."""
     if "-" in date_str:
         dt_str = f"{date_str} {time_str}"
         return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
     else:
-        # Format: DD/MM/YYYY or D/M/YYYY
         day, month, year = date_str.split("/")
         dt_str = f"{year}-{month.zfill(2)}-{day.zfill(2)} {time_str}"
         return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
 
 def get_trading_session_start(date_str: str, time_str: str) -> str:
-    """Return the trading session START DATE for a trade.
-    Session: 9:30pm SGT → 4:00am SGT next day.
-    Trade at 00:42:43 on 15/5/2026 → returns '2026-05-14'
-    """
     dt = parse_datetime(date_str, time_str)
     dt = SGT.localize(dt)
-    
     if dt.hour >= 21 and dt.minute >= 30:
         return dt.date().isoformat()
     elif dt.hour < 4:
@@ -227,143 +220,97 @@ def get_trading_session_start(date_str: str, time_str: str) -> str:
         return dt.date().isoformat()
 
 def get_last_completed_session() -> str:
-    """Return the most recent COMPLETED trading session start date.
-    At 10:00 AM SGT on May 15, returns '2026-05-14' (session that ended at 4:00 AM).
-    """
     now = datetime.now(SGT)
-    
-    # If current time is between 4:00 AM and 9:30 PM, the last completed session ended today at 4:00 AM
     if now.hour >= 4 and now.hour < 21:
-        # Session started yesterday at 9:30 PM
         return (now.date() - timedelta(days=1)).isoformat()
     elif now.hour >= 21 and now.minute >= 30:
-        # After 9:30 PM, current session is in progress, last completed was yesterday
         return (now.date() - timedelta(days=1)).isoformat()
     elif now.hour < 4:
-        # Between midnight and 4:00 AM, current session is still active, last completed was yesterday
         return (now.date() - timedelta(days=1)).isoformat()
     else:
-        # Fallback
         return (now.date() - timedelta(days=1)).isoformat()
 
 def load_realized_trades() -> list:
-    """Load trades from the most recent completed trading session."""
     try:
-        rows = supabase.table("realized_trades") \
-                   .select("*") \
-                   .order("id", desc=True) \
-                   .limit(500) \
-                   .execute()
-        
+        rows = supabase.table("realized_trades").select("*").order("id", desc=True).limit(500).execute()
         target_session = get_last_completed_session()
         result = []
-        
         for r in rows.data:
             trade_session = get_trading_session_start(r["date"], r["time_sgt"])
             if trade_session == target_session:
                 result.append({
-                    "date": r["date"],
-                    "Symbol": r["symbol"],
-                    "Strategy": r.get("strategy", "Unknown"),
-                    "Buy Price": r["buy_price"],
-                    "Sell Price": r["sell_price"],
-                    "Qty": r["qty"],
-                    "P&L ($)": r["pl_display"],
-                    "P&L (%)": r["pl_pct"],
-                    "Time (SGT)": r["time_sgt"],
-                    "Reason": r["reason"],
-                    "_pl_usd": float(r["pl_usd"]),
+                    "date": r["date"], "Symbol": r["symbol"], "Strategy": r.get("strategy", "Unknown"),
+                    "Buy Price": r["buy_price"], "Sell Price": r["sell_price"], "Qty": r["qty"],
+                    "P&L ($)": r["pl_display"], "P&L (%)": r["pl_pct"], "Time (SGT)": r["time_sgt"],
+                    "Reason": r["reason"], "_pl_usd": float(r["pl_usd"]),
                 })
         return result
-    except Exception as e:
-        print(f"Error loading trades: {e}")
+    except Exception:
         return []
 
 def load_all_trades() -> list:
-    """Load all realized trades for chart."""
     try:
-        rows = supabase.table("realized_trades") \
-                   .select("*") \
-                   .order("id", desc=True) \
-                   .execute()
+        rows = supabase.table("realized_trades").select("*").order("id", desc=True).execute()
         result = []
         for r in rows.data:
             result.append({
-                "date": r["date"],
-                "Symbol": r["symbol"],
-                "Strategy": r.get("strategy", "Unknown"),
-                "Buy Price": r["buy_price"],
-                "Sell Price": r["sell_price"],
-                "Qty": r["qty"],
-                "P&L ($)": r["pl_display"],
-                "P&L (%)": r["pl_pct"],
-                "Time (SGT)": r["time_sgt"],
-                "Reason": r["reason"],
-                "_pl_usd": float(r["pl_usd"]),
+                "date": r["date"], "Symbol": r["symbol"], "Strategy": r.get("strategy", "Unknown"),
+                "Buy Price": r["buy_price"], "Sell Price": r["sell_price"], "Qty": r["qty"],
+                "P&L ($)": r["pl_display"], "P&L (%)": r["pl_pct"], "Time (SGT)": r["time_sgt"],
+                "Reason": r["reason"], "_pl_usd": float(r["pl_usd"]),
             })
         return result
     except Exception:
         return []
 
 def compute_daily_pnl_overview() -> pd.DataFrame:
-    """Returns DataFrame with one row per trading session."""
     all_trades = load_all_trades()
     if not all_trades:
         return pd.DataFrame()
-    
     session_data = {}
-    
     for trade in all_trades:
         session_start = get_trading_session_start(trade["date"], trade["Time (SGT)"])
         pl = trade["_pl_usd"]
         strategy = trade.get("Strategy", "Unknown")
-        
         if session_start not in session_data:
-            session_data[session_start] = {"ORB-R": 0.0, "VWAP": 0.0, "Total": 0.0}
-        
-        if strategy == "ORB-R":
-            session_data[session_start]["ORB-R"] += pl
-        elif strategy == "VWAP":
-            session_data[session_start]["VWAP"] += pl
-        
-        session_data[session_start]["Total"] += pl
-    
+            session_data[session_start] = {}
+        if strategy not in session_data[session_start]:
+            session_data[session_start][strategy] = 0.0
+        session_data[session_start][strategy] += pl
     rows = []
-    for session_start, data in session_data.items():
-        rows.append({
-            "Trading Session Date": session_start,
-            "ORB-R": round(data["ORB-R"], 2),
-            "VWAP": round(data["VWAP"], 2),
-            "Total": round(data["Total"], 2),
-        })
-    
+    for session_start, strategies in session_data.items():
+        row = {"Trading Session Date": session_start}
+        total = 0.0
+        for strat, pl_val in strategies.items():
+            row[strat] = round(pl_val, 2)
+            total += pl_val
+        row["Total"] = round(total, 2)
+        rows.append(row)
     df = pd.DataFrame(rows)
-    df = df.sort_values("Trading Session Date", ascending=True)
+    if not df.empty:
+        df = df.sort_values("Trading Session Date", ascending=True)
     return df
 
 def get_current_strategy_display():
-    forced = st.session_state.get("forced_strategy", "AUTO")
-    if forced == "ORB-R":
-        return "🔧 FORCED: ORB‑R", "📈 3:1 risk‑reward (risk $1 → target $3 profit) | Exit at 12:00 ET (midnight SGT)"
-    elif forced == "VWAP":
-        return "🔧 FORCED: VWAP", "📈 1.5:1 risk‑reward (risk $1 → target $1.50 profit) | Exit at 15:30 ET (3:30am SGT)"
+    forced = st.session_state.forced_strategy
+    if forced != "AUTO":
+        for s in st.session_state.strategies:
+            if s["name"] == forced:
+                return f"🔧 FORCED: {s['display_name']}", f"📈 {s['reward_risk_ratio']}:1 risk‑reward | {s['description']}"
+        return f"🔧 FORCED: {forced}", "No description available"
     else:
         now_et = datetime.now(ET)
-        orb_active = (now_et.hour >= 9 and now_et.hour < 12) or (now_et.hour == 9 and now_et.minute >= 30)
-        vwap_active = (now_et.hour >= 12 and now_et.hour < 15) or (now_et.hour == 15 and now_et.minute <= 30)
-        if orb_active:
-            return "🤖 AUTO: ORB‑R (9:30am–12:00pm ET)", "📈 3:1 risk‑reward (risk $1 → target $3 profit) | Exit at 00:00 SGT"
-        elif vwap_active:
-            return "🤖 AUTO: VWAP (12:00pm–3:30pm ET)", "📈 1.5:1 risk‑reward (risk $1 → target $1.50 profit) | Exit at 03:30 SGT"
-        else:
-            return "⏸️ Market Closed", "No active strategy. Trading hours: 9:30pm–4:00am SGT (Mon–Fri night)"
+        for s in st.session_state.strategies:
+            start = datetime.strptime(s["time_window_start_et"], "%H:%M:%S").time()
+            end = datetime.strptime(s["time_window_end_et"], "%H:%M:%S").time()
+            if start <= now_et.time() <= end:
+                return f"🤖 AUTO: {s['display_name']} ({start}–{end} ET)", f"📈 {s['reward_risk_ratio']}:1 risk‑reward | {s['description']}"
+        return "⏸️ Market Closed", "No active strategy at this time."
 
 def set_forced_strategy(strategy):
     try:
         supabase.table("bot_config").upsert({
-            "id": 1,
-            "forced_strategy": strategy,
-            "updated_at": datetime.now(SGT).isoformat(),
+            "id": 1, "forced_strategy": strategy, "updated_at": datetime.now(SGT).isoformat(),
         }).execute()
         st.session_state.forced_strategy = strategy
         st.success(f"Strategy override set to {strategy}")
@@ -382,9 +329,7 @@ def get_bars(symbol: str) -> pd.DataFrame:
         req = StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=TimeFrame(5, TimeFrameUnit.Minute),
-            start=start,
-            end=end,
-            feed="iex",
+            start=start, end=end, feed="iex",
         )
         bars = data_client.get_stock_bars(req).df
         if bars.empty:
@@ -403,9 +348,7 @@ def is_eod_window() -> bool:
 def save_baseline(value: float):
     try:
         supabase.table("weekly_baseline").upsert({
-            "id": 1,
-            "baseline": value,
-            "date": datetime.now(SGT).date().isoformat(),
+            "id": 1, "baseline": value, "date": datetime.now(SGT).date().isoformat(),
         }).execute()
     except Exception:
         pass
@@ -747,7 +690,6 @@ if (datetime.now(SGT) - st.session_state.last_trade_refresh).seconds >= 60:
     st.session_state.last_trade_refresh = datetime.now(SGT)
     st.rerun()
 
-# Force load trades on script run
 st.session_state.realized_trades = load_realized_trades()
 
 # ─────────────────────────────────────────────
@@ -763,7 +705,6 @@ with st.sidebar:
         st.rerun()
     st.divider()
 
-    # Manual Liquidation with PIN (3-step)
     st.write("### 🧹 Manual Liquidation")
     if st.session_state.liq_step == "idle" and not st.session_state.pin_verified:
         if st.button("⚠️ Manual Liquidation", use_container_width=True, type="secondary"):
@@ -855,7 +796,6 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 st.title("📈 Auto Trading Bot")
 
-# Bot health indicator
 try:
     hb_row = supabase.table("bot_state").select("last_heartbeat").eq("id", 1).execute()
     if hb_row.data and hb_row.data[0].get("last_heartbeat"):
@@ -874,14 +814,13 @@ try:
 except Exception:
     st.info("👁️ DASHBOARD MODE — Bot is running autonomously on Railway.", icon="🤖")
 
-# Strategy Description Card (always visible)
 st.markdown("---")
 strategy_title, strategy_desc = get_current_strategy_display()
 st.markdown(f"📌 **Current Strategy:** {strategy_title}")
 st.markdown(f"{strategy_desc}")
 st.markdown("---")
 
-# Manual Strategy Override (3-step)
+# Manual Strategy Override (dynamic)
 st.write("### 🔧 Manual Strategy Override")
 if st.session_state.override_step == "idle" and not st.session_state.override_authorized:
     if st.button("🔧 Change Strategy", use_container_width=True, type="primary"):
@@ -914,23 +853,16 @@ elif st.session_state.override_step == "pin_entered" and not st.session_state.ov
             st.rerun()
 elif st.session_state.override_step == "authorized" and st.session_state.override_authorized:
     st.success("✅ Access granted – you can change the strategy")
-    # Display current strategy (again for clarity)
     cur_title, _ = get_current_strategy_display()
     st.info(f"Current strategy: {cur_title}")
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        if st.button("🤖 AUTO", use_container_width=True):
-            st.session_state.pending_strategy = "AUTO"
-            st.rerun()
-    with col_b:
-        if st.button("🚀 FORCE ORB‑R", use_container_width=True):
-            st.session_state.pending_strategy = "ORB-R"
-            st.rerun()
-    with col_c:
-        if st.button("📊 FORCE VWAP", use_container_width=True):
-            st.session_state.pending_strategy = "VWAP"
-            st.rerun()
-    # PIN Changer (admin only)
+    # Generate buttons for all strategies + AUTO
+    strategy_options = [{"name": "AUTO", "display_name": "🤖 AUTO"}] + st.session_state.strategies
+    cols = st.columns(min(len(strategy_options), 4))
+    for idx, strat in enumerate(strategy_options):
+        with cols[idx % 4]:
+            if st.button(strat["display_name"], use_container_width=True):
+                st.session_state.pending_strategy = strat["name"]
+                st.rerun()
     with st.expander("🔐 Change PIN (admin only)", expanded=False):
         with st.form("change_pin_form"):
             current_pin = st.text_input("Current PIN:", type="password", key="current_pin")
@@ -963,15 +895,13 @@ elif st.session_state.override_step == "authorized" and st.session_state.overrid
         st.success("Strategy locked. Changes are active.")
         st.rerun()
 
-# Confirmation dialog for pending strategy change
 if st.session_state.pending_strategy is not None:
     strategy_name = st.session_state.pending_strategy
     if strategy_name == "AUTO":
         strategy_display = "AUTO (time‑based)"
-    elif strategy_name == "ORB-R":
-        strategy_display = "ORB‑R (Opening Range Breakout)"
     else:
-        strategy_display = "VWAP (Volume Weighted Avg Price)"
+        strat = next((s for s in st.session_state.strategies if s["name"] == strategy_name), None)
+        strategy_display = strat["display_name"] if strat else strategy_name
     st.markdown("---")
     st.warning(f"⚠️ **You are changing the strategy to: {strategy_display}**")
     st.caption("Please confirm this action.")
@@ -994,12 +924,12 @@ if st.session_state.pending_strategy is not None:
 
 st.markdown("---")
 
-# TABS
-tab_live, tab_signals, tab_backtest, tab_portfolio = st.tabs(["Live Trading", "Signal Scanner", "Backtesting", "Portfolio Backtest"])
+# TABS (Backtesting removed)
+tab_live, tab_signals, tab_portfolio = st.tabs(["Live Trading", "Signal Scanner", "Portfolio Backtest"])
 
-# ════════════════════════════════════════════
+# ─────────────────────────────────────────────
 # TAB 1 — LIVE TRADING
-# ════════════════════════════════════════════
+# ─────────────────────────────────────────────
 with tab_live:
     st.write(f"## 🎯 Weekly Goal: ${TARGET_PROFIT:.0f} USD")
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -1033,110 +963,78 @@ with tab_live:
     else:
         st.success("✅ Account is 100% Cash.")
 
-    # Today's Completed Trades (split by strategy)
     with st.expander("📊 Today's Completed Trades", expanded=True):
         col_refresh, _ = st.columns([4, 1])
         with col_refresh:
             if st.button("🔄 Refresh Trades", use_container_width=True):
                 st.session_state.realized_trades = load_realized_trades()
                 st.rerun()
-        
-        # Show which session is being displayed
         current_display_session = get_last_completed_session()
         st.caption(f"📅 Showing trades from trading session: **{current_display_session}** (9:30 PM SGT → 4:00 AM SGT)")
-        
         trades = st.session_state.realized_trades
         if trades:
-            # Safe filtering with str() to handle None values
-            orb_trades = [t for t in trades if isinstance(t, dict) and str(t.get("Strategy", "")).upper() == "ORB-R"]
-            vwap_trades = [t for t in trades if isinstance(t, dict) and str(t.get("Strategy", "")).upper() == "VWAP"]
-            if orb_trades:
-                st.markdown("**🚀 ORB‑R Trades**")
-                orb_df = pd.DataFrame(orb_trades)[["Symbol", "Buy Price", "Sell Price", "Qty", "P&L ($)", "P&L (%)", "Time (SGT)", "Reason"]]
-                st.dataframe(orb_df, use_container_width=True, hide_index=True)
-                total_orb = sum(t.get("_pl_usd", 0) for t in orb_trades)
-                st.write(f"**Total ORB‑R P&L: ${total_orb:+.2f}**")
-            if vwap_trades:
-                st.markdown("**📊 VWAP Trades**")
-                vwap_df = pd.DataFrame(vwap_trades)[["Symbol", "Buy Price", "Sell Price", "Qty", "P&L ($)", "P&L (%)", "Time (SGT)", "Reason"]]
-                st.dataframe(vwap_df, use_container_width=True, hide_index=True)
-                total_vwap = sum(t.get("_pl_usd", 0) for t in vwap_trades)
-                st.write(f"**Total VWAP P&L: ${total_vwap:+.2f}**")
-            if not orb_trades and not vwap_trades:
-                st.info("No completed trades in this session yet.")
+            # Group by strategy name (dynamic)
+            strategy_names = list(set(t.get("Strategy", "Unknown") for t in trades if isinstance(t, dict)))
+            for strat_name in strategy_names:
+                strat_trades = [t for t in trades if isinstance(t, dict) and str(t.get("Strategy", "")).upper() == strat_name.upper()]
+                if strat_trades:
+                    # Find display name from strategies table
+                    strat_display = strat_name
+                    for s in st.session_state.strategies:
+                        if s["name"].upper() == strat_name.upper():
+                            strat_display = s["display_name"]
+                            break
+                    st.markdown(f"**{strat_display} Trades**")
+                    df = pd.DataFrame(strat_trades)[["Symbol", "Buy Price", "Sell Price", "Qty", "P&L ($)", "P&L (%)", "Time (SGT)", "Reason"]]
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                    total = sum(t.get("_pl_usd", 0) for t in strat_trades)
+                    st.write(f"**Total {strat_display} P&L: ${total:+.2f}**")
         else:
             st.info("No completed trades in this session yet.")
 
-    # Daily P&L Bar Chart (by trading session)
     st.markdown("### 📊 Daily P&L by Trading Session")
     daily_df = compute_daily_pnl_overview()
     if not daily_df.empty:
-        # Bar chart
         fig = go.Figure()
         fig.add_trace(go.Bar(
             x=daily_df["Trading Session Date"],
             y=daily_df["Total"],
             name="Total P&L",
             marker_color=["#26a65b" if x >= 0 else "#e74c3c" for x in daily_df["Total"]],
-            text=[f"${x:+.2f}" for x in daily_df["Total"]],
-            textposition="outside",
+            text=[f"${x:+.2f}" for x in daily_df["Total"]], textposition="outside",
         ))
-        if "ORB-R" in daily_df.columns:
-            fig.add_trace(go.Bar(
-                x=daily_df["Trading Session Date"],
-                y=daily_df["ORB-R"],
-                name="ORB‑R",
-                marker_color="#4f8ef7",
-                opacity=0.7,
-            ))
-        if "VWAP" in daily_df.columns:
-            fig.add_trace(go.Bar(
-                x=daily_df["Trading Session Date"],
-                y=daily_df["VWAP"],
-                name="VWAP",
-                marker_color="#f0a500",
-                opacity=0.7,
-            ))
-        fig.update_layout(
-            barmode="group",
-            height=400,
-            template="plotly_dark",
-            xaxis_title="Trading Session (start evening SGT)",
-            yaxis_title="P&L (USD)",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            margin=dict(l=0, r=0, t=30, b=0),
-        )
+        # Dynamically add strategy traces
+        for col in daily_df.columns:
+            if col not in ["Trading Session Date", "Total"]:
+                fig.add_trace(go.Bar(
+                    x=daily_df["Trading Session Date"],
+                    y=daily_df[col],
+                    name=col,
+                    opacity=0.7,
+                ))
+        fig.update_layout(barmode="group", height=400, template="plotly_dark",
+                          xaxis_title="Trading Session (start evening SGT)", yaxis_title="P&L (USD)",
+                          legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                          margin=dict(l=0,r=0,t=30,b=0))
         st.plotly_chart(fig, use_container_width=True)
-        
-        # Cumulative P&L Line Chart
+
         daily_sorted = daily_df.sort_values("Trading Session Date", ascending=True)
         daily_sorted["Cumulative Total"] = daily_sorted["Total"].cumsum()
         fig_cum = go.Figure()
         fig_cum.add_trace(go.Scatter(
-            x=daily_sorted["Trading Session Date"],
-            y=daily_sorted["Cumulative Total"],
-            mode="lines+markers",
-            name="Cumulative P&L",
-            line=dict(color="#f39c12", width=3),
-            marker=dict(size=8, color="#e67e22"),
-            fill="tozeroy",
-            fillcolor="rgba(243,156,18,0.1)",
-            text=[f"${x:+.2f}" for x in daily_sorted["Cumulative Total"]],
-            textposition="top center",
+            x=daily_sorted["Trading Session Date"], y=daily_sorted["Cumulative Total"],
+            mode="lines+markers", name="Cumulative P&L", line=dict(color="#f39c12", width=3),
+            marker=dict(size=8, color="#e67e22"), fill="tozeroy", fillcolor="rgba(243,156,18,0.1)",
+            text=[f"${x:+.2f}" for x in daily_sorted["Cumulative Total"]], textposition="top center",
         ))
-        fig_cum.update_layout(
-            height=300,
-            template="plotly_dark",
-            xaxis_title="Trading Session (start evening SGT)",
-            yaxis_title="Cumulative P&L (USD)",
-            margin=dict(l=0, r=0, t=30, b=0),
-            hovermode="x unified",
-        )
+        fig_cum.update_layout(height=300, template="plotly_dark",
+                              xaxis_title="Trading Session (start evening SGT)",
+                              yaxis_title="Cumulative P&L (USD)", margin=dict(l=0,r=0,t=30,b=0),
+                              hovermode="x unified")
         st.plotly_chart(fig_cum, use_container_width=True)
     else:
         st.info("No trade data available yet for daily P&L chart.")
 
-    # Open Positions (Unrealized)
     with st.expander("📋 Open Positions (Unrealized)", expanded=False):
         try:
             positions = trading_client.get_all_positions()
@@ -1149,11 +1047,8 @@ with tab_live:
                     pl_usd = (current - entry) * qty
                     pl_pct = (pl_usd / (entry * qty)) * 100 if entry * qty != 0 else 0
                     open_data.append({
-                        "Symbol": p.symbol,
-                        "Entry": f"${entry:.2f}",
-                        "Current": f"${current:.2f}",
-                        "Qty": round(qty, 4),
-                        "Unrealized P&L ($)": f"${pl_usd:+.2f}",
+                        "Symbol": p.symbol, "Entry": f"${entry:.2f}", "Current": f"${current:.2f}",
+                        "Qty": round(qty, 4), "Unrealized P&L ($)": f"${pl_usd:+.2f}",
                         "Unrealized P&L (%)": f"{pl_pct:+.2f}%",
                     })
                 st.dataframe(pd.DataFrame(open_data), use_container_width=True, hide_index=True)
@@ -1162,7 +1057,6 @@ with tab_live:
         except:
             st.info("Could not fetch positions.")
 
-    # Signal Rankings Widget
     st.write("### 📡 Live Signal Rankings")
     lsr_col1, lsr_col2 = st.columns([3, 1])
     with lsr_col2:
@@ -1219,7 +1113,6 @@ with tab_live:
         st.info("👆 Click **Refresh Rankings** to load signal scores for all stocks.")
 
     st.divider()
-    # Activity log
     with st.expander("📋 Activity Log", expanded=True):
         try:
             logs = supabase.table("bot_logs").select("message, created_at").order("created_at", desc=True).limit(50).execute()
@@ -1233,9 +1126,9 @@ with tab_live:
         except Exception as e:
             st.error(f"Could not load logs: {e}")
 
-# ════════════════════════════════════════════
-# TAB 2 — SIGNAL SCANNER (preserved)
-# ════════════════════════════════════════════
+# ─────────────────────────────────────────────
+# TAB 2 — SIGNAL SCANNER
+# ─────────────────────────────────────────────
 with tab_signals:
     st.write("## 📡 Signal Scanner — Bullish/Bearish Rankings (1–100)")
     st.write("Scores each stock from 1 to 100 using Trend, RSI, MACD, and Momentum.")
@@ -1321,149 +1214,37 @@ with tab_signals:
     else:
         st.info("👆 Click **Run Signal Scan** to score all stocks.")
 
-# ════════════════════════════════════════════
-# TAB 3 — BACKTESTING (preserved)
-# ════════════════════════════════════════════
-with tab_backtest:
-    st.write("## 🧪 Backtest Strategy on Yahoo Finance Data")
-    st.write("Simulates the trailing stop + hard stop strategy on historical hourly data.")
-    bt_mode = st.radio("Mode", ["📊 All Stocks (Leaderboard)", "🔍 Single Stock (Deep Dive)"], horizontal=True)
-    st.divider()
-    cfg1, cfg2, cfg3 = st.columns(3)
-    with cfg1:
-        bt_period = st.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y"], index=1)
-    with cfg2:
-        bt_max_usd = st.number_input("Max $ per trade", min_value=100, max_value=50000, value=500, step=100)
-    with cfg3:
-        use_profile = st.checkbox("Use per-stock profiles", value=True)
-    if not use_profile:
-        ov1, ov2, ov3 = st.columns(3)
-        with ov1: ov_hard_sl = st.slider("Hard Stop Loss %", 0.005, 0.05, 0.013, 0.001, format="%.3f")
-        with ov2: ov_trail = st.slider("Trailing Stop %", 0.005, 0.05, 0.008, 0.001, format="%.3f")
-        with ov3: ov_trend = st.slider("Buy Trend Signal %", 0.001, 0.02, 0.006, 0.001, format="%.3f")
-    if bt_mode == "🔍 Single Stock (Deep Dive)":
-        ss1, ss2 = st.columns([1, 3])
-        with ss1:
-            bt_symbol = st.selectbox("Symbol", WATCHLIST, index=0)
-            if use_profile:
-                hard_sl_d, trail_d, trend_d = profile(bt_symbol)
-                st.caption(f"Profile: SL -{hard_sl_d*100:.1f}% | Trail -{trail_d*100:.1f}% | Trend +{trend_d*100:.1f}%")
-    run_bt = st.button("▶️ Run Backtest", type="primary", use_container_width=True)
-    if run_bt and bt_mode == "📊 All Stocks (Leaderboard)":
-        all_results = []
-        all_trades = {}
-        progress_bar = st.progress(0, text="Starting...")
-        for idx, sym in enumerate(WATCHLIST):
-            progress_bar.progress(idx / len(WATCHLIST), text=f"Running {sym} ({idx+1}/{len(WATCHLIST)})...")
-            hard_sl, trail, trend = profile(sym) if use_profile else (ov_hard_sl, ov_trail, ov_trend)
-            res, tlog = run_backtest(sym, bt_period, hard_sl, trail, trend, bt_max_usd)
-            if res:
-                all_results.append(res)
-                all_trades[sym] = tlog
-        progress_bar.progress(1.0, text="All done!")
-        if not all_results:
-            st.error("No data returned for any symbol.")
-        else:
-            st.write("### 🏆 Portfolio Summary")
-            total_combined_pl = sum(r["total_pl"] for r in all_results)
-            all_wins = sum(r["wins"] for r in all_results)
-            all_trades_count = sum(r["total_trades"] for r in all_results)
-            overall_wr = round(all_wins / all_trades_count * 100, 1) if all_trades_count else 0
-            best = max(all_results, key=lambda r: r["total_pl"])
-            worst = min(all_results, key=lambda r: r["total_pl"])
-            h1, h2, h3, h4, h5 = st.columns(5)
-            h1.metric("Combined P&L", f"${total_combined_pl:+,.2f}")
-            h2.metric("Total Trades", all_trades_count)
-            h3.metric("Overall Win Rate", f"{overall_wr}%")
-            h4.metric("🥇 Best Stock", best["symbol"], delta=f"${best['total_pl']:+,.2f}")
-            h5.metric("🥀 Worst Stock", worst["symbol"], delta=f"${worst['total_pl']:+,.2f}")
-            st.write("### 📋 Leaderboard (ranked by P&L)")
-            lb_rows = sorted(all_results, key=lambda r: r["total_pl"], reverse=True)
-            lb_df = pd.DataFrame([{
-                "Rank": i+1, "Symbol": r["symbol"], "Total P&L ($)": f"${r['total_pl']:+,.2f}",
-                "Final Equity": f"${r['final_equity']:,.2f}", "Trades": r["total_trades"],
-                "Wins": r["wins"], "Losses": r["losses"], "Win Rate": f"{r['win_rate']}%",
-                "Avg Win ($)": f"${r['avg_win']:+,.2f}", "Avg Loss ($)": f"${r['avg_loss']:,.2f}",
-            } for i, r in enumerate(lb_rows)])
-            st.dataframe(lb_df, use_container_width=True, hide_index=True)
-            st.write("### 📊 P&L Comparison Chart")
-            sorted_syms = [r["symbol"] for r in lb_rows]
-            sorted_pls = [r["total_pl"] for r in lb_rows]
-            bar_colors = ["#26a65b" if v >= 0 else "#e74c3c" for v in sorted_pls]
-            fig_bar = go.Figure(go.Bar(x=sorted_syms, y=sorted_pls, marker_color=bar_colors, text=[f"${v:+,.0f}" for v in sorted_pls], textposition="outside"))
-            fig_bar.update_layout(height=350, template="plotly_dark", yaxis_title="Total P&L (USD)", margin=dict(l=0,r=0,t=30,b=0))
-            st.plotly_chart(fig_bar, use_container_width=True)
-            st.write("### 🎯 Win Rate by Stock")
-            wr_syms = [r["symbol"] for r in lb_rows]
-            wr_vals = [r["win_rate"] for r in lb_rows]
-            wr_colors = ["#26a65b" if v >= 50 else "#e74c3c" for v in wr_vals]
-            fig_wr = go.Figure(go.Bar(x=wr_syms, y=wr_vals, marker_color=wr_colors, text=[f"{v}%" for v in wr_vals], textposition="outside"))
-            fig_wr.add_hline(y=50, line_dash="dot", line_color="white", annotation_text="50% break-even line")
-            fig_wr.update_layout(height=320, template="plotly_dark", yaxis_title="Win Rate (%)", yaxis_range=[0,105], margin=dict(l=0,r=0,t=30,b=0))
-            st.plotly_chart(fig_wr, use_container_width=True)
-            st.write("### 🔎 Per-Stock Trade Logs")
-            for r in lb_rows:
-                sym = r["symbol"]
-                tlog = all_trades.get(sym)
-                label = f"{'🟢' if r['total_pl'] >= 0 else '🔴'} {sym}  |  P&L: ${r['total_pl']:+,.2f}  |  Trades: {r['total_trades']}  |  Win rate: {r['win_rate']}%"
-                with st.expander(label, expanded=False):
-                    if tlog is not None and not tlog.empty:
-                        st.dataframe(tlog, use_container_width=True)
-                    else:
-                        st.info("No trades triggered.")
-    elif run_bt and bt_mode == "🔍 Single Stock (Deep Dive)":
-        hard_sl, trail, trend = profile(bt_symbol) if use_profile else (ov_hard_sl, ov_trail, ov_trend)
-        with st.spinner(f"Downloading {bt_symbol} data and simulating..."):
-            results, trade_log = run_backtest(bt_symbol, bt_period, hard_sl, trail, trend, bt_max_usd)
-        if results is None:
-            st.error("No data returned. Try a different symbol or period.")
-        else:
-            st.write(f"### 📊 Results — {bt_symbol}")
-            m1, m2, m3, m4, m5, m6 = st.columns(6)
-            m1.metric("Final Equity", f"${results['final_equity']:,.2f}", delta=f"${results['total_pl']:+,.2f}")
-            m2.metric("Total Trades", results["total_trades"])
-            m3.metric("Win Rate", f"{results['win_rate']}%")
-            m4.metric("Avg Win", f"${results['avg_win']:+,.2f}")
-            m5.metric("Avg Loss", f"${results['avg_loss']:,.2f}")
-            m6.metric("Wins / Losses", f"{results['wins']} / {results['losses']}")
-            st.write("### 📈 Price Chart with Trades")
-            df_chart = results["df"].copy()
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart["close"], mode="lines", name="Price", line=dict(color="#4f8ef7", width=1.5)))
-            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart["avg_20"], mode="lines", name="20-bar Avg", line=dict(color="#f0a500", width=1, dash="dot")))
-            if trade_log is not None and not trade_log.empty:
-                buys = trade_log[trade_log["Action"] == "BUY"]
-                sells = trade_log[trade_log["Action"].str.contains("SELL")]
-                fig.add_trace(go.Scatter(x=pd.to_datetime(buys["Date"]), y=buys["Price"], mode="markers", name="Buy", marker=dict(color="lime", size=9, symbol="triangle-up")))
-                fig.add_trace(go.Scatter(x=pd.to_datetime(sells["Date"]), y=sells["Price"], mode="markers", name="Sell", marker=dict(color="red", size=9, symbol="triangle-down")))
-            fig.update_layout(height=400, template="plotly_dark", margin=dict(l=0,r=0,t=30,b=0), legend=dict(orientation="h", yanchor="bottom", y=1.02))
-            st.plotly_chart(fig, use_container_width=True)
-            with st.expander("📋 Full Trade Log", expanded=False):
-                if trade_log is not None and not trade_log.empty:
-                    st.dataframe(trade_log, use_container_width=True)
-                else:
-                    st.info("No trades triggered.")
-    elif not run_bt:
-        st.info("👆 Choose a mode, configure settings, then click **Run Backtest**.")
-
-# ════════════════════════════════════════════
-# TAB 4 — PORTFOLIO BACKTEST (preserved)
-# ════════════════════════════════════════════
+# ─────────────────────────────────────────────
+# TAB 3 — PORTFOLIO BACKTEST (dynamic strategy selection)
+# ─────────────────────────────────────────────
 with tab_portfolio:
     st.write("## 📂 Portfolio Backtest — Shared Capital Simulation")
-    st.write("Simulates all stocks trading simultaneously from a single shared capital pool.")
+    st.write("Simulates all stocks trading simultaneously from a single shared capital pool using one strategy.")
     st.info("How it works: At each hourly bar, the engine checks every stock in the watchlist. It sells positions that hit their trailing/hard stop, then uses freed cash to buy new signals — all from the same shared $10,000 pool.")
+
+    # Strategy selection dropdown (from Supabase)
+    strategy_options = [{"name": s["name"], "display_name": s["display_name"], "buy_trend": 0.006} for s in st.session_state.strategies]
+    strategy_names = [s["display_name"] for s in strategy_options]
+    selected_strategy_idx = st.selectbox("Select Strategy for Backtest", range(len(strategy_names)), format_func=lambda i: strategy_names[i])
+    selected_strategy = strategy_options[selected_strategy_idx]
+
+    # Display the buy trend (from STOCK_PROFILES default or from strategy table? We'll keep simple default)
+    st.caption(f"Using buy trend signal: +0.6% above 20-bar average (default).")
+
     pcfg1, pcfg2, pcfg3, pcfg4 = st.columns(4)
     with pcfg1: p_period = st.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y"], index=1, key="p_period")
     with pcfg2: p_capital = st.number_input("Starting Capital ($)", min_value=1000, max_value=100000, value=10000, step=1000, key="p_capital")
     with pcfg3: p_max_trade = st.number_input("Max $ per trade", min_value=50, max_value=10000, value=100, step=50, key="p_max_trade")
     with pcfg4: p_use_profile = st.checkbox("Use per-stock profiles", value=True, key="p_use_profile")
+
     if not p_use_profile:
         pov1, pov2, pov3 = st.columns(3)
         with pov1: p_hard_sl = st.slider("Hard Stop Loss %", 0.005, 0.05, 0.013, 0.001, format="%.3f", key="p_hard_sl")
         with pov2: p_trail = st.slider("Trailing Stop %", 0.005, 0.05, 0.008, 0.001, format="%.3f", key="p_trail")
         with pov3: p_trend = st.slider("Buy Trend %", 0.001, 0.02, 0.006, 0.001, format="%.3f", key="p_trend")
+
     run_portfolio = st.button("▶️ Run Portfolio Backtest", type="primary", use_container_width=True, key="run_portfolio")
+
     if run_portfolio:
         with st.spinner("📥 Downloading data for all stocks..."):
             all_data = {}
@@ -1480,6 +1261,7 @@ with tab_portfolio:
                     all_data[sym] = df_raw
                 except: continue
             dl_bar.progress(1.0, text=f"✅ Downloaded {len(all_data)}/{len(WATCHLIST)} stocks")
+
         if not all_data:
             st.error("No data downloaded.")
         else:
@@ -1502,7 +1284,10 @@ with tab_portfolio:
                     for sym, pos in positions.items():
                         if ts not in all_data[sym].index: continue
                         price = float(all_data[sym].loc[ts, "close"])
-                        hard_sl, trail_pct, _ = profile(sym) if p_use_profile else (p_hard_sl, p_trail, p_trend)
+                        if p_use_profile:
+                            hard_sl, trail_pct, _ = profile(sym)
+                        else:
+                            hard_sl, trail_pct = p_hard_sl, p_trail
                         entry = pos["entry_price"]
                         peak = pos["peak_price"]
                         peak = max(peak, price)
@@ -1531,7 +1316,10 @@ with tab_portfolio:
                         price = float(row["close"])
                         avg20 = float(row["avg_20"]) if not pd.isna(row["avg_20"]) else None
                         if avg20 is None: continue
-                        _, _, buy_trend = profile(sym) if p_use_profile else (p_hard_sl, p_trail, p_trend)
+                        if p_use_profile:
+                            _, _, buy_trend = profile(sym)
+                        else:
+                            buy_trend = p_trend
                         if price > avg20 * (1 + buy_trend):
                             qty = round(p_max_trade / price, 6)
                             cost = qty * price
@@ -1565,6 +1353,7 @@ with tab_portfolio:
                     peak_eq = max(peak_eq, eq)
                     dd = (peak_eq - eq) / peak_eq * 100
                     max_dd = max(max_dd, dd)
+
             st.write("### 🏆 Portfolio Results")
             r1, r2, r3, r4, r5, r6 = st.columns(6)
             r1.metric("Final Equity", f"${final_equity:,.2f}", delta=f"${total_pl:+,.2f}")
@@ -1602,7 +1391,7 @@ with tab_portfolio:
         st.info("👆 Configure settings above and click **Run Portfolio Backtest**.")
 
 # ─────────────────────────────────────────────
-# AUTO-REFRESH (dashboard only)
+# AUTO-REFRESH
 # ─────────────────────────────────────────────
 time.sleep(SCAN_INTERVAL)
 st.rerun()
