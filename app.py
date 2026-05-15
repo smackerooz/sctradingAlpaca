@@ -1036,10 +1036,11 @@ with tab_live:
         else:
             st.info("No completed trades in this session yet.")
 
-    # Daily P&L Bar Chart (by trading session)
+        # Daily P&L Bar Chart (by trading session)
     st.markdown("### 📊 Daily P&L by Trading Session")
     daily_df = compute_daily_pnl_overview()
     if not daily_df.empty:
+        # Bar chart
         fig = go.Figure()
         fig.add_trace(go.Bar(
             x=daily_df["Trading Session Date"],
@@ -1075,12 +1076,10 @@ with tab_live:
             margin=dict(l=0, r=0, t=30, b=0),
         )
         st.plotly_chart(fig, use_container_width=True)
+        
         # Cumulative P&L Line Chart (running total across sessions)
-        if not daily_df.empty:
-        # Ensure data is sorted by date ascending (oldest to newest)
         daily_sorted = daily_df.sort_values("Trading Session Date", ascending=True)
         daily_sorted["Cumulative Total"] = daily_sorted["Total"].cumsum()
-        
         fig_cum = go.Figure()
         fig_cum.add_trace(go.Scatter(
             x=daily_sorted["Trading Session Date"],
