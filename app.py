@@ -298,18 +298,20 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
         return pd.DataFrame()
     sessions = []
     for trade in all_trades:
+        # Compute the trading session start date for this trade
         session_date = get_trading_session_date_from_string(trade["date"], trade["Time (SGT)"])
         sessions.append({
-            "session": session_date,
+            "session": session_date,          # e.g., "2026-05-13" for a trade at 2am on May 14
             "pl": trade["_pl_usd"],
             "strategy": trade.get("Strategy", "Unknown"),
         })
     df = pd.DataFrame(sessions)
     if df.empty:
         return pd.DataFrame()
+    # Group by session date (which is already the start date)
     pivot = df.groupby(["session", "strategy"])["pl"].sum().unstack(fill_value=0)
     pivot["Total"] = pivot.sum(axis=1)
-    pivot = pivot.sort_index(ascending=False)
+    pivot = pivot.sort_index(ascending=False)   # newest first (optional)
     pivot = pivot.reset_index().rename(columns={"session": "Trading Session Date"})
     return pivot
 
