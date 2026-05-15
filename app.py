@@ -212,19 +212,23 @@ def get_trading_session_date(dt: datetime = None) -> str:
         return dt.date().isoformat()
 
 def get_trading_session_date_from_string(date_str: str, time_str: str) -> str:
-    """Return the trading session START DATE for a trade (e.g., '2026-05-13' for a trade at 2am on May 14)."""
+    """Return the trading session START DATE for a trade.
+    Session: 9:30pm SGT → 4:00am SGT next day.
+    Trade at 00:42:43 on 2026-05-15 → returns '2026-05-14'
+    """
     from datetime import datetime as dt
     dt_obj = dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
     dt_obj = SGT.localize(dt_obj)
+    
     # Trading session runs from 9:30pm to 4:00am next day
-    # If time is between 9:30pm and midnight, session date is today
-    # If time is between midnight and 4:00am, session date is yesterday
     if dt_obj.hour >= 21 and dt_obj.minute >= 30:
+        # Trade between 9:30pm and midnight -> session start is today
         return dt_obj.date().isoformat()
     elif dt_obj.hour < 4:
+        # Trade between midnight and 4:00am -> session start is yesterday
         return (dt_obj.date() - timedelta(days=1)).isoformat()
     else:
-        # Should not happen for trades (market hours), but fallback
+        # Should not happen during market hours, but fallback
         return dt_obj.date().isoformat()
 
 def load_realized_trades() -> list:
