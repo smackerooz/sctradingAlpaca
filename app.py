@@ -1076,33 +1076,33 @@ with tab_live:
         )
         st.plotly_chart(fig, use_container_width=True)
         # Cumulative P&L Line Chart (running total across sessions)
-if not daily_df.empty:
-    # Ensure data is sorted by date ascending (oldest to newest)
-    daily_sorted = daily_df.sort_values("Trading Session Date", ascending=True)
-    daily_sorted["Cumulative Total"] = daily_sorted["Total"].cumsum()
-    
-    fig_cum = go.Figure()
-    fig_cum.add_trace(go.Scatter(
-        x=daily_sorted["Trading Session Date"],
-        y=daily_sorted["Cumulative Total"],
-        mode="lines+markers",
-        name="Cumulative P&L",
-        line=dict(color="#f39c12", width=3),
-        marker=dict(size=8, color="#e67e22"),
-        fill="tozeroy",
-        fillcolor="rgba(243,156,18,0.1)",
-        text=[f"${x:+.2f}" for x in daily_sorted["Cumulative Total"]],
-        textposition="top center",
-    ))
-    fig_cum.update_layout(
-        height=300,
-        template="plotly_dark",
-        xaxis_title="Trading Session (start evening SGT)",
-        yaxis_title="Cumulative P&L (USD)",
-        margin=dict(l=0, r=0, t=30, b=0),
-        hovermode="x unified",
-    )
-    st.plotly_chart(fig_cum, use_container_width=True)
+        if not daily_df.empty:
+        # Ensure data is sorted by date ascending (oldest to newest)
+        daily_sorted = daily_df.sort_values("Trading Session Date", ascending=True)
+        daily_sorted["Cumulative Total"] = daily_sorted["Total"].cumsum()
+        
+        fig_cum = go.Figure()
+        fig_cum.add_trace(go.Scatter(
+            x=daily_sorted["Trading Session Date"],
+            y=daily_sorted["Cumulative Total"],
+            mode="lines+markers",
+            name="Cumulative P&L",
+            line=dict(color="#f39c12", width=3),
+            marker=dict(size=8, color="#e67e22"),
+            fill="tozeroy",
+            fillcolor="rgba(243,156,18,0.1)",
+            text=[f"${x:+.2f}" for x in daily_sorted["Cumulative Total"]],
+            textposition="top center",
+        ))
+        fig_cum.update_layout(
+            height=300,
+            template="plotly_dark",
+            xaxis_title="Trading Session (start evening SGT)",
+            yaxis_title="Cumulative P&L (USD)",
+            margin=dict(l=0, r=0, t=30, b=0),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_cum, use_container_width=True)
     else:
         st.info("No trade data available yet for daily P&L chart.")
 
