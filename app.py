@@ -1,7 +1,11 @@
 """
 Complete Dashboard for Trading Bot (ORB-R + VWAP)
-- Handles date format: DD/MM/YYYY (from Supabase)
-- Trading session: 9:30pm SGT → 4:00am SGT next day
+- 50 Shariah-compliant stocks
+- Manual override with PIN
+- Manual liquidation with PIN
+- Auto-refresh trades every 60 seconds
+- Trading session P&L (9:30pm SGT → 4:00am SGT)
+- Daily P&L bar chart
 """
 
 import streamlit as st
@@ -194,54 +198,27 @@ if "liq_step" not in st.session_state: st.session_state.liq_step = "idle"
 if "pin_verified" not in st.session_state: st.session_state.pin_verified = False
 
 # ─────────────────────────────────────────────
-# HELPER FUNCTIONS (CORRECTED FOR DD/MM/YYYY FORMAT)
+# HELPER FUNCTIONS (CORRECTED)
 # ─────────────────────────────────────────────
-def parse_date_string(date_str: str) -> datetime:
-    """Parse date string that can be 'YYYY-MM-DD' or 'DD/MM/YYYY'."""
-    if "-" in date_str:
-        return datetime.strptime(date_str, "%Y-%m-%d")
-    else:
-        # Format: DD/MM/YYYY or D/M/YYYY
-        parts = date_str.split("/")
-        day = int(parts[0])
-        month = int(parts[1])
-        year = int(parts[2])
-        return datetime(year, month, day)
-
-def parse_datetime_string(date_str: str, time_str: str) -> datetime:
-    """Parse combined date and time string, handling both date formats."""
+def parse_datetime(date_str: str, time_str: str) -> datetime:
+    """Parse date string that can be 'YYYY-MM-DD' or 'DD/MM/YYYY' with time."""
     if "-" in date_str:
         dt_str = f"{date_str} {time_str}"
         return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
     else:
-        # Format: DD/MM/YYYY HH:MM:SS
+        # Format: DD/MM/YYYY or D/M/YYYY
         day, month, year = date_str.split("/")
         dt_str = f"{year}-{month.zfill(2)}-{day.zfill(2)} {time_str}"
         return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
 
-def get_trading_session_date_from_string(date_str: str, time_str: str) -> str:
+def get_trading_session_start(date_str: str, time_str: str) -> str:
     """Return the trading session START DATE for a trade.
     Session: 9:30pm SGT → 4:00am SGT next day.
     Trade at 00:42:43 on 15/5/2026 → returns '2026-05-14'
     """
-    dt_obj = parse_datetime_string(date_str, time_str)
-    dt_obj = SGT.localize(dt_obj)
+    dt = parse_datetime(date_str, time_str)
+    dt = SGT.localize(dt)
     
-    # Trading session runs from 9:30pm to 4:00am next day
-    if dt_obj.hour >= 21 and dt_obj.minute >= 30:
-        # Trade between 9:30pm and midnight -> session start is today
-        return dt_obj.date().isoformat()
-    elif dt_obj.hour < 4:
-        # Trade between midnight and 4:00am -> session start is yesterday
-        return (dt_obj.date() - timedelta(days=1)).isoformat()
-    else:
-        # Should not happen during market hours, but fallback
-        return dt_obj.date().isoformat()
-
-def get_trading_session_date(dt: datetime = None) -> str:
-    """Get the current trading session start date."""
-    if dt is None:
-        dt = datetime.now(SGT)
     if dt.hour >= 21 and dt.minute >= 30:
         return dt.date().isoformat()
     elif dt.hour < 4:
@@ -249,19 +226,41 @@ def get_trading_session_date(dt: datetime = None) -> str:
     else:
         return dt.date().isoformat()
 
+def get_last_completed_session() -> str:
+    """Return the most recent COMPLETED trading session start date.
+    At 10:00 AM SGT on May 15, returns '2026-05-14' (session that ended at 4:00 AM).
+    """
+    now = datetime.now(SGT)
+    
+    # If current time is between 4:00 AM and 9:30 PM, the last completed session ended today at 4:00 AM
+    if now.hour >= 4 and now.hour < 21:
+        # Session started yesterday at 9:30 PM
+        return (now.date() - timedelta(days=1)).isoformat()
+    elif now.hour >= 21 and now.minute >= 30:
+        # After 9:30 PM, current session is in progress, last completed was yesterday
+        return (now.date() - timedelta(days=1)).isoformat()
+    elif now.hour < 4:
+        # Between midnight and 4:00 AM, current session is still active, last completed was yesterday
+        return (now.date() - timedelta(days=1)).isoformat()
+    else:
+        # Fallback
+        return (now.date() - timedelta(days=1)).isoformat()
+
 def load_realized_trades() -> list:
-    """Load trades from the most recent completed trading session (9:30pm SGT → 4:00am SGT)."""
+    """Load trades from the most recent completed trading session."""
     try:
         rows = supabase.table("realized_trades") \
                    .select("*") \
                    .order("id", desc=True) \
                    .limit(500) \
                    .execute()
+        
+        target_session = get_last_completed_session()
         result = []
-        current_session = get_trading_session_date()  # Now returns the last COMPLETED session
+        
         for r in rows.data:
-            trade_session = get_trading_session_date_from_string(r["date"], r["time_sgt"])
-            if trade_session == current_session:
+            trade_session = get_trading_session_start(r["date"], r["time_sgt"])
+            if trade_session == target_session:
                 result.append({
                     "date": r["date"],
                     "Symbol": r["symbol"],
@@ -281,7 +280,7 @@ def load_realized_trades() -> list:
         return []
 
 def load_all_trades() -> list:
-    """Load all realized trades (no date filter)."""
+    """Load all realized trades for chart."""
     try:
         rows = supabase.table("realized_trades") \
                    .select("*") \
@@ -307,7 +306,7 @@ def load_all_trades() -> list:
         return []
 
 def compute_daily_pnl_overview() -> pd.DataFrame:
-    """Returns a DataFrame with one row per trading session (9:30pm SGT → 4:00am SGT next day)."""
+    """Returns DataFrame with one row per trading session."""
     all_trades = load_all_trades()
     if not all_trades:
         return pd.DataFrame()
@@ -315,29 +314,19 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
     session_data = {}
     
     for trade in all_trades:
-        trade_date = trade["date"]
-        trade_time = trade["Time (SGT)"]
+        session_start = get_trading_session_start(trade["date"], trade["Time (SGT)"])
         pl = trade["_pl_usd"]
         strategy = trade.get("Strategy", "Unknown")
         
-        # Get session start date
-        session_start = get_trading_session_date_from_string(trade_date, trade_time)
-        
-        # Initialize session if not exists
         if session_start not in session_data:
             session_data[session_start] = {"ORB-R": 0.0, "VWAP": 0.0, "Total": 0.0}
         
-        # Add P&L to the appropriate strategy
         if strategy == "ORB-R":
             session_data[session_start]["ORB-R"] += pl
         elif strategy == "VWAP":
             session_data[session_start]["VWAP"] += pl
         
         session_data[session_start]["Total"] += pl
-    
-    # Convert to DataFrame
-    if not session_data:
-        return pd.DataFrame()
     
     rows = []
     for session_start, data in session_data.items():
@@ -1051,8 +1040,11 @@ with tab_live:
             if st.button("🔄 Refresh Trades", use_container_width=True):
                 st.session_state.realized_trades = load_realized_trades()
                 st.rerun()
-        session_date = get_trading_session_date()
-        st.caption(f"📅 Trading session: {session_date} (9:30 PM SGT → 4:00 AM SGT)")
+        
+        # Show which session is being displayed
+        current_display_session = get_last_completed_session()
+        st.caption(f"📅 Showing trades from trading session: **{current_display_session}** (9:30 PM SGT → 4:00 AM SGT)")
+        
         trades = st.session_state.realized_trades
         if trades:
             # Safe filtering with str() to handle None values
