@@ -1,11 +1,7 @@
 """
 Complete Dashboard for Trading Bot (ORB-R + VWAP)
-- 50 Shariah-compliant stocks
-- Manual override with PIN
-- Manual liquidation with PIN
-- Auto-refresh trades every 60 seconds
-- Trading session P&L (9:30pm SGT → 4:00am SGT)
-- Daily P&L bar chart
+- Handles date format: DD/MM/YYYY (from Supabase)
+- Trading session: 9:30pm SGT → 4:00am SGT next day
 """
 
 import streamlit as st
@@ -198,41 +194,37 @@ if "liq_step" not in st.session_state: st.session_state.liq_step = "idle"
 if "pin_verified" not in st.session_state: st.session_state.pin_verified = False
 
 # ─────────────────────────────────────────────
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (CORRECTED FOR DD/MM/YYYY FORMAT)
 # ─────────────────────────────────────────────
-def get_trading_session_date(dt: datetime = None) -> str:
-    """Trading session runs from 9:30pm SGT to 4:00am SGT next day."""
-    if dt is None:
-        dt = datetime.now(SGT)
-    if dt.hour >= 21 and dt.minute >= 30:
-        return dt.date().isoformat()
-    elif dt.hour < 4:
-        return (dt.date() - timedelta(days=1)).isoformat()
+def parse_date_string(date_str: str) -> datetime:
+    """Parse date string that can be 'YYYY-MM-DD' or 'DD/MM/YYYY'."""
+    if "-" in date_str:
+        return datetime.strptime(date_str, "%Y-%m-%d")
     else:
-        return dt.date().isoformat()
+        # Format: DD/MM/YYYY or D/M/YYYY
+        parts = date_str.split("/")
+        day = int(parts[0])
+        month = int(parts[1])
+        year = int(parts[2])
+        return datetime(year, month, day)
+
+def parse_datetime_string(date_str: str, time_str: str) -> datetime:
+    """Parse combined date and time string, handling both date formats."""
+    if "-" in date_str:
+        dt_str = f"{date_str} {time_str}"
+        return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+    else:
+        # Format: DD/MM/YYYY HH:MM:SS
+        day, month, year = date_str.split("/")
+        dt_str = f"{year}-{month.zfill(2)}-{day.zfill(2)} {time_str}"
+        return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
 
 def get_trading_session_date_from_string(date_str: str, time_str: str) -> str:
     """Return the trading session START DATE for a trade.
     Session: 9:30pm SGT → 4:00am SGT next day.
     Trade at 00:42:43 on 15/5/2026 → returns '2026-05-14'
     """
-    from datetime import datetime as dt
-    
-    # Handle date format: can be "2026-05-14" or "14/5/2026"
-    if "-" in date_str:
-        # Format: YYYY-MM-DD
-        dt_obj = dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
-    elif "/" in date_str:
-        # Format: DD/MM/YYYY or D/M/YYYY
-        day, month, year = date_str.split("/")
-        # Ensure two digits for day and month (optional, but safe)
-        day = day.zfill(2)
-        month = month.zfill(2)
-        dt_obj = dt.strptime(f"{year}-{month}-{day} {time_str}", "%Y-%m-%d %H:%M:%S")
-    else:
-        # Fallback
-        dt_obj = dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
-    
+    dt_obj = parse_datetime_string(date_str, time_str)
     dt_obj = SGT.localize(dt_obj)
     
     # Trading session runs from 9:30pm to 4:00am next day
@@ -245,17 +237,28 @@ def get_trading_session_date_from_string(date_str: str, time_str: str) -> str:
     else:
         # Should not happen during market hours, but fallback
         return dt_obj.date().isoformat()
+
+def get_trading_session_date(dt: datetime = None) -> str:
+    """Get the current trading session start date."""
+    if dt is None:
+        dt = datetime.now(SGT)
+    if dt.hour >= 21 and dt.minute >= 30:
+        return dt.date().isoformat()
+    elif dt.hour < 4:
+        return (dt.date() - timedelta(days=1)).isoformat()
+    else:
+        return dt.date().isoformat()
+
 def load_realized_trades() -> list:
     """Load trades from the current trading session (9:30pm SGT → 4:00am SGT)."""
     try:
-        # Load trades from the last 7 days
         rows = supabase.table("realized_trades") \
                    .select("*") \
                    .order("id", desc=True) \
                    .limit(500) \
                    .execute()
         result = []
-        current_session = get_trading_session_date()  # uses datetime.now()
+        current_session = get_trading_session_date()
         for r in rows.data:
             trade_session = get_trading_session_date_from_string(r["date"], r["time_sgt"])
             if trade_session == current_session:
@@ -292,7 +295,7 @@ def load_realized_trades() -> list:
     except Exception as e:
         print(f"Error loading trades: {e}")
         return []
-        
+
 def load_all_trades() -> list:
     """Load all realized trades (no date filter)."""
     try:
@@ -325,15 +328,7 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
     if not all_trades:
         return pd.DataFrame()
     
-    # ─────────────────────────────────────────────
-    # DEBUG: Print each trade's assigned session
-    # Remove this after confirming it works
-    # ─────────────────────────────────────────────
-    for trade in all_trades:
-        session_start = get_trading_session_date_from_string(trade["date"], trade["Time (SGT)"])
-        print(f"Trade: {trade['date']} {trade['Time (SGT)']} → Session start: {session_start}, P&L: {trade['_pl_usd']}, Strategy: {trade.get('Strategy')}")
-    
-    session_data = {}  # key = session_start_date (string)
+    session_data = {}
     
     for trade in all_trades:
         trade_date = trade["date"]
@@ -364,15 +359,15 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
     for session_start, data in session_data.items():
         rows.append({
             "Trading Session Date": session_start,
-            "ORB-R": data["ORB-R"],
-            "VWAP": data["VWAP"],
-            "Total": data["Total"],
+            "ORB-R": round(data["ORB-R"], 2),
+            "VWAP": round(data["VWAP"], 2),
+            "Total": round(data["Total"], 2),
         })
     
     df = pd.DataFrame(rows)
     df = df.sort_values("Trading Session Date", ascending=True)
     return df
-    
+
 def get_current_strategy_display():
     forced = st.session_state.get("forced_strategy", "AUTO")
     if forced == "ORB-R":
@@ -1096,7 +1091,7 @@ with tab_live:
         else:
             st.info("No completed trades in this session yet.")
 
-        # Daily P&L Bar Chart (by trading session)
+    # Daily P&L Bar Chart (by trading session)
     st.markdown("### 📊 Daily P&L by Trading Session")
     daily_df = compute_daily_pnl_overview()
     if not daily_df.empty:
@@ -1137,7 +1132,7 @@ with tab_live:
         )
         st.plotly_chart(fig, use_container_width=True)
         
-        # Cumulative P&L Line Chart (running total across sessions)
+        # Cumulative P&L Line Chart
         daily_sorted = daily_df.sort_values("Trading Session Date", ascending=True)
         daily_sorted["Cumulative Total"] = daily_sorted["Total"].cumsum()
         fig_cum = go.Figure()
@@ -1191,7 +1186,7 @@ with tab_live:
         except:
             st.info("Could not fetch positions.")
 
-    # Signal Rankings Widget (your existing code)
+    # Signal Rankings Widget
     st.write("### 📡 Live Signal Rankings")
     lsr_col1, lsr_col2 = st.columns([3, 1])
     with lsr_col2:
