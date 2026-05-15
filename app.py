@@ -220,19 +220,23 @@ def get_trading_session_start(date_str: str, time_str: str) -> str:
         return dt.date().isoformat()
 
 def get_last_completed_session() -> str:
+    """Return the most recent COMPLETED trading session start date.
+    - During active session (9:30pm – 4:00am SGT), return the session that ended this morning (yesterday's start).
+    - During off-hours (4:00am – 9:30pm), return the session that ended this morning (yesterday's start).
+    """
     now = datetime.now(SGT)
-    if now.hour >= 4 and now.hour < 21:
-        return (now.date() - timedelta(days=1)).isoformat()
-    elif now.hour >= 21 and now.minute >= 30:
-        return (now.date() - timedelta(days=1)).isoformat()
-    elif now.hour < 4:
-        return (now.date() - timedelta(days=1)).isoformat()
-    else:
-        return (now.date() - timedelta(days=1)).isoformat()
+    # The most recent completed session always ended at 4:00am today.
+    # Its start date is yesterday, regardless of current time.
+    return (now.date() - timedelta(days=1)).isoformat()
 
 def load_realized_trades() -> list:
+    """Load trades from the most recent completed trading session."""
     try:
-        rows = supabase.table("realized_trades").select("*").order("id", desc=True).limit(500).execute()
+        rows = supabase.table("realized_trades") \
+                   .select("*") \
+                   .order("id", desc=True) \
+                   .limit(500) \
+                   .execute()
         target_session = get_last_completed_session()
         result = []
         for r in rows.data:
@@ -244,8 +248,9 @@ def load_realized_trades() -> list:
                     "P&L ($)": r["pl_display"], "P&L (%)": r["pl_pct"], "Time (SGT)": r["time_sgt"],
                     "Reason": r["reason"], "_pl_usd": float(r["pl_usd"]),
                 })
-        return result
-    except Exception:
+        return result   # No fallback – empty list if no trades in that session
+    except Exception as e:
+        print(f"Error loading trades: {e}")
         return []
 
 def load_all_trades() -> list:
