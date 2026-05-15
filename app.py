@@ -1,7 +1,8 @@
 """
 Dynamic Dashboard – Works with any strategy defined in Supabase 'strategies' table
-- Removed Backtesting tab
-- Portfolio Backtest dynamically reads strategies from Supabase
+- Toggle between Last Completed Session and Current Session for trades
+- Portfolio Backtest: select strategy from dropdown
+- Manual override, liquidation, daily P&L charts, signal scanner
 """
 
 import streamlit as st
@@ -189,6 +190,8 @@ if "signal_results" not in st.session_state: st.session_state.signal_results = N
 if "live_signal_time" not in st.session_state: st.session_state.live_signal_time = None
 if "realized_trades" not in st.session_state: st.session_state.realized_trades = []
 if "forced_strategy" not in st.session_state: st.session_state.forced_strategy = "AUTO"
+if "trade_display_mode" not in st.session_state:
+    st.session_state.trade_display_mode = "Last Completed"
 
 # Override & liquidation session states
 if "override_step" not in st.session_state: st.session_state.override_step = "idle"
@@ -220,24 +223,29 @@ def get_trading_session_start(date_str: str, time_str: str) -> str:
         return dt.date().isoformat()
 
 def get_last_completed_session() -> str:
-    """Return the most recent COMPLETED trading session start date.
-    - During active session (9:30pm – 4:00am SGT), return the session that ended this morning (yesterday's start).
-    - During off-hours (4:00am – 9:30pm), return the session that ended this morning (yesterday's start).
-    """
-    now = datetime.now(SGT)
-    # The most recent completed session always ended at 4:00am today.
-    # Its start date is yesterday, regardless of current time.
-    return (now.date() - timedelta(days=1)).isoformat()
+    """Return the most recent COMPLETED trading session start date (always yesterday)."""
+    return (datetime.now(SGT).date() - timedelta(days=1)).isoformat()
 
-def load_realized_trades() -> list:
-    """Load trades from the most recent completed trading session."""
+def get_current_session_start() -> str:
+    """Return the start date of the current ongoing trading session (9:30pm SGT → 4:00am SGT next day)."""
+    now = datetime.now(SGT)
+    if now.hour >= 21 and now.minute >= 30:
+        return now.date().isoformat()
+    elif now.hour < 4:
+        return (now.date() - timedelta(days=1)).isoformat()
+    else:
+        # Off-hours (4am–9:30pm): no current session, return today as fallback
+        return now.date().isoformat()
+
+def load_realized_trades(session_date: str = None) -> list:
+    """Load trades for a specific trading session date. If None, use last completed session."""
     try:
         rows = supabase.table("realized_trades") \
                    .select("*") \
                    .order("id", desc=True) \
                    .limit(500) \
                    .execute()
-        target_session = get_last_completed_session()
+        target_session = session_date if session_date else get_last_completed_session()
         result = []
         for r in rows.data:
             trade_session = get_trading_session_start(r["date"], r["time_sgt"])
@@ -248,9 +256,8 @@ def load_realized_trades() -> list:
                     "P&L ($)": r["pl_display"], "P&L (%)": r["pl_pct"], "Time (SGT)": r["time_sgt"],
                     "Reason": r["reason"], "_pl_usd": float(r["pl_usd"]),
                 })
-        return result   # No fallback – empty list if no trades in that session
-    except Exception as e:
-        print(f"Error loading trades: {e}")
+        return result
+    except Exception:
         return []
 
 def load_all_trades() -> list:
@@ -685,17 +692,26 @@ progress_pct = min(max(realized / TARGET_PROFIT, 0.0), 1.0) if realized > 0 else
 combined = round(unrealized + realized, 2)
 
 # ─────────────────────────────────────────────
-# AUTO-REFRESH TRADES (every 60 seconds)
+# AUTO-REFRESH TRADES (every 60 seconds) & INITIAL LOAD
 # ─────────────────────────────────────────────
 if "last_trade_refresh" not in st.session_state:
     st.session_state.last_trade_refresh = datetime.now(SGT)
 
-if (datetime.now(SGT) - st.session_state.last_trade_refresh).seconds >= 60:
+# Initial load based on current mode
+if st.session_state.trade_display_mode == "Last Completed":
     st.session_state.realized_trades = load_realized_trades()
+else:
+    current_session = get_current_session_start()
+    st.session_state.realized_trades = load_realized_trades(current_session)
+
+# Auto-refresh every 60 seconds
+if (datetime.now(SGT) - st.session_state.last_trade_refresh).seconds >= 60:
+    if st.session_state.trade_display_mode == "Last Completed":
+        st.session_state.realized_trades = load_realized_trades()
+    else:
+        st.session_state.realized_trades = load_realized_trades(get_current_session_start())
     st.session_state.last_trade_refresh = datetime.now(SGT)
     st.rerun()
-
-st.session_state.realized_trades = load_realized_trades()
 
 # ─────────────────────────────────────────────
 # SIDEBAR
@@ -860,7 +876,6 @@ elif st.session_state.override_step == "authorized" and st.session_state.overrid
     st.success("✅ Access granted – you can change the strategy")
     cur_title, _ = get_current_strategy_display()
     st.info(f"Current strategy: {cur_title}")
-    # Generate buttons for all strategies + AUTO
     strategy_options = [{"name": "AUTO", "display_name": "🤖 AUTO"}] + st.session_state.strategies
     cols = st.columns(min(len(strategy_options), 4))
     for idx, strat in enumerate(strategy_options):
@@ -929,7 +944,7 @@ if st.session_state.pending_strategy is not None:
 
 st.markdown("---")
 
-# TABS (Backtesting removed)
+# TABS
 tab_live, tab_signals, tab_portfolio = st.tabs(["Live Trading", "Signal Scanner", "Portfolio Backtest"])
 
 # ─────────────────────────────────────────────
@@ -968,22 +983,49 @@ with tab_live:
     else:
         st.success("✅ Account is 100% Cash.")
 
+    # Today's Completed Trades with toggle
     with st.expander("📊 Today's Completed Trades", expanded=True):
-        col_refresh, _ = st.columns([4, 1])
+        col_refresh, col_toggle = st.columns([3, 1])
+        with col_toggle:
+            mode = st.radio(
+                "Show trades from:",
+                ["Last Completed", "Current Session"],
+                index=0 if st.session_state.trade_display_mode == "Last Completed" else 1,
+                horizontal=True,
+                key="trade_mode_radio",
+                label_visibility="collapsed"
+            )
+            if mode != st.session_state.trade_display_mode:
+                st.session_state.trade_display_mode = mode
+                if mode == "Last Completed":
+                    st.session_state.realized_trades = load_realized_trades()
+                else:
+                    st.session_state.realized_trades = load_realized_trades(get_current_session_start())
+                st.rerun()
+
         with col_refresh:
             if st.button("🔄 Refresh Trades", use_container_width=True):
-                st.session_state.realized_trades = load_realized_trades()
+                if st.session_state.trade_display_mode == "Last Completed":
+                    st.session_state.realized_trades = load_realized_trades()
+                else:
+                    st.session_state.realized_trades = load_realized_trades(get_current_session_start())
                 st.rerun()
-        current_display_session = get_last_completed_session()
-        st.caption(f"📅 Showing trades from trading session: **{current_display_session}** (9:30 PM SGT → 4:00 AM SGT)")
+
+        if st.session_state.trade_display_mode == "Last Completed":
+            display_session = get_last_completed_session()
+            session_label = f"**{display_session}** (completed session)"
+        else:
+            display_session = get_current_session_start()
+            session_label = f"**{display_session}** (ongoing session – updates in real time)"
+
+        st.caption(f"📅 Showing trades from trading session: {session_label} (9:30 PM SGT → 4:00 AM SGT)")
+
         trades = st.session_state.realized_trades
         if trades:
-            # Group by strategy name (dynamic)
             strategy_names = list(set(t.get("Strategy", "Unknown") for t in trades if isinstance(t, dict)))
             for strat_name in strategy_names:
                 strat_trades = [t for t in trades if isinstance(t, dict) and str(t.get("Strategy", "")).upper() == strat_name.upper()]
                 if strat_trades:
-                    # Find display name from strategies table
                     strat_display = strat_name
                     for s in st.session_state.strategies:
                         if s["name"].upper() == strat_name.upper():
@@ -997,6 +1039,7 @@ with tab_live:
         else:
             st.info("No completed trades in this session yet.")
 
+    # Daily P&L Bar Chart
     st.markdown("### 📊 Daily P&L by Trading Session")
     daily_df = compute_daily_pnl_overview()
     if not daily_df.empty:
@@ -1008,7 +1051,6 @@ with tab_live:
             marker_color=["#26a65b" if x >= 0 else "#e74c3c" for x in daily_df["Total"]],
             text=[f"${x:+.2f}" for x in daily_df["Total"]], textposition="outside",
         ))
-        # Dynamically add strategy traces
         for col in daily_df.columns:
             if col not in ["Trading Session Date", "Total"]:
                 fig.add_trace(go.Bar(
@@ -1233,7 +1275,6 @@ with tab_portfolio:
     selected_strategy_idx = st.selectbox("Select Strategy for Backtest", range(len(strategy_names)), format_func=lambda i: strategy_names[i])
     selected_strategy = strategy_options[selected_strategy_idx]
 
-    # Display the buy trend (from STOCK_PROFILES default or from strategy table? We'll keep simple default)
     st.caption(f"Using buy trend signal: +0.6% above 20-bar average (default).")
 
     pcfg1, pcfg2, pcfg3, pcfg4 = st.columns(4)
@@ -1396,7 +1437,7 @@ with tab_portfolio:
         st.info("👆 Configure settings above and click **Run Portfolio Backtest**.")
 
 # ─────────────────────────────────────────────
-# AUTO-REFRESH
+# AUTO-REFRESH (dashboard only)
 # ─────────────────────────────────────────────
 time.sleep(SCAN_INTERVAL)
 st.rerun()
