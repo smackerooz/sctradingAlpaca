@@ -250,7 +250,7 @@ def get_trading_session_date(dt: datetime = None) -> str:
         return dt.date().isoformat()
 
 def load_realized_trades() -> list:
-    """Load trades from the current trading session (9:30pm SGT → 4:00am SGT)."""
+    """Load trades from the most recent completed trading session (9:30pm SGT → 4:00am SGT)."""
     try:
         rows = supabase.table("realized_trades") \
                    .select("*") \
@@ -258,26 +258,10 @@ def load_realized_trades() -> list:
                    .limit(500) \
                    .execute()
         result = []
-        current_session = get_trading_session_date()
+        current_session = get_trading_session_date()  # Now returns the last COMPLETED session
         for r in rows.data:
             trade_session = get_trading_session_date_from_string(r["date"], r["time_sgt"])
             if trade_session == current_session:
-                result.append({
-                    "date": r["date"],
-                    "Symbol": r["symbol"],
-                    "Strategy": r.get("strategy", "Unknown"),
-                    "Buy Price": r["buy_price"],
-                    "Sell Price": r["sell_price"],
-                    "Qty": r["qty"],
-                    "P&L ($)": r["pl_display"],
-                    "P&L (%)": r["pl_pct"],
-                    "Time (SGT)": r["time_sgt"],
-                    "Reason": r["reason"],
-                    "_pl_usd": float(r["pl_usd"]),
-                })
-        # Fallback: if no trades for current session, show all recent
-        if not result:
-            for r in rows.data:
                 result.append({
                     "date": r["date"],
                     "Symbol": r["symbol"],
