@@ -306,38 +306,29 @@ def load_all_trades() -> list:
         return []
 
 def compute_daily_pnl_overview() -> pd.DataFrame:
-    """Returns a DataFrame with one row per trading session (9:30pm SGT → 4:00am SGT next day).
-    Each row represents a session, labelled by the session start date (e.g., '2026-05-14').
-    """
+    """Returns a DataFrame with one row per trading session (9:30pm SGT → 4:00am SGT next day)."""
     all_trades = load_all_trades()
     if not all_trades:
         return pd.DataFrame()
     
-    session_data = {}  # key = session_start_date (string), value = {"ORB-R": pl, "VWAP": pl, "Total": pl}
+    # ─────────────────────────────────────────────
+    # DEBUG: Print each trade's assigned session
+    # Remove this after confirming it works
+    # ─────────────────────────────────────────────
+    for trade in all_trades:
+        session_start = get_trading_session_date_from_string(trade["date"], trade["Time (SGT)"])
+        print(f"Trade: {trade['date']} {trade['Time (SGT)']} → Session start: {session_start}, P&L: {trade['_pl_usd']}, Strategy: {trade.get('Strategy')}")
+    
+    session_data = {}  # key = session_start_date (string)
     
     for trade in all_trades:
-        trade_date = trade["date"]          # e.g., "2026-05-14" (calendar date)
-        trade_time = trade["Time (SGT)"]    # e.g., "23:45:12" or "02:15:30"
+        trade_date = trade["date"]
+        trade_time = trade["Time (SGT)"]
         pl = trade["_pl_usd"]
         strategy = trade.get("Strategy", "Unknown")
         
-        # Convert trade date and time to a datetime object
-        from datetime import datetime as dt
-        dt_str = f"{trade_date} {trade_time}"
-        dt_obj = dt.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-        dt_obj = SGT.localize(dt_obj)
-        
-        # Determine the session start date
-        # Session runs from 9:30pm to 4:00am next day
-        if dt_obj.hour >= 21 and dt_obj.minute >= 30:
-            # Trade between 9:30pm and midnight -> session start is today
-            session_start = dt_obj.date().isoformat()
-        elif dt_obj.hour < 4:
-            # Trade between midnight and 4:00am -> session start is yesterday
-            session_start = (dt_obj.date() - timedelta(days=1)).isoformat()
-        else:
-            # Should not happen during market hours, but fallback
-            session_start = dt_obj.date().isoformat()
+        # Get session start date
+        session_start = get_trading_session_date_from_string(trade_date, trade_time)
         
         # Initialize session if not exists
         if session_start not in session_data:
@@ -348,9 +339,6 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
             session_data[session_start]["ORB-R"] += pl
         elif strategy == "VWAP":
             session_data[session_start]["VWAP"] += pl
-        else:
-            # Unknown strategy, add to both? Just add to total only
-            pass
         
         session_data[session_start]["Total"] += pl
     
@@ -368,9 +356,9 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
         })
     
     df = pd.DataFrame(rows)
-    # Sort by date ascending (oldest first)
     df = df.sort_values("Trading Session Date", ascending=True)
     return df
+    
 def get_current_strategy_display():
     forced = st.session_state.get("forced_strategy", "AUTO")
     if forced == "ORB-R":
