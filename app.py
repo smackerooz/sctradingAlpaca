@@ -1016,20 +1016,20 @@ with tab_live:
         st.caption(f"📅 Trading session: {session_date} (9:30 PM SGT → 4:00 AM SGT)")
         trades = st.session_state.realized_trades
         if trades:
-            # Safe filtering: ensure each trade is a dictionary
-            orb_trades = [t for t in trades if isinstance(t, dict) and t.get("Strategy", "").upper() == "ORB-R"]
-            vwap_trades = [t for t in trades if isinstance(t, dict) and t.get("Strategy", "").upper() == "VWAP"]
+            # Safe filtering with str() to handle None values
+            orb_trades = [t for t in trades if isinstance(t, dict) and str(t.get("Strategy", "")).upper() == "ORB-R"]
+            vwap_trades = [t for t in trades if isinstance(t, dict) and str(t.get("Strategy", "")).upper() == "VWAP"]
             if orb_trades:
                 st.markdown("**🚀 ORB‑R Trades**")
                 orb_df = pd.DataFrame(orb_trades)[["Symbol", "Buy Price", "Sell Price", "Qty", "P&L ($)", "P&L (%)", "Time (SGT)", "Reason"]]
                 st.dataframe(orb_df, use_container_width=True, hide_index=True)
-                total_orb = sum(t["_pl_usd"] for t in orb_trades if "_pl_usd" in t)
+                total_orb = sum(t.get("_pl_usd", 0) for t in orb_trades)
                 st.write(f"**Total ORB‑R P&L: ${total_orb:+.2f}**")
             if vwap_trades:
                 st.markdown("**📊 VWAP Trades**")
                 vwap_df = pd.DataFrame(vwap_trades)[["Symbol", "Buy Price", "Sell Price", "Qty", "P&L ($)", "P&L (%)", "Time (SGT)", "Reason"]]
                 st.dataframe(vwap_df, use_container_width=True, hide_index=True)
-                total_vwap = sum(t["_pl_usd"] for t in vwap_trades if "_pl_usd" in t)
+                total_vwap = sum(t.get("_pl_usd", 0) for t in vwap_trades)
                 st.write(f"**Total VWAP P&L: ${total_vwap:+.2f}**")
             if not orb_trades and not vwap_trades:
                 st.info("No completed trades in this session yet.")
