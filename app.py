@@ -214,10 +214,25 @@ def get_trading_session_date(dt: datetime = None) -> str:
 def get_trading_session_date_from_string(date_str: str, time_str: str) -> str:
     """Return the trading session START DATE for a trade.
     Session: 9:30pm SGT → 4:00am SGT next day.
-    Trade at 00:42:43 on 2026-05-15 → returns '2026-05-14'
+    Trade at 00:42:43 on 15/5/2026 → returns '2026-05-14'
     """
     from datetime import datetime as dt
-    dt_obj = dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+    
+    # Handle date format: can be "2026-05-14" or "14/5/2026"
+    if "-" in date_str:
+        # Format: YYYY-MM-DD
+        dt_obj = dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+    elif "/" in date_str:
+        # Format: DD/MM/YYYY or D/M/YYYY
+        day, month, year = date_str.split("/")
+        # Ensure two digits for day and month (optional, but safe)
+        day = day.zfill(2)
+        month = month.zfill(2)
+        dt_obj = dt.strptime(f"{year}-{month}-{day} {time_str}", "%Y-%m-%d %H:%M:%S")
+    else:
+        # Fallback
+        dt_obj = dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+    
     dt_obj = SGT.localize(dt_obj)
     
     # Trading session runs from 9:30pm to 4:00am next day
@@ -230,7 +245,6 @@ def get_trading_session_date_from_string(date_str: str, time_str: str) -> str:
     else:
         # Should not happen during market hours, but fallback
         return dt_obj.date().isoformat()
-
 def load_realized_trades() -> list:
     """Load trades from the current trading session (9:30pm SGT → 4:00am SGT)."""
     try:
