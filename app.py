@@ -212,24 +212,33 @@ def get_trading_session_date(dt: datetime = None) -> str:
         return dt.date().isoformat()
 
 def get_trading_session_date_from_string(date_str: str, time_str: str) -> str:
+    """Return the trading session START DATE for a trade (e.g., '2026-05-13' for a trade at 2am on May 14)."""
     from datetime import datetime as dt
     dt_obj = dt.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
     dt_obj = SGT.localize(dt_obj)
-    return get_trading_session_date(dt_obj)
+    # Trading session runs from 9:30pm to 4:00am next day
+    # If time is between 9:30pm and midnight, session date is today
+    # If time is between midnight and 4:00am, session date is yesterday
+    if dt_obj.hour >= 21 and dt_obj.minute >= 30:
+        return dt_obj.date().isoformat()
+    elif dt_obj.hour < 4:
+        return (dt_obj.date() - timedelta(days=1)).isoformat()
+    else:
+        # Should not happen for trades (market hours), but fallback
+        return dt_obj.date().isoformat()
 
 def load_realized_trades() -> list:
     """Load trades from the current trading session (9:30pm SGT → 4:00am SGT)."""
     try:
-        # Load trades from the last 7 days (covers any session)
+        # Load trades from the last 7 days
         rows = supabase.table("realized_trades") \
                    .select("*") \
                    .order("id", desc=True) \
                    .limit(500) \
                    .execute()
         result = []
-        current_session = get_trading_session_date()
+        current_session = get_trading_session_date()  # uses datetime.now()
         for r in rows.data:
-            # Compute the trading session date for this trade
             trade_session = get_trading_session_date_from_string(r["date"], r["time_sgt"])
             if trade_session == current_session:
                 result.append({
@@ -245,7 +254,7 @@ def load_realized_trades() -> list:
                     "Reason": r["reason"],
                     "_pl_usd": float(r["pl_usd"]),
                 })
-        # If no trades found for current session, fallback to all recent trades (for debugging)
+        # Fallback: if no trades for current session, show all recent
         if not result:
             for r in rows.data:
                 result.append({
@@ -265,7 +274,7 @@ def load_realized_trades() -> list:
     except Exception as e:
         print(f"Error loading trades: {e}")
         return []
-
+        
 def load_all_trades() -> list:
     """Load all realized trades (no date filter)."""
     try:
@@ -293,25 +302,32 @@ def load_all_trades() -> list:
         return []
 
 def compute_daily_pnl_overview() -> pd.DataFrame:
+    """Returns a DataFrame with columns: Trading Session Date, Total PnL, ORB-PnL, VWAP-PnL.
+    Each row represents ONE trading session (9:30pm SGT → 4:00am SGT next day).
+    """
     all_trades = load_all_trades()
     if not all_trades:
         return pd.DataFrame()
+    
     sessions = []
     for trade in all_trades:
-        # Compute the trading session start date for this trade
+        # Get the session START DATE for this trade
         session_date = get_trading_session_date_from_string(trade["date"], trade["Time (SGT)"])
         sessions.append({
-            "session": session_date,          # e.g., "2026-05-13" for a trade at 2am on May 14
+            "session": session_date,
             "pl": trade["_pl_usd"],
             "strategy": trade.get("Strategy", "Unknown"),
         })
+    
     df = pd.DataFrame(sessions)
     if df.empty:
         return pd.DataFrame()
-    # Group by session date (which is already the start date)
+    
+    # Group by session date and strategy, then pivot
     pivot = df.groupby(["session", "strategy"])["pl"].sum().unstack(fill_value=0)
     pivot["Total"] = pivot.sum(axis=1)
-    pivot = pivot.sort_index(ascending=False)   # newest first (optional)
+    # Sort by date ascending (oldest first for cumulative chart)
+    pivot = pivot.sort_index(ascending=True)
     pivot = pivot.reset_index().rename(columns={"session": "Trading Session Date"})
     return pivot
 
