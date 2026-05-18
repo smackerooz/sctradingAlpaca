@@ -116,12 +116,27 @@ latest_prices: dict = {}  # {symbol: price}
 prices_lock = threading.Lock()
 websocket_connected = False
 
+# Add these two variables near the top of your WebSocket section (outside the function)
+trade_counter = 0
+last_log_time = 0
+
 def on_websocket_message(ws, message):
     """Handle incoming real-time trade data from Finnhub."""
-    global latest_prices
+    global latest_prices, trade_counter, last_log_time
     try:
         data = json.loads(message)
         if data.get("type") == "trade":
+            # Count trades
+            trade_counter += len(data.get("data", []))
+            
+            # Log trade rate every 10 seconds
+            now = time.time()
+            if now - last_log_time > 10:
+                log.info(f"📊 WebSocket received {trade_counter} trades in last 10 seconds")
+                trade_counter = 0
+                last_log_time = now
+            
+            # Update latest prices
             for trade in data.get("data", []):
                 symbol = trade.get("s")
                 price = trade.get("p")
