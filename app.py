@@ -873,18 +873,33 @@ except Exception:
 # Check Finnhub connection status (if bot is running)
 # ─────────────────────────────────────────────
 try:
-    # Read from bot_logs for latest WebSocket status
-    ws_status = supabase.table("bot_logs").select("message, created_at").like("message", "%WebSocket%").order("created_at", desc=True).limit(1).execute()
+    # Look for ANY WebSocket connection log in the last 5 minutes
+    five_min_ago = (datetime.now(SGT) - timedelta(minutes=5)).isoformat()
+    ws_status = supabase.table("bot_logs") \
+        .select("message, created_at") \
+        .like("message", "%WebSocket%") \
+        .gte("created_at", five_min_ago) \
+        .order("created_at", desc=True) \
+        .limit(5) \
+        .execute()
+    
     if ws_status.data:
-        last_status = ws_status.data[0]["message"]
-        if "connected" in last_status.lower():
+        # Check if any recent message indicates connection
+        connected = any("connected" in msg["message"].lower() for msg in ws_status.data)
+        if connected:
             st.success("🔌 Finnhub WebSocket: CONNECTED", icon="✅")
-        elif "disconnected" in last_status.lower():
-            st.warning("🔌 Finnhub WebSocket: DISCONNECTED (reconnecting)", icon="⚠️")
         else:
-            st.info("🔌 Finnhub WebSocket: UNKNOWN", icon="❓")
+            st.warning("🔌 Finnhub WebSocket: DISCONNECTED (market closed?)", icon="⚠️")
     else:
-        st.info("🔌 Finnhub WebSocket: Waiting for connection...", icon="🔄")
+        # No recent logs – check if market is open
+        now_et = datetime.now(ET)
+        market_opens = now_et.replace(hour=9, minute=30, second=0)
+        market_closes = now_et.replace(hour=16, minute=0, second=0)
+        
+        if now_et >= market_opens and now_et <= market_closes:
+            st.warning("🔌 Finnhub WebSocket: Connecting...", icon="🔄")
+        else:
+            st.info("🔌 Finnhub WebSocket: Market closed (connects at 9:30 AM ET)", icon="⏸️")
 except Exception:
     st.info("🔌 Finnhub WebSocket: Status unavailable", icon="❓")
 
