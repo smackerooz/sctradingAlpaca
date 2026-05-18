@@ -1047,9 +1047,11 @@ with tab_live:
         fig.add_trace(go.Bar(
             x=daily_df["Trading Session Date"],
             y=daily_df["Total"],
-            name="Total P&L",
+            name="Total P&L (green = profit, red = loss)",
             marker_color=["#26a65b" if x >= 0 else "#e74c3c" for x in daily_df["Total"]],
-            text=[f"${x:+.2f}" for x in daily_df["Total"]], textposition="outside",
+            text=[f"${x:+.2f}" for x in daily_df["Total"]],
+            textposition="outside",
+            showlegend=True,
         ))
         for col in daily_df.columns:
             if col not in ["Trading Session Date", "Total"]:
