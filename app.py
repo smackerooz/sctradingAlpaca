@@ -290,19 +290,29 @@ def load_all_trades() -> list:
         return []
 
 def compute_daily_pnl_overview() -> pd.DataFrame:
+    st.write("🔍 DEBUG: Starting compute_daily_pnl_overview()")
     all_trades = load_all_trades()
+    st.write(f"🔍 DEBUG: load_all_trades returned {len(all_trades)} trades")
     if not all_trades:
+        st.warning("No trades found in load_all_trades()")
         return pd.DataFrame()
+    
     session_data = {}
     for trade in all_trades:
-        session_start = get_trading_session_start(trade["date"], trade["Time (SGT)"])
-        pl = trade["_pl_usd"]
-        strategy = trade.get("Strategy", "Unknown")
-        if session_start not in session_data:
-            session_data[session_start] = {}
-        if strategy not in session_data[session_start]:
-            session_data[session_start][strategy] = 0.0
-        session_data[session_start][strategy] += pl
+        try:
+            session_start = get_trading_session_start(trade["date"], trade["Time (SGT)"])
+            pl = trade["_pl_usd"]
+            strategy = trade.get("Strategy", "Unknown")
+            st.write(f"🔍 DEBUG: trade {trade['Symbol']} {trade['date']} {trade['Time (SGT)']} -> session {session_start}, pl {pl}, strategy {strategy}")
+            if session_start not in session_data:
+                session_data[session_start] = {}
+            if strategy not in session_data[session_start]:
+                session_data[session_start][strategy] = 0.0
+            session_data[session_start][strategy] += pl
+        except Exception as e:
+            st.error(f"Error processing trade: {trade}, error: {e}")
+    
+    st.write(f"🔍 DEBUG: session_data keys: {list(session_data.keys())}")
     rows = []
     for session_start, strategies in session_data.items():
         row = {"Trading Session Date": session_start}
@@ -313,9 +323,11 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
         row["Total"] = round(total, 2)
         rows.append(row)
     df = pd.DataFrame(rows)
+    st.write(f"🔍 DEBUG: final df shape: {df.shape}")
     if not df.empty:
         df = df.sort_values("Trading Session Date", ascending=True)
     return df
+    
 
 def get_current_strategy_display():
     forced = st.session_state.forced_strategy
