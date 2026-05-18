@@ -869,6 +869,25 @@ try:
 except Exception:
     st.info("👁️ DASHBOARD MODE — Bot is running autonomously on Railway.", icon="🤖")
 
+# ─────────────────────────────────────────────
+# Check Finnhub connection status (if bot is running)
+# ─────────────────────────────────────────────
+try:
+    # Read from bot_logs for latest WebSocket status
+    ws_status = supabase.table("bot_logs").select("message, created_at").like("message", "%WebSocket%").order("created_at", desc=True).limit(1).execute()
+    if ws_status.data:
+        last_status = ws_status.data[0]["message"]
+        if "connected" in last_status.lower():
+            st.success("🔌 Finnhub WebSocket: CONNECTED", icon="✅")
+        elif "disconnected" in last_status.lower():
+            st.warning("🔌 Finnhub WebSocket: DISCONNECTED (reconnecting)", icon="⚠️")
+        else:
+            st.info("🔌 Finnhub WebSocket: UNKNOWN", icon="❓")
+    else:
+        st.info("🔌 Finnhub WebSocket: Waiting for connection...", icon="🔄")
+except Exception:
+    st.info("🔌 Finnhub WebSocket: Status unavailable", icon="❓")
+
 st.markdown("---")
 strategy_title, strategy_desc = get_current_strategy_display()
 st.markdown(f"📌 **Current Strategy:** {strategy_title}")
