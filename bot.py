@@ -1065,7 +1065,16 @@ def run_strategy():
                 sb_log(f"EOW error {p.symbol}: {e}")
         return
     
+    # Monitor existing positions (stop/target)
     monitor_positions(held)
+    
+    # ─────────────────────────────────────────────
+    # CHECK FOR TOUCH & TURN LIMIT ORDER FILLS
+    # ─────────────────────────────────────────────
+    filled_cost = check_touch_and_turn_fills(cash, held)
+    if filled_cost > 0:
+        cash -= filled_cost
+        sb_log(f"Touch & Turn fills deducted: ${filled_cost:.2f}, remaining cash: ${cash:.2f}")
     
     if cash <= CASH_BUFFER:
         log.info(f"Cash ${cash:.2f} below buffer")
