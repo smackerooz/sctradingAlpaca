@@ -1064,81 +1064,20 @@ with tab_live:
         else:
             st.info("No completed trades in this session yet.")
 
-    # Daily P&L Bar Chart (by trading session)
-    st.markdown("### 📊 Daily P&L by Trading Session")
-    daily_df = compute_daily_pnl_overview()
-    if not daily_df.empty:
-        fig = go.Figure()
-
-        # Dummy trace for legend (sets legend color to green)
-        fig.add_trace(go.Bar(
-            x=[None], y=[None],
-            name="Total P&L (green = profit, red = loss)",
-            marker_color="#26a65b",
-            showlegend=True,
-            legendgroup="total",
-        ))
-
-        # Actual Total bars with dynamic colors
-        fig.add_trace(go.Bar(
-            x=daily_df["Trading Session Date"],
-            y=daily_df["Total"],
-            marker_color=["#26a65b" if x >= 0 else "#e74c3c" for x in daily_df["Total"]],
-            text=[f"${x:+.2f}" for x in daily_df["Total"]],
-            textposition="outside",
-            showlegend=False,
-            legendgroup="total",
-        ))
-
-        # Strategy columns (only those in strategies table)
-        valid_strategies = [s["name"] for s in st.session_state.strategies]
-        for col in daily_df.columns:
-            if col not in ["Trading Session Date", "Total"] and col in valid_strategies:
-                fig.add_trace(go.Bar(
-                    x=daily_df["Trading Session Date"],
-                    y=daily_df[col],
-                    name=col,
-                    opacity=0.7,
-                ))
-
-        fig.update_layout(
-            barmode="group",
-            height=400,
-            template="plotly_dark",
-            xaxis_title="Trading Session (start evening SGT)",
-            yaxis_title="P&L (USD)",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            margin=dict(l=0, r=0, t=30, b=0),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Cumulative chart
-        daily_sorted = daily_df.sort_values("Trading Session Date", ascending=True)
-        daily_sorted["Cumulative Total"] = daily_sorted["Total"].cumsum()
-        fig_cum = go.Figure()
-        fig_cum.add_trace(go.Scatter(
-            x=daily_sorted["Trading Session Date"],
-            y=daily_sorted["Cumulative Total"],
-            mode="lines+markers",
-            name="Cumulative P&L",
-            line=dict(color="#f39c12", width=3),
-            marker=dict(size=8, color="#e67e22"),
-            fill="tozeroy",
-            fillcolor="rgba(243,156,18,0.1)",
-            text=[f"${x:+.2f}" for x in daily_sorted["Cumulative Total"]],
-            textposition="top center",
-        ))
-        fig_cum.update_layout(
-            height=300,
-            template="plotly_dark",
-            xaxis_title="Trading Session (start evening SGT)",
-            yaxis_title="Cumulative P&L (USD)",
-            margin=dict(l=0, r=0, t=30, b=0),
-            hovermode="x unified",
-        )
-        st.plotly_chart(fig_cum, use_container_width=True)
-    else:
-        st.info("No trade data available yet for daily P&L chart.")
+st.markdown("### 📊 Daily P&L by Trading Session")
+daily_df = compute_daily_pnl_overview()
+if not daily_df.empty:
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=daily_df["Trading Session Date"],
+        y=daily_df["Total"],
+        name="Total P&L",
+        marker_color=["#26a65b" if x >= 0 else "#e74c3c" for x in daily_df["Total"]],
+    ))
+    fig.update_layout(height=400, template="plotly_dark")
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("No data")
 
     with st.expander("📋 Open Positions (Unrealized)", expanded=False):
         try:
