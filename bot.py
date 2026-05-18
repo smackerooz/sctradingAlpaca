@@ -958,7 +958,7 @@ STRATEGIES = {
     "TOUCH_TURN": {
         "name": "TOUCH_TURN",
         "time_window_start": (9, 30),   # 9:30 AM ET = 9:30 PM SGT
-        "time_window_end": (10, 0),     # 10:30 AM ET = 10:30 PM SGT
+        "time_window_end": (10, 30),     # 10:30 AM ET = 10:30 PM SGT
         "entry_func": run_touch_and_turn_strategy,
         "state_flag": "turn_traded_today",
     },
