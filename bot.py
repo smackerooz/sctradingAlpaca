@@ -714,6 +714,230 @@ def run_mom_strategy(cash: float, held: dict) -> float:
     
     return total_cost
     
+# ─────────────────────────────────────────────
+# TOUCH AND TURN STRATEGY
+# ─────────────────────────────────────────────
+TURN_REWARD_RISK = 2.0
+FIB_LEVEL = 0.382  # 38.2%
+
+def calculate_atr(symbol: str, period: int = 14) -> float:
+    """Calculate 14-day ATR from daily bars."""
+    try:
+        # Fetch daily bars
+        end = datetime.now(pytz.utc)
+        start = end - timedelta(days=30)
+        req = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame.Day,
+            start=start,
+            end=end,
+            feed="iex",
+        )
+        bars = data_client.get_stock_bars(req).df
+        if bars.empty or len(bars) < period:
+            return 0.0
+        
+        if isinstance(bars.index, pd.MultiIndex):
+            bars = bars.xs(symbol, level="symbol")
+        
+        # Calculate True Range
+        bars["prev_close"] = bars["close"].shift(1)
+        bars["tr"] = bars[["high", "low", "prev_close"]].apply(
+            lambda x: max(x["high"] - x["low"], 
+                          abs(x["high"] - x["prev_close"]), 
+                          abs(x["low"] - x["prev_close"])), axis=1
+        )
+        atr = bars["tr"].rolling(period).mean().iloc[-1]
+        return round(float(atr), 4) if not pd.isna(atr) else 0.0
+    except Exception as e:
+        log.warning(f"ATR calculation error {symbol}: {e}")
+        return 0.0
+
+def get_opening_candle(symbol: str) -> tuple:
+    """Get the first 15-minute candle of the trading day (9:30–9:45 ET)."""
+    try:
+        df = get_bars(symbol, timeframe_minutes=15, days_back=1)
+        if df.empty or len(df) < 1:
+            return None, None, None, None, None
+        
+        today_et = datetime.now(ET).date()
+        today_bars = df[df.index.date == today_et]
+        if today_bars.empty:
+            return None, None, None, None, None
+        
+        # First candle of the day (should be 9:30–9:45)
+        first_candle = today_bars.iloc[0]
+        open_price = float(first_candle["open"])
+        high = float(first_candle["high"])
+        low = float(first_candle["low"])
+        close = float(first_candle["close"])
+        
+        return open_price, high, low, close, first_candle
+    except Exception as e:
+        log.warning(f"Opening candle error {symbol}: {e}")
+        return None, None, None, None, None
+
+def check_touch_and_turn(symbol: str) -> tuple:
+    """
+    Check if the first 15-min candle is a manipulated red candle.
+    Returns (is_setup, entry_price, stop_price, target_price, limit_order_active)
+    """
+    try:
+        # Step 1: Get opening candle
+        open_price, high, low, close, candle = get_opening_candle(symbol)
+        if open_price is None:
+            return False, 0, 0, 0, False
+        
+        # Step 2: Must be a red candle (close < open)
+        if close >= open_price:
+            return False, 0, 0, 0, False
+        
+        # Step 3: Calculate 14-day ATR and check volatility
+        atr = calculate_atr(symbol, period=14)
+        candle_range = high - low
+        min_range = atr * 0.25  # 25% of ATR
+        
+        if candle_range < min_range or atr == 0:
+            return False, 0, 0, 0, False
+        
+        # Step 4: Calculate Fibonacci levels
+        fib_distance = (high - low) * FIB_LEVEL
+        target_price = round(high - fib_distance, 4)  # 38.2% retracement from high
+        entry_price = round(low, 4)  # Limit order at the low
+        
+        # Step 5: Stop loss is half of target distance
+        target_distance = target_price - entry_price
+        stop_distance = target_distance / 2
+        stop_price = round(entry_price - stop_distance, 4) if stop_distance > 0 else entry_price - 0.01
+        
+        # Ensure stop is at least $0.01 below entry
+        if entry_price - stop_price < 0.01:
+            stop_price = entry_price - 0.01
+        
+        # Recalculate risk and target if stop was adjusted
+        risk = entry_price - stop_price
+        if risk <= 0:
+            return False, 0, 0, 0, False
+        
+        target_price = round(entry_price + (TURN_REWARD_RISK * risk), 4)
+        
+        sb_log(f"🎯 Touch & Turn setup for {symbol}: Entry LIMIT ${entry_price}, Stop ${stop_price}, Target ${target_price}, ATR: {atr:.2f}")
+        return True, entry_price, stop_price, target_price, True
+    except Exception as e:
+        log.warning(f"Touch & Turn error {symbol}: {e}")
+        return False, 0, 0, 0, False
+
+def run_touch_and_turn_strategy(cash: float, held: dict) -> float:
+    """Touch and Turn strategy with limit order at the opening candle low."""
+    total_cost = 0.0
+    for symbol in WATCHLIST:
+        if symbol in held:
+            continue
+        
+        if symbol not in symbol_state:
+            symbol_state[symbol] = {
+                "strategy": None,
+                "in_trade": False,
+                "entry": 0.0,
+                "stop": 0.0,
+                "target": 0.0,
+                "qty": 0.0,
+                "turn_traded_today": False,
+                "limit_order_placed": False,
+            }
+        
+        s = symbol_state[symbol]
+        if s.get("turn_traded_today") or s.get("in_trade"):
+            continue
+        
+        # Check if we have a setup
+        is_setup, entry_price, stop_price, target_price, limit_order_active = check_touch_and_turn(symbol)
+        if not is_setup:
+            continue
+        
+        # Place limit order (not market order)
+        # Note: This uses a limit order at the entry price (low of opening candle)
+        # The order will only fill if price returns to that level
+        if not s.get("limit_order_placed"):
+            qty = MAX_TRADE_USD / entry_price
+            if qty <= 0:
+                continue
+            
+            actual_cost = round(qty * entry_price, 2)
+            if cash - actual_cost < CASH_BUFFER:
+                sb_log(f"SKIP {symbol} — would breach cash buffer")
+                continue
+            
+            try:
+                # Submit LIMIT order (not market)
+                from alpaca.trading.requests import LimitOrderRequest
+                trading_client.submit_order(LimitOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    limit_price=entry_price,
+                    time_in_force=TimeInForce.DAY,
+                ))
+                sb_log(f"🟢 TOUCH & TURN LIMIT ORDER placed for {qty:.4f} {symbol} @ ${entry_price:.2f} | Stop:${stop_price:.2f} | Target:${target_price:.2f}")
+                
+                # Mark that limit order is placed
+                s["limit_order_placed"] = True
+                s["pending_entry"] = entry_price
+                s["pending_stop"] = stop_price
+                s["pending_target"] = target_price
+                s["pending_qty"] = qty
+                s["pending_cost"] = actual_cost
+                
+                # We don't deduct cash yet – only when limit order fills
+                # For now, just track that order is open
+            except Exception as e:
+                sb_log(f"Limit order error {symbol}: {e}")
+                continue
+        
+        # Check if limit order has filled (we need to check positions)
+        # This will be handled in the main loop via position monitoring
+        # When the limit order fills, Alpaca will create a position
+    
+    return total_cost
+
+def check_touch_and_turn_fills(cash: float, held: dict) -> float:
+    """
+    Check if any pending limit orders have filled.
+    This should be called in the main loop after position check.
+    """
+    total_cost = 0.0
+    for symbol, s in symbol_state.items():
+        if s.get("limit_order_placed") and not s.get("in_trade"):
+            # Check if position now exists
+            try:
+                positions = trading_client.get_all_positions()
+                for p in positions:
+                    if p.symbol == symbol:
+                        # Limit order filled!
+                        entry_price = float(p.avg_entry_price)
+                        # The actual fill price may differ slightly from limit price
+                        # Use the pending values for stop/target
+                        stop_price = s.get("pending_stop", 0)
+                        target_price = s.get("pending_target", 0)
+                        qty = float(p.qty)
+                        
+                        s["in_trade"] = True
+                        s["strategy"] = "TOUCH_TURN"
+                        s["entry"] = entry_price
+                        s["stop"] = stop_price
+                        s["target"] = target_price
+                        s["qty"] = qty
+                        s["turn_traded_today"] = True
+                        
+                        actual_cost = qty * entry_price
+                        total_cost += actual_cost
+                        
+                        sb_log(f"✅ TOUCH & TURN limit order filled for {qty:.4f} {symbol} @ ${entry_price:.2f}")
+                        break
+            except Exception as e:
+                log.warning(f"Check fill error {symbol}: {e}")
+    
+    return total_cost
 
 # ─────────────────────────────────────────────
 # STRATEGY REGISTRY (ADD NEW STRATEGIES HERE)
@@ -731,6 +955,13 @@ def run_mom_strategy(cash: float, held: dict) -> float:
 #   3. (Optional) Add a row to Supabase 'strategies' table for dashboard display
 
 STRATEGIES = {
+    "TOUCH_TURN": {
+        "name": "TOUCH_TURN",
+        "time_window_start": (9, 30),   # 9:30 AM ET = 9:30 PM SGT
+        "time_window_end": (10, 0),     # 10:00 AM ET = 10:00 PM SGT
+        "entry_func": run_touch_and_turn_strategy,
+        "state_flag": "turn_traded_today",
+    },
     "MOM": {   # Put MOM first if you want it to run automatically in the morning
         "name": "MOM",
         "time_window_start": (9, 30),   # 9:30 AM ET = 9:30 PM SGT
