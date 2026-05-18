@@ -605,6 +605,108 @@ def run_vwap_strategy(cash: float, held: dict) -> float:
     return total_cost
 
 # ─────────────────────────────────────────────
+# MOM STRATEGY (Momentum Breakout)
+# ─────────────────────────────────────────────
+MOM_REWARD_RISK = 2.0
+MOM_LOOKBACK_MINUTES = 10
+MOM_VOLUME_MULTIPLIER = 1.5
+
+def check_mom_breakout(symbol: str) -> tuple:
+    """
+    Check for momentum breakout on 1-minute bars.
+    Returns (is_breakout, entry_price, stop_price, target_price)
+    """
+    try:
+        # Fetch 1-minute bars (last 30 minutes)
+        df = get_bars(symbol, timeframe_minutes=1, days_back=1)
+        if df.empty or len(df) < 15:
+            return False, 0, 0, 0
+        
+        # Get today's bars only
+        today_et = datetime.now(ET).date()
+        today_bars = df[df.index.date == today_et]
+        if today_bars.empty or len(today_bars) < 11:
+            return False, 0, 0, 0
+        
+        # Calculate highest high of last 10 minutes (excluding current)
+        lookback_high = today_bars["high"].iloc[-11:-1].max()
+        current_high = today_bars["high"].iloc[-1]
+        current_close = today_bars["close"].iloc[-1]
+        
+        # Calculate average volume of last 5 minutes
+        avg_volume = today_bars["volume"].iloc[-6:-1].mean()
+        current_volume = today_bars["volume"].iloc[-1]
+        
+        # Calculate RSI on close prices
+        rsi_series = calc_rsi(today_bars["close"], period=14)
+        rsi = rsi_series.iloc[-1] if not rsi_series.empty else 50
+        
+        # Breakout condition: price > lookback high, volume surge, RSI > 60
+        if current_high > lookback_high and current_volume > avg_volume * MOM_VOLUME_MULTIPLIER and rsi > 60:
+            entry_price = round(current_close, 4)
+            
+            # Stop loss based on stock volatility
+            if symbol in HIGH_VOL_STOCKS:
+                stop_pct = 0.012  # 1.2%
+            else:
+                stop_pct = 0.008   # 0.8%
+            
+            stop_price = round(entry_price * (1 - stop_pct), 4)
+            risk = entry_price - stop_price
+            target_price = round(entry_price + (MOM_REWARD_RISK * risk), 4)
+            
+            sb_log(f"🔥 MOM breakout detected for {symbol} at ${entry_price} (RSI: {rsi:.1f})")
+            return True, entry_price, stop_price, target_price
+        
+        return False, 0, 0, 0
+    except Exception as e:
+        log.warning(f"MOM check error {symbol}: {e}")
+        return False, 0, 0, 0
+
+def run_mom_strategy(cash: float, held: dict) -> float:
+    """Momentum breakout strategy entry logic."""
+    total_cost = 0.0
+    for symbol in WATCHLIST:
+        if symbol in held:
+            continue
+        
+        if symbol not in symbol_state:
+            symbol_state[symbol] = {
+                "strategy": None,
+                "in_trade": False,
+                "entry": 0.0,
+                "stop": 0.0,
+                "target": 0.0,
+                "qty": 0.0,
+                "mom_traded_today": False,
+            }
+        
+        s = symbol_state[symbol]
+        if s.get("mom_traded_today") or s.get("in_trade"):
+            continue
+        
+        # Check for momentum breakout
+        is_breakout, entry_price, stop_price, target_price = check_mom_breakout(symbol)
+        if not is_breakout:
+            continue
+        
+        # Enter trade
+        cost = enter_trade(symbol, entry_price, stop_price, target_price, cash - total_cost, "MOM")
+        if cost > 0:
+            total_cost += cost
+            s["in_trade"] = True
+            s["strategy"] = "MOM"
+            s["entry"] = entry_price
+            s["stop"] = stop_price
+            s["target"] = target_price
+            s["qty"] = MAX_TRADE_USD / entry_price
+            s["mom_traded_today"] = True
+            sb_log(f"📈 MOM trade executed for {symbol}")
+    
+    return total_cost
+    
+
+# ─────────────────────────────────────────────
 # STRATEGY REGISTRY (ADD NEW STRATEGIES HERE)
 # ─────────────────────────────────────────────
 # Each strategy requires:
@@ -620,6 +722,13 @@ def run_vwap_strategy(cash: float, held: dict) -> float:
 #   3. (Optional) Add a row to Supabase 'strategies' table for dashboard display
 
 STRATEGIES = {
+    "MOM": {   # Put MOM first if you want it to run automatically in the morning
+        "name": "MOM",
+        "time_window_start": (9, 30),   # 9:30 AM ET = 9:30 PM SGT
+        "time_window_end": (10, 30),    # 10:30 AM ET = 10:30 PM SGT
+        "entry_func": run_mom_strategy,
+        "state_flag": "mom_traded_today",
+    },    
     "ORB-R": {
         "name": "ORB-R",
         "time_window_start": (9, 30),
@@ -634,6 +743,7 @@ STRATEGIES = {
         "entry_func": run_vwap_strategy,
         "state_flag": "vwap_traded_today",
     },
+    
     # ============================================================
     # TO ADD A NEW STRATEGY, COPY THE BLOCK BELOW AND CUSTOMISE:
     # ============================================================
