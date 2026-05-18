@@ -1,5 +1,5 @@
 """
-botscalable.py — Scalable trading bot with strategy registry
+bot.py — Scalable trading bot with strategy registry
 Run on Railway:
     Start command: python botscalable.py
     Environment: ALPACA_API_KEY, ALPACA_SECRET_KEY, SUPABASE_URL, SUPABASE_KEY, FINNHUB_API_KEY
