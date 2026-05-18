@@ -146,10 +146,19 @@ def on_websocket_open(ws):
     websocket_connected = True
     log.info(f"Finnhub WebSocket connected. Subscribing to {len(WATCHLIST)} symbols...")
     
-    # Subscribe to all symbols in watchlist
     for symbol in WATCHLIST:
         ws.send(json.dumps({"type": "subscribe", "symbol": symbol}))
     log.info("Subscription request sent for all symbols")
+    
+    # Start a ping thread to keep connection alive
+    def send_ping():
+        while websocket_connected:
+            time.sleep(15)  # Send ping every 15 seconds
+            try:
+                ws.send(json.dumps({"type": "ping"}))
+            except:
+                break
+    threading.Thread(target=send_ping, daemon=True).start()
 
 def connect_websocket():
     """Establish WebSocket connection to Finnhub."""
