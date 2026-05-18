@@ -2,7 +2,7 @@
 botscalable.py — Scalable trading bot with strategy registry
 Run on Railway:
     Start command: python botscalable.py
-    Environment: ALPACA_API_KEY, ALPACA_SECRET_KEY, SUPABASE_URL, SUPABASE_KEY
+    Environment: ALPACA_API_KEY, ALPACA_SECRET_KEY, SUPABASE_URL, SUPABASE_KEY, FINNHUB_API_KEY
 """
 
 import os
@@ -11,10 +11,14 @@ import pytz
 import logging
 import pandas as pd
 import numpy as np
+import random
+import threading
+import json
+import websocket
 from datetime import datetime, timedelta
 from supabase import create_client, Client
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -97,174 +101,11 @@ API_KEY    = os.environ["ALPACA_API_KEY"]
 SECRET_KEY = os.environ["ALPACA_SECRET_KEY"]
 SB_URL     = os.environ["SUPABASE_URL"]
 SB_KEY     = os.environ["SUPABASE_KEY"]
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client    = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 supabase: Client = create_client(SB_URL, SB_KEY)
-
-# ─────────────────────────────────────────────
-# FINNHUB WEBSOCKET FOR REAL-TIME DATA
-# ─────────────────────────────────────────────
-import websocket
-import json
-import threading
-
-FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
-
-# Global storage for latest real-time prices
-latest_prices: dict = {}  # {symbol: price}
-prices_lock = threading.Lock()
-websocket_connected = False
-
-# Add these two variables near the top of your WebSocket section (outside the function)
-trade_counter = 0
-last_log_time = 0
-
-def on_websocket_message(ws, message):
-    """Handle incoming real-time trade data from Finnhub."""
-    global latest_prices, trade_counter, last_log_time
-    try:
-        data = json.loads(message)
-        if data.get("type") == "trade":
-            # Count trades
-            trade_counter += len(data.get("data", []))
-            
-            # Log trade rate every 10 seconds
-            now = time.time()
-            if now - last_log_time > 10:
-                log.info(f"📊 WebSocket received {trade_counter} trades in last 10 seconds")
-                trade_counter = 0
-                last_log_time = now
-            
-            # Update latest prices
-            for trade in data.get("data", []):
-                symbol = trade.get("s")
-                price = trade.get("p")
-                if symbol and price:
-                    with prices_lock:
-                        latest_prices[symbol] = price
-    except Exception as e:
-        log.warning(f"WebSocket message error: {e}")
-
-def on_websocket_error(ws, error):
-    log.error(f"WebSocket error: {error}")
-
-def on_websocket_close(ws, close_status_code, close_msg):
-    global websocket_connected
-    websocket_connected = False
-    log.warning("WebSocket connection closed. Attempting to reconnect...")
-    # Attempt reconnection after 5 seconds
-    threading.Timer(5.0, connect_websocket).start()
-
-def on_websocket_open(ws):
-    global websocket_connected
-    websocket_connected = True
-    log.info(f"Finnhub WebSocket connected. Subscribing to {len(WATCHLIST)} symbols...")
-    
-    for symbol in WATCHLIST:
-        ws.send(json.dumps({"type": "subscribe", "symbol": symbol}))
-    log.info("Subscription request sent for all symbols")
-    
-    # Start a ping thread to keep connection alive
-    def send_ping():
-        while websocket_connected:
-            time.sleep(15)  # Send ping every 15 seconds
-            try:
-                ws.send(json.dumps({"type": "ping"}))
-            except:
-                break
-    threading.Thread(target=send_ping, daemon=True).start()
-
-def connect_websocket():
-    """Establish WebSocket connection to Finnhub."""
-    if not FINNHUB_API_KEY:
-        log.warning("FINNHUB_API_KEY not set. WebSocket data will not be available.")
-        return
-    
-    ws_url = f"wss://ws.finnhub.io?token={FINNHUB_API_KEY}"
-    ws = websocket.WebSocketApp(
-        ws_url,
-        on_open=on_websocket_open,
-        on_message=on_websocket_message,
-        on_error=on_websocket_error,
-        on_close=on_websocket_close,
-    )
-    
-    # Run WebSocket in a background daemon thread
-    wst = threading.Thread(target=ws.run_forever, daemon=True)
-    wst.start()
-    log.info("Finnhub WebSocket thread started")
-
-def is_finnhub_connected() -> bool:
-    """Return True if Finnhub WebSocket is connected and receiving data."""
-    global websocket_connected
-    return websocket_connected and len(latest_prices) > 0
-
-def get_realtime_price(symbol: str) -> float:
-    """Get the latest real-time price for a symbol from Finnhub."""
-    with prices_lock:
-        return latest_prices.get(symbol, None)
-# ─────────────────────────────────────────────
-# PASTE get_realtime_bars AND get_current_price HERE
-# ─────────────────────────────────────────────
-def get_realtime_bars(symbol: str, timeframe_minutes: int, days_back: int = 1) -> pd.DataFrame:
-    """
-    Fetch intraday bars using Alpaca (for historical data).
-    Real-time price is obtained from Finnhub WebSocket separately.
-    """
-    return get_bars(symbol, timeframe_minutes, days_back)
-
-def get_current_price(symbol: str) -> float:
-    """
-    Get the most recent price – priority to Finnhub WebSocket, fallback to Alpaca.
-    """
-    # First try Finnhub real-time
-    if is_finnhub_connected():
-        rt_price = get_realtime_price(symbol)
-        if rt_price is not None and rt_price > 0:
-            return rt_price
-    else:
-        # Log warning only once per minute to avoid spam
-        if not hasattr(get_current_price, "_last_warning"):
-            get_current_price._last_warning = 0
-        now = time.time()
-        if now - get_current_price._last_warning > 60:
-            log.warning("Finnhub not connected – falling back to Alpaca delayed data")
-            get_current_price._last_warning = now
-    
-    # Fallback to Alpaca (last close from latest bar)
-    try:
-        df = get_bars(symbol, timeframe_minutes=1, days_back=1)
-        if not df.empty:
-            return float(df["close"].iloc[-1])
-    except Exception:
-        pass
-    
-    return None
-    
-# Start WebSocket connection on bot startup
-if FINNHUB_API_KEY:
-    connect_websocket()
-else:
-    log.warning("FINNHUB_API_KEY not set – using Alpaca IEX data (delayed).")
-
-def check_finnhub_health():
-    """Periodic health check – logs connection status and attempts reconnect if needed."""
-    global websocket_connected
-    if not FINNHUB_API_KEY:
-        return
-    
-    if not websocket_connected:
-        log.warning("Finnhub WebSocket disconnected – attempting reconnect...")
-        connect_websocket()
-    else:
-        # Check if we have received any price in the last 30 seconds
-        with prices_lock:
-            recent_data = len(latest_prices) > 0
-        
-        if not recent_data:
-            log.warning("Finnhub connected but no price data received – may be stale")
-
 
 # ─────────────────────────────────────────────
 # BOT STATE & OVERRIDE CACHE
@@ -365,10 +206,8 @@ def monitor_positions(held: dict):
         qty = s.get("qty", 0.0)
         strategy = s.get("strategy", "UNKNOWN")
         curr_p = float(p.current_price)
-        
         if entry == 0:
             continue
-        
         if curr_p <= stop:
             exit_trade(sym, qty, curr_p, entry, f"STOP LOSS (hit ${stop:.2f})", strategy)
             symbol_state[sym]["in_trade"] = False
@@ -386,7 +225,6 @@ def reset_daily_state():
         if not state.get("in_trade"):
             to_delete.append(sym)
         else:
-            # Reset all daily flags (any key ending with _traded_today)
             for key in list(state.keys()):
                 if key.endswith("_traded_today"):
                     state[key] = False
@@ -395,7 +233,6 @@ def reset_daily_state():
     sb_log("Daily state reset")
 
 def get_forced_strategy() -> str:
-    """Read manual override from Supabase bot_config table."""
     global _forced_strategy_cache, _last_forced_check
     now = time.time()
     if _last_forced_check is None or (now - _last_forced_check) > 10:
@@ -491,6 +328,132 @@ def send_heartbeat():
         pass
 
 # ─────────────────────────────────────────────
+# FINNHUB WEBSOCKET FOR REAL-TIME DATA
+# ─────────────────────────────────────────────
+# Global WebSocket variables
+latest_prices: dict = {}
+prices_lock = threading.Lock()
+websocket_connected = False
+ws_instance = None
+reconnect_attempts = 0
+max_reconnect_delay = 300  # 5 minutes
+trade_counter = 0
+last_log_time = 0
+
+def on_websocket_message(ws, message):
+    global latest_prices, trade_counter, last_log_time
+    try:
+        data = json.loads(message)
+        if data.get("type") == "trade":
+            # Count trades for logging
+            trade_counter += len(data.get("data", []))
+            now = time.time()
+            if now - last_log_time > 10:
+                log.info(f"📊 WebSocket received {trade_counter} trades in last 10 seconds")
+                trade_counter = 0
+                last_log_time = now
+            # Update latest prices
+            for trade in data.get("data", []):
+                symbol = trade.get("s")
+                price = trade.get("p")
+                if symbol and price:
+                    with prices_lock:
+                        latest_prices[symbol] = price
+    except Exception as e:
+        log.warning(f"WebSocket message error: {e}")
+
+def on_websocket_error(ws, error):
+    log.error(f"WebSocket error: {error}")
+
+def on_websocket_close(ws, close_status_code, close_msg):
+    global websocket_connected, reconnect_attempts
+    websocket_connected = False
+    log.warning(f"WebSocket connection closed. Code: {close_status_code}, Msg: {close_msg}")
+    # Exponential backoff with jitter
+    reconnect_attempts += 1
+    delay = min(max_reconnect_delay, 2 ** reconnect_attempts) + random.uniform(0, 1)
+    log.info(f"Reconnecting in {delay:.1f} seconds (attempt {reconnect_attempts})")
+    threading.Timer(delay, connect_websocket).start()
+
+def on_websocket_open(ws):
+    global websocket_connected, reconnect_attempts
+    websocket_connected = True
+    reconnect_attempts = 0  # reset on successful connection
+    log.info(f"Finnhub WebSocket connected. Subscribing to {len(WATCHLIST)} symbols...")
+    # Subscribe in batches to avoid overwhelming
+    batch_size = 10
+    for i in range(0, len(WATCHLIST), batch_size):
+        batch = WATCHLIST[i:i+batch_size]
+        for symbol in batch:
+            ws.send(json.dumps({"type": "subscribe", "symbol": symbol}))
+        time.sleep(0.2)
+    log.info("Subscription requests sent for all symbols")
+
+def connect_websocket():
+    """Establish WebSocket connection to Finnhub with market hours check and backoff."""
+    global ws_instance, websocket_connected, reconnect_attempts
+    if not FINNHUB_API_KEY:
+        log.warning("FINNHUB_API_KEY not set. WebSocket data will not be available.")
+        return
+    # Only attempt connection during market hours or 30 minutes before open
+    now_et = datetime.now(ET)
+    market_opens = now_et.replace(hour=9, minute=30, second=0)
+    market_closes = now_et.replace(hour=16, minute=0, second=0)
+    thirty_min_before = market_opens - timedelta(minutes=30)
+    if now_et < thirty_min_before or now_et > market_closes:
+        delay = min(60, 2 ** reconnect_attempts)
+        log.info(f"Market closed or not yet open. Next connection attempt in {delay}s")
+        threading.Timer(delay, connect_websocket).start()
+        return
+    # Reset attempts if we are in valid window
+    reconnect_attempts = 0
+    ws_url = f"wss://ws.finnhub.io?token={FINNHUB_API_KEY}"
+    ws = websocket.WebSocketApp(
+        ws_url,
+        on_open=on_websocket_open,
+        on_message=on_websocket_message,
+        on_error=on_websocket_error,
+        on_close=on_websocket_close,
+    )
+    ws_instance = ws
+    wst = threading.Thread(target=ws.run_forever, daemon=True)
+    wst.start()
+    log.info("Finnhub WebSocket thread started")
+
+def get_realtime_price(symbol: str) -> float:
+    with prices_lock:
+        return latest_prices.get(symbol, None)
+
+def get_current_price(symbol: str) -> float:
+    if is_finnhub_connected():
+        rt_price = get_realtime_price(symbol)
+        if rt_price is not None and rt_price > 0:
+            return rt_price
+    # Fallback to Alpaca
+    try:
+        df = get_bars(symbol, timeframe_minutes=1, days_back=1)
+        if not df.empty:
+            return float(df["close"].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+def is_finnhub_connected() -> bool:
+    return websocket_connected and len(latest_prices) > 0
+
+def check_finnhub_health():
+    """Periodic health check – logs status only, does NOT reconnect."""
+    if not FINNHUB_API_KEY:
+        return
+    if not websocket_connected:
+        log.warning("Finnhub WebSocket is disconnected. Reconnection will be attempted by the close handler.")
+    else:
+        with prices_lock:
+            recent_data = len(latest_prices) > 0
+        if not recent_data:
+            log.warning("Finnhub connected but no price data received – may be stale")
+
+# ─────────────────────────────────────────────
 # ORB-R STRATEGY
 # ─────────────────────────────────────────────
 ORB_REWARD_RISK = 3.0
@@ -579,7 +542,6 @@ def run_orb_strategy(cash: float, held: dict) -> float:
     for symbol in WATCHLIST:
         if symbol in held:
             continue
-        
         if symbol not in symbol_state:
             symbol_state[symbol] = {
                 "strategy": None,
@@ -593,11 +555,9 @@ def run_orb_strategy(cash: float, held: dict) -> float:
                 "qty": 0.0,
                 "orb_traded_today": False,
             }
-        
         s = symbol_state[symbol]
         if s.get("orb_traded_today") or s.get("in_trade"):
             continue
-        
         if s["box_high"] is None:
             box_high, box_low = get_yesterday_box(symbol)
             if box_high is None:
@@ -610,34 +570,27 @@ def run_orb_strategy(cash: float, held: dict) -> float:
                 continue
             s["box_high"] = box_high
             s["box_low"] = box_low
-        
         box_high = s["box_high"]
-        
         if not s["breakout_confirmed"]:
             if check_orb_breakout(symbol, box_high):
                 s["breakout_confirmed"] = True
                 sb_log(f"🚀 {symbol} ORB BREAKOUT confirmed")
             else:
                 continue
-        
         if not check_orb_retest(symbol, box_high):
             continue
-        
         df_5m = get_bars(symbol, timeframe_minutes=5, days_back=2)
         if df_5m.empty:
             continue
         today_et = datetime.now(ET).date()
         df_5m_today = df_5m[df_5m.index.date == today_et]
-        
         if not check_orb_reversal_candle(df_5m_today, box_high):
             continue
-        
         confirm_candle = df_5m_today.iloc[-1]
         entry_price = round(float(confirm_candle["close"]), 4)
         stop_price = round(float(confirm_candle["low"]) * 0.999, 4)
         if entry_price - stop_price < 0.01:
             stop_price = entry_price - 0.01
-        
         min_stop_pct = 0.005 if symbol not in HIGH_VOL_STOCKS else 0.01
         min_stop_distance = entry_price * min_stop_pct
         if entry_price - stop_price < min_stop_distance:
@@ -652,7 +605,6 @@ def run_orb_strategy(cash: float, held: dict) -> float:
             if risk <= 0 or risk / entry_price > 0.05:
                 continue
             target_price = round(entry_price + (ORB_REWARD_RISK * risk), 4)
-        
         cost = enter_trade(symbol, entry_price, stop_price, target_price, cash - total_cost, "ORB-R")
         if cost > 0:
             total_cost += cost
@@ -683,32 +635,24 @@ def check_vwap_retest(symbol: str, current_vwap: float) -> tuple:
     df_5m = get_bars(symbol, timeframe_minutes=5, days_back=VWAP_LOOKBACK_DAYS)
     if df_5m.empty or len(df_5m) < 10:
         return False, 0, 0, 0, 0
-    
     today_et = datetime.now(ET).date()
     today_bars = df_5m[df_5m.index.date == today_et]
     if today_bars.empty or len(today_bars) < 3:
         return False, 0, 0, 0, 0
-    
     latest = today_bars.iloc[-1]
     prev = today_bars.iloc[-2] if len(today_bars) > 1 else latest
-    
     candle_low = float(latest["low"])
     candle_high = float(latest["high"])
     vwap_near = (candle_low <= current_vwap * 1.001 and candle_high >= current_vwap * 0.999)
-    
     if not vwap_near:
         return False, 0, 0, 0, 0
-    
     hammer = is_hammer(latest)
     inv_hammer = is_inverted_hammer(latest)
     engulfing = is_bullish_engulfing(prev, latest) if len(today_bars) > 1 else False
-    
     if not (hammer or inv_hammer or engulfing):
         return False, 0, 0, 0, 0
-    
     entry_price = round(float(latest["close"]), 4)
     stop_price = round(min(current_vwap * (1 - VWAP_STOP_PCT), float(latest["low"])), 4)
-    
     min_stop_pct = 0.003 if symbol not in HIGH_VOL_STOCKS else 0.006
     min_stop_distance = entry_price * min_stop_pct
     if entry_price - stop_price < min_stop_distance:
@@ -719,12 +663,10 @@ def check_vwap_retest(symbol: str, current_vwap: float) -> tuple:
         target_price = round(entry_price + (VWAP_REWARD_RISK * risk), 4)
         log.info(f"Adjusted VWAP {symbol} stop to {stop_price:.2f} (min {min_stop_pct*100:.1f}%)")
         return True, entry_price, stop_price, target_price, float(latest["low"])
-    
     risk = entry_price - stop_price
     if risk <= 0:
         return False, 0, 0, 0, 0
     target_price = round(entry_price + (VWAP_REWARD_RISK * risk), 4)
-    
     return True, entry_price, stop_price, target_price, float(latest["low"])
 
 def run_vwap_strategy(cash: float, held: dict) -> float:
@@ -732,7 +674,6 @@ def run_vwap_strategy(cash: float, held: dict) -> float:
     for symbol in WATCHLIST:
         if symbol in held:
             continue
-        
         if symbol not in symbol_state:
             symbol_state[symbol] = {
                 "strategy": None,
@@ -743,27 +684,21 @@ def run_vwap_strategy(cash: float, held: dict) -> float:
                 "qty": 0.0,
                 "vwap_traded_today": False,
             }
-        
         s = symbol_state[symbol]
         if s.get("vwap_traded_today") or s.get("in_trade"):
             continue
-        
         df_5m = get_bars(symbol, timeframe_minutes=5, days_back=1)
         if df_5m.empty or len(df_5m) < 10:
             continue
-        
         vwap = calculate_vwap(df_5m)
         if vwap is None:
             continue
-        
         current_price = float(df_5m["close"].iloc[-1])
         if current_price < vwap:
             continue
-        
         is_retest, entry_price, stop_price, target_price, _ = check_vwap_retest(symbol, vwap)
         if not is_retest:
             continue
-        
         sb_log(f"📊 {symbol} VWAP retest detected at ${vwap:.2f}")
         cost = enter_trade(symbol, entry_price, stop_price, target_price, cash - total_cost, "VWAP")
         if cost > 0:
@@ -785,62 +720,43 @@ MOM_LOOKBACK_MINUTES = 10
 MOM_VOLUME_MULTIPLIER = 1.5
 
 def check_mom_breakout(symbol: str) -> tuple:
-    """Check for momentum breakout using real-time price + Alpaca bars."""
     try:
-        # Fetch 1-minute bars from Alpaca (for lookback)
         df = get_bars(symbol, timeframe_minutes=1, days_back=1)
         if df.empty or len(df) < 15:
             return False, 0, 0, 0
-        
         today_et = datetime.now(ET).date()
         today_bars = df[df.index.date == today_et]
         if today_bars.empty or len(today_bars) < 11:
             return False, 0, 0, 0
-        
-        # Calculate lookback high from historical bars
         lookback_high = today_bars["high"].iloc[-11:-1].max()
-        
-        # Get real-time price from Finnhub
         current_price = get_current_price(symbol)
         if current_price is None:
             return False, 0, 0, 0
-        
-        # Calculate average volume from historical bars
         avg_volume = today_bars["volume"].iloc[-6:-1].mean()
         current_volume = today_bars["volume"].iloc[-1]
-        
-        # Calculate RSI on close prices
         rsi_series = calc_rsi(today_bars["close"], period=14)
         rsi = rsi_series.iloc[-1] if not rsi_series.empty else 50
-        
-        # Breakout condition using real-time price
         if current_price > lookback_high and current_volume > avg_volume * MOM_VOLUME_MULTIPLIER and rsi > 60:
             entry_price = round(current_price, 4)
-            
             if symbol in HIGH_VOL_STOCKS:
                 stop_pct = 0.012
             else:
                 stop_pct = 0.008
-            
             stop_price = round(entry_price * (1 - stop_pct), 4)
             risk = entry_price - stop_price
             target_price = round(entry_price + (MOM_REWARD_RISK * risk), 4)
-            
-            sb_log(f"🔥 MOM breakout detected for {symbol} at ${entry_price} (real-time)")
+            sb_log(f"🔥 MOM breakout detected for {symbol} at ${entry_price} (RSI: {rsi:.1f})")
             return True, entry_price, stop_price, target_price
-        
         return False, 0, 0, 0
     except Exception as e:
         log.warning(f"MOM check error {symbol}: {e}")
         return False, 0, 0, 0
 
 def run_mom_strategy(cash: float, held: dict) -> float:
-    """Momentum breakout strategy entry logic."""
     total_cost = 0.0
     for symbol in WATCHLIST:
         if symbol in held:
             continue
-        
         if symbol not in symbol_state:
             symbol_state[symbol] = {
                 "strategy": None,
@@ -851,17 +767,12 @@ def run_mom_strategy(cash: float, held: dict) -> float:
                 "qty": 0.0,
                 "mom_traded_today": False,
             }
-        
         s = symbol_state[symbol]
         if s.get("mom_traded_today") or s.get("in_trade"):
             continue
-        
-        # Check for momentum breakout
         is_breakout, entry_price, stop_price, target_price = check_mom_breakout(symbol)
         if not is_breakout:
             continue
-        
-        # Enter trade
         cost = enter_trade(symbol, entry_price, stop_price, target_price, cash - total_cost, "MOM")
         if cost > 0:
             total_cost += cost
@@ -873,19 +784,16 @@ def run_mom_strategy(cash: float, held: dict) -> float:
             s["qty"] = MAX_TRADE_USD / entry_price
             s["mom_traded_today"] = True
             sb_log(f"📈 MOM trade executed for {symbol}")
-    
     return total_cost
-    
+
 # ─────────────────────────────────────────────
 # TOUCH AND TURN STRATEGY
 # ─────────────────────────────────────────────
 TURN_REWARD_RISK = 2.0
-FIB_LEVEL = 0.382  # 38.2%
+FIB_LEVEL = 0.382
 
 def calculate_atr(symbol: str, period: int = 14) -> float:
-    """Calculate 14-day ATR from daily bars."""
     try:
-        # Fetch daily bars
         end = datetime.now(pytz.utc)
         start = end - timedelta(days=30)
         req = StockBarsRequest(
@@ -898,15 +806,12 @@ def calculate_atr(symbol: str, period: int = 14) -> float:
         bars = data_client.get_stock_bars(req).df
         if bars.empty or len(bars) < period:
             return 0.0
-        
         if isinstance(bars.index, pd.MultiIndex):
             bars = bars.xs(symbol, level="symbol")
-        
-        # Calculate True Range
         bars["prev_close"] = bars["close"].shift(1)
         bars["tr"] = bars[["high", "low", "prev_close"]].apply(
-            lambda x: max(x["high"] - x["low"], 
-                          abs(x["high"] - x["prev_close"]), 
+            lambda x: max(x["high"] - x["low"],
+                          abs(x["high"] - x["prev_close"]),
                           abs(x["low"] - x["prev_close"])), axis=1
         )
         atr = bars["tr"].rolling(period).mean().iloc[-1]
@@ -916,73 +821,48 @@ def calculate_atr(symbol: str, period: int = 14) -> float:
         return 0.0
 
 def get_opening_candle(symbol: str) -> tuple:
-    """Get the first 15-minute candle of the trading day (9:30–9:45 ET)."""
     try:
         df = get_bars(symbol, timeframe_minutes=15, days_back=1)
         if df.empty or len(df) < 1:
             return None, None, None, None, None
-        
         today_et = datetime.now(ET).date()
         today_bars = df[df.index.date == today_et]
         if today_bars.empty:
             return None, None, None, None, None
-        
-        # First candle of the day (should be 9:30–9:45)
         first_candle = today_bars.iloc[0]
         open_price = float(first_candle["open"])
         high = float(first_candle["high"])
         low = float(first_candle["low"])
         close = float(first_candle["close"])
-        
         return open_price, high, low, close, first_candle
     except Exception as e:
         log.warning(f"Opening candle error {symbol}: {e}")
         return None, None, None, None, None
 
 def check_touch_and_turn(symbol: str) -> tuple:
-    """
-    Check if the first 15-min candle is a manipulated red candle.
-    Returns (is_setup, entry_price, stop_price, target_price, limit_order_active)
-    """
     try:
-        # Step 1: Get opening candle
-        open_price, high, low, close, candle = get_opening_candle(symbol)
+        open_price, high, low, close, _ = get_opening_candle(symbol)
         if open_price is None:
             return False, 0, 0, 0, False
-        
-        # Step 2: Must be a red candle (close < open)
         if close >= open_price:
             return False, 0, 0, 0, False
-        
-        # Step 3: Calculate 14-day ATR and check volatility
         atr = calculate_atr(symbol, period=14)
         candle_range = high - low
-        min_range = atr * 0.25  # 25% of ATR
-        
+        min_range = atr * 0.25
         if candle_range < min_range or atr == 0:
             return False, 0, 0, 0, False
-        
-        # Step 4: Calculate Fibonacci levels
         fib_distance = (high - low) * FIB_LEVEL
-        target_price = round(high - fib_distance, 4)  # 38.2% retracement from high
-        entry_price = round(low, 4)  # Limit order at the low
-        
-        # Step 5: Stop loss is half of target distance
+        target_price = round(high - fib_distance, 4)
+        entry_price = round(low, 4)
         target_distance = target_price - entry_price
         stop_distance = target_distance / 2
         stop_price = round(entry_price - stop_distance, 4) if stop_distance > 0 else entry_price - 0.01
-        
-        # Ensure stop is at least $0.01 below entry
         if entry_price - stop_price < 0.01:
             stop_price = entry_price - 0.01
-        
-        # Recalculate risk and target if stop was adjusted
         risk = entry_price - stop_price
         if risk <= 0:
             return False, 0, 0, 0, False
-        
         target_price = round(entry_price + (TURN_REWARD_RISK * risk), 4)
-        
         sb_log(f"🎯 Touch & Turn setup for {symbol}: Entry LIMIT ${entry_price}, Stop ${stop_price}, Target ${target_price}, ATR: {atr:.2f}")
         return True, entry_price, stop_price, target_price, True
     except Exception as e:
@@ -990,14 +870,10 @@ def check_touch_and_turn(symbol: str) -> tuple:
         return False, 0, 0, 0, False
 
 def run_touch_and_turn_strategy(cash: float, held: dict) -> float:
-    """Touch and Turn strategy with limit order at the opening candle low.
-    Includes price verification to prevent stale setups.
-    """
     total_cost = 0.0
     for symbol in WATCHLIST:
         if symbol in held:
             continue
-        
         if symbol not in symbol_state:
             symbol_state[symbol] = {
                 "strategy": None,
@@ -1009,62 +885,36 @@ def run_touch_and_turn_strategy(cash: float, held: dict) -> float:
                 "turn_traded_today": False,
                 "limit_order_placed": False,
             }
-        
         s = symbol_state[symbol]
         if s.get("turn_traded_today") or s.get("in_trade"):
             continue
-        
-        # ─────────────────────────────────────────────
-        # Check if we have a setup
-        # ─────────────────────────────────────────────
-        is_setup, entry_price, stop_price, target_price, limit_order_active = check_touch_and_turn(symbol)
+        is_setup, entry_price, stop_price, target_price, _ = check_touch_and_turn(symbol)
         if not is_setup:
             continue
-        
-        # ─────────────────────────────────────────────
-        # PREVENT STALE SETUPS: Verify current price
-        # ─────────────────────────────────────────────
         current_price = get_current_price(symbol)
         if current_price is None:
             sb_log(f"⚠️ TOUCH_TURN {symbol}: Cannot get current price – skipping")
             continue
-        
-        # Calculate percentage difference between current price and entry price
         price_diff_pct = abs((current_price - entry_price) / entry_price) * 100
-        
-        # If current price is more than 2% away from entry price, setup is stale
         if price_diff_pct > 2.0:
             sb_log(f"⏭️ TOUCH_TURN {symbol}: Stale setup – current ${current_price:.2f} vs entry ${entry_price:.2f} ({price_diff_pct:.1f}% away)")
-            # Mark as traded for the day to avoid retrying
             s["turn_traded_today"] = True
             continue
-        
-        # ─────────────────────────────────────────────
-        # Check if we are still within the valid time window
-        # ─────────────────────────────────────────────
         now_et = datetime.now(ET)
-        window_end_et = now_et.replace(hour=10, minute=30, second=0, microsecond=0)  # 10:30 AM ET
-        
+        window_end_et = now_et.replace(hour=10, minute=30, second=0, microsecond=0)
         if now_et > window_end_et:
             sb_log(f"⏭️ TOUCH_TURN {symbol}: Outside time window (after 10:30 AM ET)")
             s["turn_traded_today"] = True
             continue
-        
-        # ─────────────────────────────────────────────
-        # Place limit order
-        # ─────────────────────────────────────────────
         if not s.get("limit_order_placed"):
             qty = MAX_TRADE_USD / entry_price
             if qty <= 0:
                 continue
-            
             actual_cost = round(qty * entry_price, 2)
             if cash - actual_cost < CASH_BUFFER:
                 sb_log(f"SKIP {symbol} — would breach cash buffer")
                 continue
-            
             try:
-                from alpaca.trading.requests import LimitOrderRequest
                 trading_client.submit_order(LimitOrderRequest(
                     symbol=symbol,
                     qty=qty,
@@ -1073,41 +923,29 @@ def run_touch_and_turn_strategy(cash: float, held: dict) -> float:
                     time_in_force=TimeInForce.DAY,
                 ))
                 sb_log(f"🟢 TOUCH & TURN LIMIT ORDER placed for {qty:.4f} {symbol} @ ${entry_price:.2f} | Stop:${stop_price:.2f} | Target:${target_price:.2f} | Current price: ${current_price:.2f}")
-                
                 s["limit_order_placed"] = True
                 s["pending_entry"] = entry_price
                 s["pending_stop"] = stop_price
                 s["pending_target"] = target_price
                 s["pending_qty"] = qty
                 s["pending_cost"] = actual_cost
-                
             except Exception as e:
                 sb_log(f"Limit order error {symbol}: {e}")
                 continue
-    
     return total_cost
 
 def check_touch_and_turn_fills(cash: float, held: dict) -> float:
-    """
-    Check if any pending limit orders have filled.
-    This should be called in the main loop after position check.
-    """
     total_cost = 0.0
-    for symbol, s in symbol_state.items():
+    for symbol, s in list(symbol_state.items()):
         if s.get("limit_order_placed") and not s.get("in_trade"):
-            # Check if position now exists
             try:
                 positions = trading_client.get_all_positions()
                 for p in positions:
                     if p.symbol == symbol:
-                        # Limit order filled!
                         entry_price = float(p.avg_entry_price)
-                        # The actual fill price may differ slightly from limit price
-                        # Use the pending values for stop/target
                         stop_price = s.get("pending_stop", 0)
                         target_price = s.get("pending_target", 0)
                         qty = float(p.qty)
-                        
                         s["in_trade"] = True
                         s["strategy"] = "TOUCH_TURN"
                         s["entry"] = entry_price
@@ -1115,47 +953,32 @@ def check_touch_and_turn_fills(cash: float, held: dict) -> float:
                         s["target"] = target_price
                         s["qty"] = qty
                         s["turn_traded_today"] = True
-                        
                         actual_cost = qty * entry_price
                         total_cost += actual_cost
-                        
                         sb_log(f"✅ TOUCH & TURN limit order filled for {qty:.4f} {symbol} @ ${entry_price:.2f}")
                         break
             except Exception as e:
                 log.warning(f"Check fill error {symbol}: {e}")
-    
     return total_cost
 
 # ─────────────────────────────────────────────
-# STRATEGY REGISTRY (ADD NEW STRATEGIES HERE)
+# STRATEGY REGISTRY
 # ─────────────────────────────────────────────
-# Each strategy requires:
-#   - name: The strategy identifier (must match strategy column in Supabase)
-#   - time_window_start: (hour, minute) ET when the strategy should run in AUTO mode
-#   - time_window_end: (hour, minute) ET when the strategy should stop in AUTO mode
-#   - entry_func: The function that executes entry logic
-#   - state_flag: The per‑symbol flag used to prevent multiple trades per day
-#
-# To add a new strategy:
-#   1. Write your entry function (e.g., run_gap_strategy)
-#   2. Add a dictionary entry below
-#   3. (Optional) Add a row to Supabase 'strategies' table for dashboard display
-
 STRATEGIES = {
     "TOUCH_TURN": {
         "name": "TOUCH_TURN",
-        "time_window_start": (9, 30),   # 9:30 AM ET = 9:30 PM SGT
-        "time_window_end": (10, 30),     # 10:30 AM ET = 10:30 PM SGT
+        "time_window_start": (9, 30),
+        "time_window_end": (10, 30),
         "entry_func": run_touch_and_turn_strategy,
         "state_flag": "turn_traded_today",
     },
-    "MOM": {   # Put MOM first if you want it to run automatically in the morning
+    "MOM": {
         "name": "MOM",
-        "time_window_start": (9, 30),   # 9:30 AM ET = 9:30 PM SGT
-        "time_window_end": (10, 30),    # 10:30 AM ET = 10:30 PM SGT
+        "time_window_start": (9, 30),
+        "time_window_end": (10, 30),
         "entry_func": run_mom_strategy,
         "state_flag": "mom_traded_today",
-    },    
+    },
     "ORB-R": {
         "name": "ORB-R",
         "time_window_start": (9, 30),
@@ -1170,33 +993,15 @@ STRATEGIES = {
         "entry_func": run_vwap_strategy,
         "state_flag": "vwap_traded_today",
     },
-    
-    # ============================================================
-    # TO ADD A NEW STRATEGY, COPY THE BLOCK BELOW AND CUSTOMISE:
-    # ============================================================
-    # "NEW_STRATEGY": {
-    #     "name": "NEW_STRATEGY",
-    #     "time_window_start": (9, 30),
-    #     "time_window_end": (11, 0),
-    #     "entry_func": run_new_strategy,  # You must define this function
-    #     "state_flag": "new_traded_today",
-    # },
 }
 
-# ─────────────────────────────────────────────
-# SESSION DETECTION (supports registry)
-# ─────────────────────────────────────────────
 def get_current_session() -> str:
-    """Returns the strategy name ('ORB-R', 'VWAP', etc.) or 'CLOSED'."""
     forced = get_forced_strategy()
     now_et = datetime.now(ET)
     market_open = is_market_open()
-
-    # Manual override takes precedence when market is open
     if market_open and forced in STRATEGIES:
         return forced
     if market_open and forced == "AUTO":
-        # Find first strategy whose time window contains now
         for strat_name, cfg in STRATEGIES.items():
             start_h, start_m = cfg["time_window_start"]
             end_h, end_m = cfg["time_window_end"]
@@ -1206,30 +1011,23 @@ def get_current_session() -> str:
                 return strat_name
     return "CLOSED"
 
-# ─────────────────────────────────────────────
-# MAIN LOOP
-# ─────────────────────────────────────────────
 _last_reset_date = None
 
 def run_strategy():
     global baseline, _last_reset_date
-    
     now_et = datetime.now(ET)
     if now_et.weekday() == 0 and now_et.hour == 9 and now_et.minute == 30:
         new_bl = float(trading_client.get_account().equity)
         baseline = new_bl
         save_baseline(new_bl)
         sb_log("Weekly baseline reset")
-    
     today = datetime.now(ET).date()
     if _last_reset_date != today:
         reset_daily_state()
         _last_reset_date = today
-    
     if not is_market_open():
         log.info("Market closed")
         return
-    
     try:
         account = trading_client.get_account()
         cash = float(account.buying_power)
@@ -1238,8 +1036,6 @@ def run_strategy():
     except Exception as e:
         sb_log(f"Account error: {e}")
         return
-    
-    # EOD liquidation (uses stored strategy)
     if is_eod_window():
         for p in positions:
             try:
@@ -1251,22 +1047,14 @@ def run_strategy():
             except Exception as e:
                 sb_log(f"EOW error {p.symbol}: {e}")
         return
-    
-    # Monitor existing positions (stop/target)
     monitor_positions(held)
-    
-    # ─────────────────────────────────────────────
-    # CHECK FOR TOUCH & TURN LIMIT ORDER FILLS
-    # ─────────────────────────────────────────────
     filled_cost = check_touch_and_turn_fills(cash, held)
     if filled_cost > 0:
         cash -= filled_cost
         sb_log(f"Touch & Turn fills deducted: ${filled_cost:.2f}, remaining cash: ${cash:.2f}")
-    
     if cash <= CASH_BUFFER:
         log.info(f"Cash ${cash:.2f} below buffer")
         return
-    
     session = get_current_session()
     if session in STRATEGIES:
         total_cost = STRATEGIES[session]["entry_func"](cash, held)
@@ -1275,17 +1063,17 @@ def run_strategy():
     else:
         log.info("Outside trading hours or no active strategy")
 
-# ─────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
     sb_log("🤖 Scalable Trading Bot started (strategy registry)")
     sb_log(f"Watchlist: {len(WATCHLIST)} stocks | Max trade: ${MAX_TRADE_USD}")
     sb_log(f"Registered strategies: {', '.join(STRATEGIES.keys())}")
-    
     baseline = load_baseline()
     sb_log(f"Weekly baseline: ${baseline:,.2f}")
-    
+    # Start WebSocket only once (connection attempts are handled internally)
+    if FINNHUB_API_KEY:
+        connect_websocket()
+    else:
+        log.warning("FINNHUB_API_KEY not set – using Alpaca IEX data (delayed).")
     while True:
         try:
             run_strategy()
