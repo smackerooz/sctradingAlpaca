@@ -103,6 +103,113 @@ data_client    = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 supabase: Client = create_client(SB_URL, SB_KEY)
 
 # ─────────────────────────────────────────────
+# FINNHUB WEBSOCKET FOR REAL-TIME DATA
+# ─────────────────────────────────────────────
+import websocket
+import json
+import threading
+
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
+
+# Global storage for latest real-time prices
+latest_prices: dict = {}  # {symbol: price}
+prices_lock = threading.Lock()
+websocket_connected = False
+
+def on_websocket_message(ws, message):
+    """Handle incoming real-time trade data from Finnhub."""
+    global latest_prices
+    try:
+        data = json.loads(message)
+        if data.get("type") == "trade":
+            for trade in data.get("data", []):
+                symbol = trade.get("s")
+                price = trade.get("p")
+                if symbol and price:
+                    with prices_lock:
+                        latest_prices[symbol] = price
+    except Exception as e:
+        log.warning(f"WebSocket message error: {e}")
+
+def on_websocket_error(ws, error):
+    log.error(f"WebSocket error: {error}")
+
+def on_websocket_close(ws, close_status_code, close_msg):
+    global websocket_connected
+    websocket_connected = False
+    log.warning("WebSocket connection closed. Attempting to reconnect...")
+    # Attempt reconnection after 5 seconds
+    threading.Timer(5.0, connect_websocket).start()
+
+def on_websocket_open(ws):
+    global websocket_connected
+    websocket_connected = True
+    log.info(f"Finnhub WebSocket connected. Subscribing to {len(WATCHLIST)} symbols...")
+    
+    # Subscribe to all symbols in watchlist
+    for symbol in WATCHLIST:
+        ws.send(json.dumps({"type": "subscribe", "symbol": symbol}))
+    log.info("Subscription request sent for all symbols")
+
+def connect_websocket():
+    """Establish WebSocket connection to Finnhub."""
+    if not FINNHUB_API_KEY:
+        log.warning("FINNHUB_API_KEY not set. WebSocket data will not be available.")
+        return
+    
+    ws_url = f"wss://ws.finnhub.io?token={FINNHUB_API_KEY}"
+    ws = websocket.WebSocketApp(
+        ws_url,
+        on_open=on_websocket_open,
+        on_message=on_websocket_message,
+        on_error=on_websocket_error,
+        on_close=on_websocket_close,
+    )
+    
+    # Run WebSocket in a background daemon thread
+    wst = threading.Thread(target=ws.run_forever, daemon=True)
+    wst.start()
+    log.info("Finnhub WebSocket thread started")
+
+def get_realtime_price(symbol: str) -> float:
+    """Get the latest real-time price for a symbol from Finnhub."""
+    with prices_lock:
+        return latest_prices.get(symbol, None)
+# ─────────────────────────────────────────────
+# PASTE get_realtime_bars AND get_current_price HERE
+# ─────────────────────────────────────────────
+def get_realtime_bars(symbol: str, timeframe_minutes: int, days_back: int = 1) -> pd.DataFrame:
+    """
+    Fetch intraday bars using Alpaca (for historical data).
+    Real-time price is obtained from Finnhub WebSocket separately.
+    """
+    return get_bars(symbol, timeframe_minutes, days_back)
+
+def get_current_price(symbol: str) -> float:
+    """
+    Get the most recent price – priority to Finnhub WebSocket, fallback to Alpaca.
+    """
+    rt_price = get_realtime_price(symbol)
+    if rt_price is not None and rt_price > 0:
+        return rt_price
+    
+    try:
+        df = get_bars(symbol, timeframe_minutes=1, days_back=1)
+        if not df.empty:
+            return float(df["close"].iloc[-1])
+    except Exception:
+        pass
+    
+    return None
+    
+# Start WebSocket connection on bot startup
+if FINNHUB_API_KEY:
+    connect_websocket()
+else:
+    log.warning("FINNHUB_API_KEY not set – using Alpaca IEX data (delayed).")
+
+
+# ─────────────────────────────────────────────
 # BOT STATE & OVERRIDE CACHE
 # ─────────────────────────────────────────────
 symbol_state: dict = {}
@@ -621,28 +728,27 @@ MOM_LOOKBACK_MINUTES = 10
 MOM_VOLUME_MULTIPLIER = 1.5
 
 def check_mom_breakout(symbol: str) -> tuple:
-    """
-    Check for momentum breakout on 1-minute bars.
-    Returns (is_breakout, entry_price, stop_price, target_price)
-    """
+    """Check for momentum breakout using real-time price + Alpaca bars."""
     try:
-        # Fetch 1-minute bars (last 30 minutes)
+        # Fetch 1-minute bars from Alpaca (for lookback)
         df = get_bars(symbol, timeframe_minutes=1, days_back=1)
         if df.empty or len(df) < 15:
             return False, 0, 0, 0
         
-        # Get today's bars only
         today_et = datetime.now(ET).date()
         today_bars = df[df.index.date == today_et]
         if today_bars.empty or len(today_bars) < 11:
             return False, 0, 0, 0
         
-        # Calculate highest high of last 10 minutes (excluding current)
+        # Calculate lookback high from historical bars
         lookback_high = today_bars["high"].iloc[-11:-1].max()
-        current_high = today_bars["high"].iloc[-1]
-        current_close = today_bars["close"].iloc[-1]
         
-        # Calculate average volume of last 5 minutes
+        # Get real-time price from Finnhub
+        current_price = get_current_price(symbol)
+        if current_price is None:
+            return False, 0, 0, 0
+        
+        # Calculate average volume from historical bars
         avg_volume = today_bars["volume"].iloc[-6:-1].mean()
         current_volume = today_bars["volume"].iloc[-1]
         
@@ -650,21 +756,20 @@ def check_mom_breakout(symbol: str) -> tuple:
         rsi_series = calc_rsi(today_bars["close"], period=14)
         rsi = rsi_series.iloc[-1] if not rsi_series.empty else 50
         
-        # Breakout condition: price > lookback high, volume surge, RSI > 60
-        if current_high > lookback_high and current_volume > avg_volume * MOM_VOLUME_MULTIPLIER and rsi > 60:
-            entry_price = round(current_close, 4)
+        # Breakout condition using real-time price
+        if current_price > lookback_high and current_volume > avg_volume * MOM_VOLUME_MULTIPLIER and rsi > 60:
+            entry_price = round(current_price, 4)
             
-            # Stop loss based on stock volatility
             if symbol in HIGH_VOL_STOCKS:
-                stop_pct = 0.012  # 1.2%
+                stop_pct = 0.012
             else:
-                stop_pct = 0.008   # 0.8%
+                stop_pct = 0.008
             
             stop_price = round(entry_price * (1 - stop_pct), 4)
             risk = entry_price - stop_price
             target_price = round(entry_price + (MOM_REWARD_RISK * risk), 4)
             
-            sb_log(f"🔥 MOM breakout detected for {symbol} at ${entry_price} (RSI: {rsi:.1f})")
+            sb_log(f"🔥 MOM breakout detected for {symbol} at ${entry_price} (real-time)")
             return True, entry_price, stop_price, target_price
         
         return False, 0, 0, 0
