@@ -520,6 +520,7 @@ def run_strategy():
         log("Market closed — skipping scan")
         st.session_state.last_scan = datetime.now(SGT)
         return
+    
     try:
         account = trading_client.get_account()
         alpaca_bp = float(account.buying_power)
@@ -530,6 +531,7 @@ def run_strategy():
     except Exception as e:
         log(f"Account fetch error: {e}")
         return
+    
     if is_eod_window():
         for p in positions:
             try:
@@ -540,6 +542,8 @@ def run_strategy():
             except Exception as e:
                 log(f"EOW sell error {p.symbol}: {e}")
         return
+    
+    # ── EXIT LOGIC (monitor positions) ────────────────────────────────────
     for sym, p in held.items():
         try:
             df = get_bars(sym)
@@ -568,10 +572,23 @@ def run_strategy():
                 sell_limit(sym, p.qty, curr_p, f"TREND REVERSED (SMA5 < SMA20, P&L {profit_pct*100:+.2f}%)", entry_p)
         except Exception as e:
             log(f"Exit error {sym}: {e}")
+    
+    # ─────────────────────────────────────────────
+    # CHECK FOR TOUCH & TURN LIMIT ORDER FILLS
+    # ─────────────────────────────────────────────
+    filled_cost = check_touch_and_turn_fills(cash, held)
+    if filled_cost > 0:
+        cash -= filled_cost
+        st.session_state.local_cash = cash
+        log(f"Touch & Turn fills deducted: ${filled_cost:.2f}, remaining cash: ${cash:.2f}")
+    
+    # ── CASH BUFFER CHECK ────────────────────────────────────────────────
     if cash <= CASH_BUFFER:
         log("Cash below buffer — skipping buy scan")
         st.session_state.last_scan = datetime.now(SGT)
         return
+    
+    # ── BUY LOGIC ─────────────────────────────────────────────────────────
     for symbol in WATCHLIST:
         if symbol in held: continue
         try:
@@ -598,6 +615,7 @@ def run_strategy():
                 log(f"BUY {qty} {symbol} @ ${curr_p:.2f} = ${actual_cost:.2f} (SMA5 > SMA20, RSI+MACD ✓)")
         except Exception as e:
             log(f"Buy scan error {symbol}: {e}")
+    
     st.session_state.last_scan = datetime.now(SGT)
 
 def is_market_open() -> bool:
