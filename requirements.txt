@@ -5,3 +5,4 @@ streamlit
 pytz
 plotly
 supabase
+websocket-client==1.6.4
