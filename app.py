@@ -296,16 +296,14 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
     
     session_data = {}
     for trade in all_trades:
-        try:
-            session_start = get_trading_session_start(trade["date"], trade["Time (SGT)"])
-            pl = trade["_pl_usd"]
-            strategy = trade.get("Strategy", "Unknown")
-            if session_start not in session_data:
-                session_data[session_start] = {}
-            if strategy not in session_data[session_start]:
-                session_data[session_start][strategy] = 0.0
-            session_data[session_start][strategy] += pl
-        except Exception as e:
+        session_start = get_trading_session_start(trade["date"], trade["Time (SGT)"])
+        pl = trade["_pl_usd"]
+        strategy = trade.get("Strategy", "Unknown")
+        if session_start not in session_data:
+            session_data[session_start] = {}
+        if strategy not in session_data[session_start]:
+            session_data[session_start][strategy] = 0.0
+        session_data[session_start][strategy] += pl
     
     rows = []
     for session_start, strategies in session_data.items():
