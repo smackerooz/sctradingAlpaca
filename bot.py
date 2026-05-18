@@ -681,10 +681,12 @@ def run_strategy():
         return
     
     if is_eod_window():
-        for p in positions:
-            try:
-                exit_trade(p.symbol, float(p.qty), float(p.current_price),
-                           float(p.avg_entry_price), "EOW Liquidation", "ANY")
+    for p in positions:
+        try:
+            # Get the strategy that opened this position
+            strat = symbol_state.get(p.symbol, {}).get("strategy", "UNKNOWN")
+            exit_trade(p.symbol, float(p.qty), float(p.current_price),
+                       float(p.avg_entry_price), "EOW Liquidation", strat)
                 if p.symbol in symbol_state:
                     symbol_state[p.symbol]["in_trade"] = False
             except Exception as e:
