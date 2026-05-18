@@ -1064,20 +1064,20 @@ with tab_live:
         else:
             st.info("No completed trades in this session yet.")
 
-st.markdown("### 📊 Daily P&L by Trading Session")
-daily_df = compute_daily_pnl_overview()
-if not daily_df.empty:
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=daily_df["Trading Session Date"],
-        y=daily_df["Total"],
-        name="Total P&L",
-        marker_color=["#26a65b" if x >= 0 else "#e74c3c" for x in daily_df["Total"]],
-    ))
-    fig.update_layout(height=400, template="plotly_dark")
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.info("No data")
+    st.markdown("### 📊 Daily P&L by Trading Session")
+    daily_df = compute_daily_pnl_overview()
+    if not daily_df.empty:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=daily_df["Trading Session Date"],
+            y=daily_df["Total"],
+            name="Total P&L",
+            marker_color=["#26a65b" if x >= 0 else "#e74c3c" for x in daily_df["Total"]],
+        ))
+        fig.update_layout(height=400, template="plotly_dark")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No data")
 
     with st.expander("📋 Open Positions (Unrealized)", expanded=False):
         try:
