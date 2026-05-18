@@ -1039,86 +1039,72 @@ with tab_live:
         else:
             st.info("No completed trades in this session yet.")
 
-     # Daily P&L Bar Chart (by trading session)
+    # Daily P&L Bar Chart
     st.markdown("### 📊 Daily P&L by Trading Session")
-    
-    try:
-        daily_df = compute_daily_pnl_overview()
-        
-        if daily_df.empty:
-            st.info("No trade data available yet for daily P&L chart.")
-        else:
-            fig = go.Figure()
+    daily_df = compute_daily_pnl_overview()
+    if not daily_df.empty:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=daily_df["Trading Session Date"],
+            y=daily_df["Total"],
+            name="Total P&L (green = profit, red = loss)",
+            marker_color=["#26a65b" if x >= 0 else "#e74c3c" for x in daily_df["Total"]],
+            text=[f"${x:+.2f}" for x in daily_df["Total"]],
+            textposition="outside",
+            showlegend=True,
+        ))
+        for col in daily_df.columns:
+            if col not in ["Trading Session Date", "Total"]:
+                fig.add_trace(go.Bar(
+                    x=daily_df["Trading Session Date"],
+                    y=daily_df[col],
+                    name=col,
+                    opacity=0.7,
+                ))
+        fig.update_layout(barmode="group", height=400, template="plotly_dark",
+                          xaxis_title="Trading Session (start evening SGT)", yaxis_title="P&L (USD)",
+                          legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                          margin=dict(l=0,r=0,t=30,b=0))
+        st.plotly_chart(fig, use_container_width=True)
 
-            # Dummy trace for legend
-            fig.add_trace(go.Bar(
-                x=[None], y=[None],
-                name="Total P&L",
-                marker_color="#26a65b",
-                showlegend=True,
-                legendgroup="total",
-            ))
+        daily_sorted = daily_df.sort_values("Trading Session Date", ascending=True)
+        daily_sorted["Cumulative Total"] = daily_sorted["Total"].cumsum()
+        fig_cum = go.Figure()
+        fig_cum.add_trace(go.Scatter(
+            x=daily_sorted["Trading Session Date"], y=daily_sorted["Cumulative Total"],
+            mode="lines+markers", name="Cumulative P&L", line=dict(color="#f39c12", width=3),
+            marker=dict(size=8, color="#e67e22"), fill="tozeroy", fillcolor="rgba(243,156,18,0.1)",
+            text=[f"${x:+.2f}" for x in daily_sorted["Cumulative Total"]], textposition="top center",
+        ))
+        fig_cum.update_layout(height=300, template="plotly_dark",
+                              xaxis_title="Trading Session (start evening SGT)",
+                              yaxis_title="Cumulative P&L (USD)", margin=dict(l=0,r=0,t=30,b=0),
+                              hovermode="x unified")
+        st.plotly_chart(fig_cum, use_container_width=True)
+    else:
+        st.info("No trade data available yet for daily P&L chart.")
 
-            # Actual Total bars
-            fig.add_trace(go.Bar(
-                x=daily_df["Trading Session Date"],
-                y=daily_df["Total"],
-                marker_color=["#26a65b" if x >= 0 else "#e74c3c" for x in daily_df["Total"]],
-                text=[f"${x:+.2f}" for x in daily_df["Total"]],
-                textposition="outside",
-                showlegend=False,
-                legendgroup="total",
-            ))
-
-            # Strategy columns
-            valid_strategies = [s["name"] for s in st.session_state.strategies]
-            for col in daily_df.columns:
-                if col not in ["Trading Session Date", "Total"] and col in valid_strategies:
-                    fig.add_trace(go.Bar(
-                        x=daily_df["Trading Session Date"],
-                        y=daily_df[col],
-                        name=col,
-                        opacity=0.7,
-                    ))
-
-            fig.update_layout(
-                barmode="group",
-                height=400,
-                template="plotly_dark",
-                xaxis_title="Trading Session (start evening SGT)",
-                yaxis_title="P&L (USD)",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                margin=dict(l=0, r=0, t=30, b=0),
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-            # Cumulative chart
-            daily_sorted = daily_df.sort_values("Trading Session Date", ascending=True)
-            daily_sorted["Cumulative Total"] = daily_sorted["Total"].cumsum()
-            fig_cum = go.Figure()
-            fig_cum.add_trace(go.Scatter(
-                x=daily_sorted["Trading Session Date"],
-                y=daily_sorted["Cumulative Total"],
-                mode="lines+markers",
-                name="Cumulative P&L",
-                line=dict(color="#f39c12", width=3),
-                marker=dict(size=8, color="#e67e22"),
-                fill="tozeroy",
-                fillcolor="rgba(243,156,18,0.1)",
-                text=[f"${x:+.2f}" for x in daily_sorted["Cumulative Total"]],
-                textposition="top center",
-            ))
-            fig_cum.update_layout(
-                height=300,
-                template="plotly_dark",
-                xaxis_title="Trading Session (start evening SGT)",
-                yaxis_title="Cumulative P&L (USD)",
-                margin=dict(l=0, r=0, t=30, b=0),
-                hovermode="x unified",
-            )
-            st.plotly_chart(fig_cum, use_container_width=True)
-    except Exception as e:
-        st.error(f"Error loading chart: {e}")
+    with st.expander("📋 Open Positions (Unrealized)", expanded=False):
+        try:
+            positions = trading_client.get_all_positions()
+            if positions:
+                open_data = []
+                for p in positions:
+                    entry = float(p.avg_entry_price)
+                    current = float(p.current_price)
+                    qty = float(p.qty)
+                    pl_usd = (current - entry) * qty
+                    pl_pct = (pl_usd / (entry * qty)) * 100 if entry * qty != 0 else 0
+                    open_data.append({
+                        "Symbol": p.symbol, "Entry": f"${entry:.2f}", "Current": f"${current:.2f}",
+                        "Qty": round(qty, 4), "Unrealized P&L ($)": f"${pl_usd:+.2f}",
+                        "Unrealized P&L (%)": f"{pl_pct:+.2f}%",
+                    })
+                st.dataframe(pd.DataFrame(open_data), use_container_width=True, hide_index=True)
+            else:
+                st.info("No open positions.")
+        except:
+            st.info("Could not fetch positions.")
 
     st.write("### 📡 Live Signal Rankings")
     lsr_col1, lsr_col2 = st.columns([3, 1])
