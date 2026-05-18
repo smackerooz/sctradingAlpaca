@@ -145,6 +145,15 @@ def save_trade(symbol, entry_price, exit_price, qty, reason, strategy):
     except Exception as e:
         sb_log(f"Save trade error: {e}")
 
+def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_g = gain.ewm(com=period-1, min_periods=period).mean()
+    avg_l = loss.ewm(com=period-1, min_periods=period).mean()
+    rs = avg_g / avg_l.replace(0, float("nan"))
+    return 100 - (100 / (1 + rs))
+
 def enter_trade(symbol: str, entry_price: float, stop_price: float,
                 target_price: float, cash: float, strategy: str) -> float:
     qty = MAX_TRADE_USD / entry_price
