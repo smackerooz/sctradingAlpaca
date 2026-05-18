@@ -933,7 +933,9 @@ def check_touch_and_turn(symbol: str) -> tuple:
         return False, 0, 0, 0, False
 
 def run_touch_and_turn_strategy(cash: float, held: dict) -> float:
-    """Touch and Turn strategy with limit order at the opening candle low."""
+    """Touch and Turn strategy with limit order at the opening candle low.
+    Includes price verification to prevent stale setups.
+    """
     total_cost = 0.0
     for symbol in WATCHLIST:
         if symbol in held:
@@ -955,14 +957,45 @@ def run_touch_and_turn_strategy(cash: float, held: dict) -> float:
         if s.get("turn_traded_today") or s.get("in_trade"):
             continue
         
+        # ─────────────────────────────────────────────
         # Check if we have a setup
+        # ─────────────────────────────────────────────
         is_setup, entry_price, stop_price, target_price, limit_order_active = check_touch_and_turn(symbol)
         if not is_setup:
             continue
         
-        # Place limit order (not market order)
-        # Note: This uses a limit order at the entry price (low of opening candle)
-        # The order will only fill if price returns to that level
+        # ─────────────────────────────────────────────
+        # PREVENT STALE SETUPS: Verify current price
+        # ─────────────────────────────────────────────
+        current_price = get_current_price(symbol)
+        if current_price is None:
+            sb_log(f"⚠️ TOUCH_TURN {symbol}: Cannot get current price – skipping")
+            continue
+        
+        # Calculate percentage difference between current price and entry price
+        price_diff_pct = abs((current_price - entry_price) / entry_price) * 100
+        
+        # If current price is more than 2% away from entry price, setup is stale
+        if price_diff_pct > 2.0:
+            sb_log(f"⏭️ TOUCH_TURN {symbol}: Stale setup – current ${current_price:.2f} vs entry ${entry_price:.2f} ({price_diff_pct:.1f}% away)")
+            # Mark as traded for the day to avoid retrying
+            s["turn_traded_today"] = True
+            continue
+        
+        # ─────────────────────────────────────────────
+        # Check if we are still within the valid time window
+        # ─────────────────────────────────────────────
+        now_et = datetime.now(ET)
+        window_end_et = now_et.replace(hour=10, minute=30, second=0, microsecond=0)  # 10:30 AM ET
+        
+        if now_et > window_end_et:
+            sb_log(f"⏭️ TOUCH_TURN {symbol}: Outside time window (after 10:30 AM ET)")
+            s["turn_traded_today"] = True
+            continue
+        
+        # ─────────────────────────────────────────────
+        # Place limit order
+        # ─────────────────────────────────────────────
         if not s.get("limit_order_placed"):
             qty = MAX_TRADE_USD / entry_price
             if qty <= 0:
@@ -974,7 +1007,6 @@ def run_touch_and_turn_strategy(cash: float, held: dict) -> float:
                 continue
             
             try:
-                # Submit LIMIT order (not market)
                 from alpaca.trading.requests import LimitOrderRequest
                 trading_client.submit_order(LimitOrderRequest(
                     symbol=symbol,
@@ -983,9 +1015,8 @@ def run_touch_and_turn_strategy(cash: float, held: dict) -> float:
                     limit_price=entry_price,
                     time_in_force=TimeInForce.DAY,
                 ))
-                sb_log(f"🟢 TOUCH & TURN LIMIT ORDER placed for {qty:.4f} {symbol} @ ${entry_price:.2f} | Stop:${stop_price:.2f} | Target:${target_price:.2f}")
+                sb_log(f"🟢 TOUCH & TURN LIMIT ORDER placed for {qty:.4f} {symbol} @ ${entry_price:.2f} | Stop:${stop_price:.2f} | Target:${target_price:.2f} | Current price: ${current_price:.2f}")
                 
-                # Mark that limit order is placed
                 s["limit_order_placed"] = True
                 s["pending_entry"] = entry_price
                 s["pending_stop"] = stop_price
@@ -993,15 +1024,9 @@ def run_touch_and_turn_strategy(cash: float, held: dict) -> float:
                 s["pending_qty"] = qty
                 s["pending_cost"] = actual_cost
                 
-                # We don't deduct cash yet – only when limit order fills
-                # For now, just track that order is open
             except Exception as e:
                 sb_log(f"Limit order error {symbol}: {e}")
                 continue
-        
-        # Check if limit order has filled (we need to check positions)
-        # This will be handled in the main loop via position monitoring
-        # When the limit order fills, Alpaca will create a position
     
     return total_cost
 
