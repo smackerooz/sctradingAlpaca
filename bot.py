@@ -171,6 +171,11 @@ def connect_websocket():
     wst.start()
     log.info("Finnhub WebSocket thread started")
 
+def is_finnhub_connected() -> bool:
+    """Return True if Finnhub WebSocket is connected and receiving data."""
+    global websocket_connected
+    return websocket_connected and len(latest_prices) > 0
+
 def get_realtime_price(symbol: str) -> float:
     """Get the latest real-time price for a symbol from Finnhub."""
     with prices_lock:
@@ -189,10 +194,21 @@ def get_current_price(symbol: str) -> float:
     """
     Get the most recent price – priority to Finnhub WebSocket, fallback to Alpaca.
     """
-    rt_price = get_realtime_price(symbol)
-    if rt_price is not None and rt_price > 0:
-        return rt_price
+    # First try Finnhub real-time
+    if is_finnhub_connected():
+        rt_price = get_realtime_price(symbol)
+        if rt_price is not None and rt_price > 0:
+            return rt_price
+    else:
+        # Log warning only once per minute to avoid spam
+        if not hasattr(get_current_price, "_last_warning"):
+            get_current_price._last_warning = 0
+        now = time.time()
+        if now - get_current_price._last_warning > 60:
+            log.warning("Finnhub not connected – falling back to Alpaca delayed data")
+            get_current_price._last_warning = now
     
+    # Fallback to Alpaca (last close from latest bar)
     try:
         df = get_bars(symbol, timeframe_minutes=1, days_back=1)
         if not df.empty:
@@ -207,6 +223,23 @@ if FINNHUB_API_KEY:
     connect_websocket()
 else:
     log.warning("FINNHUB_API_KEY not set – using Alpaca IEX data (delayed).")
+
+def check_finnhub_health():
+    """Periodic health check – logs connection status and attempts reconnect if needed."""
+    global websocket_connected
+    if not FINNHUB_API_KEY:
+        return
+    
+    if not websocket_connected:
+        log.warning("Finnhub WebSocket disconnected – attempting reconnect...")
+        connect_websocket()
+    else:
+        # Check if we have received any price in the last 30 seconds
+        with prices_lock:
+            recent_data = len(latest_prices) > 0
+        
+        if not recent_data:
+            log.warning("Finnhub connected but no price data received – may be stale")
 
 
 # ─────────────────────────────────────────────
@@ -1233,6 +1266,7 @@ if __name__ == "__main__":
         try:
             run_strategy()
             send_heartbeat()
+            check_finnhub_health()
         except Exception as e:
             sb_log(f"Unhandled error: {e}")
         time.sleep(SCAN_INTERVAL)
