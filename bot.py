@@ -43,11 +43,11 @@ SCAN_INTERVAL = 45
 
 # ── RISK MANAGEMENT ──────────────────────────────────────────────────────
 TOTAL_EQUITY = 100000.0      # Total account balance
-CASH_BUFFER = 95000.0         # Reserved cash (not for trading)
-TRADING_CAPITAL = TOTAL_EQUITY - CASH_BUFFER  # = 5000.0
+CASH_BUFFER = 90000.0         # Reserved cash (not for trading)
+TRADING_CAPITAL = TOTAL_EQUITY - CASH_BUFFER  # = 10000.0
 
-RISK_PER_TRADE_PCT = 0.01     # 1% of trading capital = $50 risk per trade
-MAX_POSITION_PCT = 0.5        # Max 50% of trading capital per trade = $2,500
+RISK_PER_TRADE_PCT = 0.01     # 1% of trading capital = $100 risk per trade
+MAX_POSITION_PCT = 0.25        # Max 25% of trading capital per trade = $2,500
 
 # Strategy configs (used by individual strategies)
 ORB_RETEST_TOLERANCE_PCT = 0.002
