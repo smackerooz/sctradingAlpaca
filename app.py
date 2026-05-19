@@ -1,5 +1,5 @@
 """
-Dynamic Dashboard – Works with any strategy defined in Supabase 'strategies' table
+Dynamic Dashboard – -Works with any strategy defined in Supabase 'strategies' table
 - Toggle between Last Completed Session and Current Session for trades
 - Portfolio Backtest: select strategy from dropdown
 - Manual override, liquidation, daily P&L charts, signal scanner
