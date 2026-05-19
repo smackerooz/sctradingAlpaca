@@ -5,7 +5,7 @@ Complete Dashboard for Trading Bot (ORB-R + VWAP + MOM + Touch & Turn)
 - Manual liquidation with PIN
 - Auto-refresh trades every 60 seconds
 - Trading session P&L (9:30pm SGT → 4:00am SGT)
-- Daily P&L bar chart with cumulative line
+- Daily P&L bar chart with cumulative line (fixed)
 - Finnhub WebSocket status (improved)
 """
 
@@ -217,14 +217,21 @@ def parse_datetime(date_str: str, time_str: str) -> datetime:
         return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
 
 def get_trading_session_start(date_str: str, time_str: str) -> str:
-    dt = parse_datetime(date_str, time_str)
-    dt = SGT.localize(dt)
-    if dt.hour >= 21 and dt.minute >= 30:
-        return dt.date().isoformat()
-    elif dt.hour < 4:
-        return (dt.date() - timedelta(days=1)).isoformat()
-    else:
-        return dt.date().isoformat()
+    try:
+        dt = parse_datetime(date_str, time_str)
+        dt = SGT.localize(dt)
+        if dt.hour >= 21 and dt.minute >= 30:
+            return dt.date().isoformat()
+        elif dt.hour < 4:
+            return (dt.date() - timedelta(days=1)).isoformat()
+        else:
+            return dt.date().isoformat()
+    except Exception as e:
+        # Fallback: return the raw date in ISO format
+        if "/" in date_str:
+            d, m, y = date_str.split("/")
+            return f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+        return date_str
 
 def get_last_completed_session_from_trades() -> str:
     try:
@@ -289,19 +296,63 @@ def load_all_trades() -> list:
         return []
 
 def compute_daily_pnl_overview() -> pd.DataFrame:
+    """Returns a DataFrame with one row per trading session (9:30pm SGT → 4:00am SGT next day)."""
     all_trades = load_all_trades()
     if not all_trades:
         return pd.DataFrame()
+    
     session_data = {}
+    debug_info = []
+    
     for trade in all_trades:
-        session_start = get_trading_session_start(trade["date"], trade["Time (SGT)"])
-        pl = trade["_pl_usd"]
-        strategy = trade.get("Strategy", "Unknown")
-        if session_start not in session_data:
-            session_data[session_start] = {}
-        if strategy not in session_data[session_start]:
-            session_data[session_start][strategy] = 0.0
-        session_data[session_start][strategy] += pl
+        try:
+            date_str = trade["date"]
+            time_str = trade["Time (SGT)"]
+            pl = trade["_pl_usd"]
+            strategy = trade.get("Strategy", "Unknown")
+            
+            # Compute session start (with robust error handling)
+            session_start = get_trading_session_start(date_str, time_str)
+            debug_info.append(f"{date_str} {time_str} → session {session_start}")
+            
+            if session_start is None:
+                # Fallback: use the raw date as session (to avoid empty chart)
+                if "/" in date_str:
+                    d, m, y = date_str.split("/")
+                    session_start = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+                else:
+                    session_start = date_str
+            
+            if session_start not in session_data:
+                session_data[session_start] = {}
+            if strategy not in session_data[session_start]:
+                session_data[session_start][strategy] = 0.0
+            session_data[session_start][strategy] += pl
+        except Exception as e:
+            st.error(f"Error processing trade {trade.get('Symbol', '?')}: {e}")
+    
+    # Optional: show debug info (expandable, can be removed later)
+    with st.expander("🔍 Debug: Session start calculation", expanded=False):
+        st.code("\n".join(debug_info[-20:]))
+    
+    if not session_data:
+        st.warning("No session data could be extracted. Falling back to raw dates.")
+        # Fallback: group by raw date (ignoring session logic)
+        for trade in all_trades:
+            date_str = trade["date"]
+            pl = trade["_pl_usd"]
+            strategy = trade.get("Strategy", "Unknown")
+            if "/" in date_str:
+                d, m, y = date_str.split("/")
+                date_iso = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+            else:
+                date_iso = date_str
+            if date_iso not in session_data:
+                session_data[date_iso] = {}
+            if strategy not in session_data[date_iso]:
+                session_data[date_iso][strategy] = 0.0
+            session_data[date_iso][strategy] += pl
+    
     rows = []
     for session_start, strategies in session_data.items():
         row = {"Trading Session Date": session_start}
@@ -311,9 +362,13 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
             total += pl_val
         row["Total"] = round(total, 2)
         rows.append(row)
+    
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.sort_values("Trading Session Date", ascending=True)
+        st.success(f"Chart data: {len(df)} sessions found, total P&L range: {df['Total'].min()} to {df['Total'].max()}")
+    else:
+        st.error("No chart data – check that your realized_trades table has rows with valid dates and times.")
     return df
 
 def get_current_strategy_display():
@@ -849,7 +904,6 @@ except Exception:
 
 # Finnhub WebSocket status (improved)
 try:
-    # Look for any WebSocket trade activity in the last 2 minutes
     two_min_ago = (datetime.now(SGT) - timedelta(minutes=2)).isoformat()
     trade_activity = supabase.table("bot_logs") \
         .select("message", "created_at") \
@@ -862,7 +916,6 @@ try:
     if trade_activity.data:
         st.success("🔌 Finnhub WebSocket: CONNECTED (data flowing)", icon="✅")
     else:
-        # No recent trades – look for connection message
         conn_log = supabase.table("bot_logs") \
             .select("message", "created_at") \
             .like("message", "%WebSocket connected%") \
@@ -874,7 +927,6 @@ try:
         if conn_log.data:
             st.info("🔌 Finnhub WebSocket: CONNECTED (awaiting data)", icon="🔄")
         else:
-            # No connection – check market hours
             now_et = datetime.now(ET)
             market_opens = now_et.replace(hour=9, minute=30, second=0)
             market_closes = now_et.replace(hour=16, minute=0, second=0)
@@ -1090,7 +1142,7 @@ with tab_live:
         else:
             st.info("No completed trades in this session yet.")
 
-    # Daily P&L Bar Chart (by trading session)
+    # Daily P&L Bar Chart (by trading session) – with fixed compute function
     st.markdown("### 📊 Daily P&L by Trading Session")
     daily_df = compute_daily_pnl_overview()
     if not daily_df.empty:
