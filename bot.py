@@ -43,11 +43,11 @@ SCAN_INTERVAL = 45
 
 # ── RISK MANAGEMENT ──────────────────────────────────────────────────────
 TOTAL_EQUITY = 100000.0      # Total account balance
-CASH_BUFFER = 90000.0         # Reserved cash (not for trading)
-TRADING_CAPITAL = TOTAL_EQUITY - CASH_BUFFER  # = 10000.0
+CASH_BUFFER = 95000.0         # Reserved cash (not for trading)
+TRADING_CAPITAL = TOTAL_EQUITY - CASH_BUFFER  # = 5000.0
 
-RISK_PER_TRADE_PCT = 0.01     # 1% of trading capital = $100 risk per trade
-MAX_POSITION_PCT = 0.25        # Max 25% of trading capital per trade = $2,500
+RISK_PER_TRADE_PCT = 0.01     # 1% of trading capital = $50 risk per trade
+MAX_POSITION_PCT = 0.5        # Max 50% of trading capital per trade = $2,500
 
 # Strategy configs (used by individual strategies)
 ORB_RETEST_TOLERANCE_PCT = 0.002
@@ -125,26 +125,14 @@ _last_forced_check = None
 # SHARED UTILITIES
 # ─────────────────────────────────────────────
 def calculate_qty(entry_price: float, stop_price: float) -> float:
-    """
-    Calculate position size using professional risk management.
-    - Risk per trade: 1% of trading capital ($50)
-    - Max position size: 50% of trading capital ($2,500)
-    """
     risk_per_share = entry_price - stop_price
     if risk_per_share <= 0.01:
         return 0.0
-    
-    # Risk-based quantity
     dollar_risk = TRADING_CAPITAL * RISK_PER_TRADE_PCT
     qty_by_risk = dollar_risk / risk_per_share
-    
-    # Cash-based cap (max 50% of trading capital per trade)
     max_cash_per_trade = TRADING_CAPITAL * MAX_POSITION_PCT
     qty_by_cash = max_cash_per_trade / entry_price
-    
-    # Take the smaller of the two
     qty = min(qty_by_risk, qty_by_cash)
-    
     return qty
 
 def sb_log(msg: str):
@@ -189,7 +177,6 @@ def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 def get_current_cash() -> float:
-    """Get actual cash from Alpaca - single source of truth."""
     try:
         account = trading_client.get_account()
         return float(account.buying_power)
@@ -543,7 +530,6 @@ def check_orb_retest(symbol: str, box_high: float) -> bool:
             latest_high >= box_high * (1 - ORB_RETEST_TOLERANCE_PCT))
 
 def run_orb_strategy() -> list:
-    """Check ORB-R setups, return list of (symbol, entry, stop, target, qty, strategy, is_limit)"""
     setups = []
     for symbol in WATCHLIST:
         if symbol in symbol_state and symbol_state[symbol].get("in_trade"):
@@ -606,22 +592,76 @@ def run_orb_strategy() -> list:
             if risk <= 0 or risk / entry_price > 0.05:
                 continue
             target_price = round(entry_price + (ORB_REWARD_RISK * risk), 4)
-        
         qty = calculate_qty(entry_price, stop_price)
         if qty <= 0:
             continue
-        
         setups.append((symbol, entry_price, stop_price, target_price, qty, "ORB-R", False))
         s["orb_traded_today"] = True
     return setups
 
 # ─────────────────────────────────────────────
-# VWAP STRATEGY
+# VWAP STRATEGY (WITH DEBUG LOGGING)
 # ─────────────────────────────────────────────
 VWAP_REWARD_RISK = 1.5
 
+def check_vwap_retest(symbol: str, current_vwap: float) -> tuple:
+    """Returns (is_retest, entry_price, stop_price, target_price, candle_low)"""
+    try:
+        df_5m = get_bars(symbol, timeframe_minutes=5, days_back=VWAP_LOOKBACK_DAYS)
+        if df_5m.empty or len(df_5m) < 10:
+            sb_log(f"🔍 VWAP DEBUG {symbol}: insufficient 5-min bars (len={len(df_5m)})")
+            return False, 0, 0, 0, 0
+
+        today_et = datetime.now(ET).date()
+        today_bars = df_5m[df_5m.index.date == today_et]
+        if today_bars.empty or len(today_bars) < 3:
+            sb_log(f"🔍 VWAP DEBUG {symbol}: insufficient today bars (len={len(today_bars)})")
+            return False, 0, 0, 0, 0
+
+        latest = today_bars.iloc[-1]
+        prev = today_bars.iloc[-2] if len(today_bars) > 1 else latest
+        candle_low = float(latest["low"])
+        candle_high = float(latest["high"])
+        vwap_near = (candle_low <= current_vwap * 1.001 and candle_high >= current_vwap * 0.999)
+
+        sb_log(f"🔍 VWAP DEBUG {symbol}: VWAP={current_vwap:.4f}, low={candle_low:.4f}, high={candle_high:.4f}, vwap_near={vwap_near}")
+
+        if not vwap_near:
+            return False, 0, 0, 0, 0
+
+        hammer = is_hammer(latest)
+        inv_hammer = is_inverted_hammer(latest)
+        engulfing = is_bullish_engulfing(prev, latest) if len(today_bars) > 1 else False
+        sb_log(f"🔍 VWAP DEBUG {symbol}: hammer={hammer}, inv_hammer={inv_hammer}, engulfing={engulfing}")
+
+        if not (hammer or inv_hammer or engulfing):
+            return False, 0, 0, 0, 0
+
+        entry_price = round(float(latest["close"]), 4)
+        stop_price = round(min(current_vwap * (1 - VWAP_STOP_PCT), float(latest["low"])), 4)
+
+        min_stop_pct = 0.003 if symbol not in HIGH_VOL_STOCKS else 0.006
+        min_stop_distance = entry_price * min_stop_pct
+        if entry_price - stop_price < min_stop_distance:
+            stop_price = entry_price - min_stop_distance
+            risk = entry_price - stop_price
+            if risk <= 0:
+                return False, 0, 0, 0, 0
+            target_price = round(entry_price + (VWAP_REWARD_RISK * risk), 4)
+            sb_log(f"🔍 VWAP DEBUG {symbol}: adjusted stop to {stop_price:.4f} (min {min_stop_pct*100:.1f}%)")
+        else:
+            risk = entry_price - stop_price
+            if risk <= 0:
+                return False, 0, 0, 0, 0
+            target_price = round(entry_price + (VWAP_REWARD_RISK * risk), 4)
+
+        sb_log(f"🔍 VWAP DEBUG {symbol}: RETEST TRUE! entry={entry_price:.4f}, stop={stop_price:.4f}, target={target_price:.4f}")
+        return True, entry_price, stop_price, target_price, float(latest["low"])
+    except Exception as e:
+        sb_log(f"🔍 VWAP DEBUG {symbol}: exception in check_vwap_retest: {e}")
+        return False, 0, 0, 0, 0
+
 def run_vwap_strategy() -> list:
-    """Check VWAP setups, return list of (symbol, entry, stop, target, qty, strategy, is_limit)"""
     setups = []
     for symbol in WATCHLIST:
         if symbol in symbol_state and symbol_state[symbol].get("in_trade"):
@@ -635,76 +675,48 @@ def run_vwap_strategy() -> list:
         s = symbol_state[symbol]
         if s.get("vwap_traded_today") or s.get("in_trade"):
             continue
-        
+
         df_5m = get_bars(symbol, timeframe_minutes=5, days_back=1)
         if df_5m.empty or len(df_5m) < 10:
+            sb_log(f"🔍 VWAP DEBUG {symbol}: get_bars returned empty or too short (len={len(df_5m)})")
             continue
-        
+
         # Calculate VWAP
         typical_price = (df_5m["high"] + df_5m["low"] + df_5m["close"]) / 3
         cumulative_tp_vol = (typical_price * df_5m["volume"]).cumsum()
         cumulative_vol = df_5m["volume"].cumsum()
-        vwap = round(float((cumulative_tp_vol / cumulative_vol).iloc[-1]), 4)
-        
+        vwap = round(float((cumulative_tp_vol / cumulative_vol).iloc[-1]), 4) if cumulative_vol.iloc[-1] != 0 else None
         if vwap is None:
+            sb_log(f"🔍 VWAP DEBUG {symbol}: VWAP calculation failed (cumulative_vol zero)")
             continue
-        
+
         current_price = float(df_5m["close"].iloc[-1])
+        sb_log(f"🔍 VWAP DEBUG {symbol}: VWAP={vwap:.4f}, current_price={current_price:.4f}, above? {current_price > vwap}")
+
         if current_price < vwap:
+            sb_log(f"🔍 VWAP DEBUG {symbol}: price below VWAP, skipping")
             continue
-        
-        # Check retest
-        today_et = datetime.now(ET).date()
-        today_bars = df_5m[df_5m.index.date == today_et]
-        if today_bars.empty or len(today_bars) < 3:
+
+        is_retest, entry_price, stop_price, target_price, _ = check_vwap_retest(symbol, vwap)
+        if not is_retest:
             continue
-        
-        latest = today_bars.iloc[-1]
-        prev = today_bars.iloc[-2] if len(today_bars) > 1 else latest
-        candle_low = float(latest["low"])
-        candle_high = float(latest["high"])
-        vwap_near = (candle_low <= vwap * 1.001 and candle_high >= vwap * 0.999)
-        if not vwap_near:
-            continue
-        
-        hammer = is_hammer(latest)
-        inv_hammer = is_inverted_hammer(latest)
-        engulfing = is_bullish_engulfing(prev, latest) if len(today_bars) > 1 else False
-        if not (hammer or inv_hammer or engulfing):
-            continue
-        
-        entry_price = round(float(latest["close"]), 4)
-        stop_price = round(min(vwap * (1 - VWAP_STOP_PCT), float(latest["low"])), 4)
-        min_stop_pct = 0.003 if symbol not in HIGH_VOL_STOCKS else 0.006
-        min_stop_distance = entry_price * min_stop_pct
-        if entry_price - stop_price < min_stop_distance:
-            stop_price = entry_price - min_stop_distance
-            risk = entry_price - stop_price
-            if risk <= 0:
-                continue
-            target_price = round(entry_price + (VWAP_REWARD_RISK * risk), 4)
-        else:
-            risk = entry_price - stop_price
-            if risk <= 0:
-                continue
-            target_price = round(entry_price + (VWAP_REWARD_RISK * risk), 4)
-        
+
         qty = calculate_qty(entry_price, stop_price)
         if qty <= 0:
+            sb_log(f"🔍 VWAP DEBUG {symbol}: calculated qty {qty} <= 0, skipping")
             continue
-        
+
         sb_log(f"📊 {symbol} VWAP retest detected at ${vwap:.2f}")
         setups.append((symbol, entry_price, stop_price, target_price, qty, "VWAP", False))
         s["vwap_traded_today"] = True
     return setups
 
 # ─────────────────────────────────────────────
-# MOM STRATEGY (Momentum Breakout)
+# MOM STRATEGY
 # ─────────────────────────────────────────────
 MOM_REWARD_RISK = 2.0
 
 def run_mom_strategy() -> list:
-    """Check MOM setups, return list of (symbol, entry, stop, target, qty, strategy, is_limit)"""
     setups = []
     for symbol in WATCHLIST:
         if symbol in symbol_state and symbol_state[symbol].get("in_trade"):
@@ -718,7 +730,6 @@ def run_mom_strategy() -> list:
         s = symbol_state[symbol]
         if s.get("mom_traded_today") or s.get("in_trade"):
             continue
-        
         try:
             df = get_bars(symbol, timeframe_minutes=1, days_back=1)
             if df.empty or len(df) < 15:
@@ -746,11 +757,9 @@ def run_mom_strategy() -> list:
                 if risk <= 0:
                     continue
                 target_price = round(entry_price + (MOM_REWARD_RISK * risk), 4)
-                
                 qty = calculate_qty(entry_price, stop_price)
                 if qty <= 0:
                     continue
-                
                 sb_log(f"🔥 MOM breakout detected for {symbol} at ${entry_price} (RSI: {rsi:.1f})")
                 setups.append((symbol, entry_price, stop_price, target_price, qty, "MOM", False))
                 s["mom_traded_today"] = True
@@ -764,7 +773,6 @@ def run_mom_strategy() -> list:
 TURN_REWARD_RISK = 2.0
 
 def run_touch_and_turn_strategy() -> list:
-    """Check Touch & Turn setups, return list of (symbol, entry, stop, target, qty, strategy, is_limit)"""
     setups = []
     for symbol in WATCHLIST:
         if symbol in symbol_state and symbol_state[symbol].get("in_trade"):
@@ -778,9 +786,7 @@ def run_touch_and_turn_strategy() -> list:
         s = symbol_state[symbol]
         if s.get("turn_traded_today") or s.get("in_trade"):
             continue
-        
         try:
-            # Get opening candle
             df = get_bars(symbol, timeframe_minutes=15, days_back=1)
             if df.empty or len(df) < 1:
                 continue
@@ -793,12 +799,8 @@ def run_touch_and_turn_strategy() -> list:
             high = float(first_candle["high"])
             low = float(first_candle["low"])
             close = float(first_candle["close"])
-            
-            # Must be a red candle (close < open)
             if close >= open_price:
                 continue
-            
-            # Calculate ATR for volatility check
             end = datetime.now(pytz.utc)
             start = end - timedelta(days=30)
             req = StockBarsRequest(
@@ -821,48 +823,35 @@ def run_touch_and_turn_strategy() -> list:
             )
             atr = bars["tr"].rolling(14).mean().iloc[-1]
             atr = round(float(atr), 4) if not pd.isna(atr) else 0.0
-            
             candle_range = high - low
             min_range = atr * 0.25
             if candle_range < min_range or atr == 0:
                 continue
-            
-            # Entry at the low of the opening candle
             entry_price = round(low, 4)
-            
-            # Stop loss based on volatility (same as MOM)
             if symbol in HIGH_VOL_STOCKS:
-                stop_pct = 0.012  # 1.2%
+                stop_pct = 0.012
             else:
-                stop_pct = 0.008   # 0.8%
+                stop_pct = 0.008
             stop_price = round(entry_price * (1 - stop_pct), 4)
-            
             risk = entry_price - stop_price
             if risk <= 0:
                 continue
             target_price = round(entry_price + (TURN_REWARD_RISK * risk), 4)
-            
-            # Check time window (9:30 - 10:30 AM ET)
             now_et = datetime.now(ET)
             window_end_et = now_et.replace(hour=10, minute=30, second=0, microsecond=0)
             if now_et > window_end_et:
                 s["turn_traded_today"] = True
                 continue
-            
-            # Check current price is not too far from entry (prevent stale setups)
             current_price = get_current_price(symbol)
             if current_price is None:
                 continue
-            
             price_diff_pct = abs((current_price - entry_price) / entry_price) * 100
             if price_diff_pct > 2.0:
                 s["turn_traded_today"] = True
                 continue
-            
             qty = calculate_qty(entry_price, stop_price)
             if qty <= 0:
                 continue
-            
             sb_log(f"🎯 Touch & Turn setup for {symbol}: Entry LIMIT ${entry_price}, Stop ${stop_price}, Target ${target_price}, ATR: {atr:.2f}")
             setups.append((symbol, entry_price, stop_price, target_price, qty, "TOUCH_TURN", True))
             s["turn_traded_today"] = True
@@ -905,16 +894,12 @@ STRATEGIES = {
 }
 
 def get_current_session() -> str:
-    """Returns the strategy name or 'CLOSED'."""
     forced = get_forced_strategy()
     now_et = datetime.now(ET)
     market_open = is_market_open()
-
-    # Manual override takes precedence when market is open
     if market_open and forced in STRATEGIES:
         return forced
     if market_open and forced == "AUTO":
-        # Find first strategy whose time window contains now
         for strat_name, cfg in STRATEGIES.items():
             start_h, start_m = cfg["time_window_start"]
             end_h, end_m = cfg["time_window_end"]
@@ -927,12 +912,10 @@ def get_current_session() -> str:
 # ─────────────────────────────────────────────
 # ORDER PLACEMENT AND FILL DETECTION
 # ─────────────────────────────────────────────
-def place_order(symbol: str, qty: float, entry_price: float, stop_price: float, 
+def place_order(symbol: str, qty: float, entry_price: float, stop_price: float,
                 target_price: float, strategy: str, is_limit: bool = False) -> bool:
-    """Place order and store pending info. Returns True if order placed."""
     if qty <= 0:
         return False
-    
     try:
         if is_limit:
             order = LimitOrderRequest(
@@ -955,8 +938,7 @@ def place_order(symbol: str, qty: float, entry_price: float, stop_price: float,
             trading_client.submit_order(order)
             order_type = "MARKET"
             sb_log(f"🟢 {strategy} MARKET ORDER placed for {qty:.4f} {symbol} | Entry: ~${entry_price:.2f} | Stop:${stop_price:.2f} | Target:${target_price:.2f}")
-        
-        # Store pending trade info
+
         if symbol not in symbol_state:
             symbol_state[symbol] = {}
         symbol_state[symbol]["pending_trade"] = {
@@ -968,8 +950,7 @@ def place_order(symbol: str, qty: float, entry_price: float, stop_price: float,
             "limit_price": entry_price if is_limit else None,
             "placed_at": datetime.now(ET).isoformat()
         }
-        
-        # For market orders, assume immediate fill and update state now
+
         if not is_limit:
             s = symbol_state[symbol]
             s["in_trade"] = True
@@ -978,48 +959,38 @@ def place_order(symbol: str, qty: float, entry_price: float, stop_price: float,
             s["stop"] = stop_price
             s["target"] = target_price
             s["qty"] = qty
-            # Mark daily flags
             flag_map = {
                 "MOM": "mom_traded_today",
-                "ORB-R": "orb_traded_today", 
+                "ORB-R": "orb_traded_today",
                 "VWAP": "vwap_traded_today",
                 "TOUCH_TURN": "turn_traded_today"
             }
             if strategy in flag_map:
                 s[flag_map[strategy]] = True
             symbol_state[symbol] = s
-        
+
         return True
     except Exception as e:
         sb_log(f"Order error {symbol}: {e}")
         return False
 
 def check_pending_fills() -> float:
-    """Check for fills on pending limit orders and return total cost of new fills."""
     total_cost = 0.0
     try:
         positions = trading_client.get_all_positions()
         position_dict = {p.symbol: p for p in positions}
-        
         for symbol, s in list(symbol_state.items()):
             if s.get("pending_trade") and not s.get("in_trade"):
                 pending = s["pending_trade"]
-                
-                # Only process limit orders (market orders already filled immediately)
                 if not pending.get("is_limit", False):
                     continue
-                
-                # Check if position exists now
                 if symbol in position_dict:
                     p = position_dict[symbol]
                     entry_price = float(p.avg_entry_price)
                     qty = float(p.qty)
                     actual_cost = qty * entry_price
-                    
-                    # Verify we're not double-counting
                     if s.get("pending_filled"):
                         continue
-                    
                     s["in_trade"] = True
                     s["strategy"] = pending["strategy"]
                     s["entry"] = entry_price
@@ -1027,64 +998,47 @@ def check_pending_fills() -> float:
                     s["target"] = pending["target"]
                     s["qty"] = qty
                     s["pending_filled"] = True
-                    
-                    # Mark daily flags
                     flag_map = {
                         "MOM": "mom_traded_today",
-                        "ORB-R": "orb_traded_today", 
+                        "ORB-R": "orb_traded_today",
                         "VWAP": "vwap_traded_today",
                         "TOUCH_TURN": "turn_traded_today"
                     }
                     if pending["strategy"] in flag_map:
                         s[flag_map[pending["strategy"]]] = True
-                    
                     total_cost += actual_cost
                     sb_log(f"✅ {pending['strategy']} limit order filled for {qty:.4f} {symbol} @ ${entry_price:.2f} (cost: ${actual_cost:.2f})")
-                    
-                    # Clean up pending
                     del s["pending_trade"]
     except Exception as e:
         log.warning(f"Check fills error: {e}")
     return total_cost
 
-# ─────────────────────────────────────────────
-# MAIN LOOP
-# ─────────────────────────────────────────────
 _last_reset_date = None
 
 def run_strategy():
     global baseline, _last_reset_date
     now_et = datetime.now(ET)
-    
-    # Weekly baseline reset (Monday 9:30 AM)
     if now_et.weekday() == 0 and now_et.hour == 9 and now_et.minute == 30:
         new_bl = float(trading_client.get_account().equity)
         baseline = new_bl
         save_baseline(new_bl)
         sb_log("Weekly baseline reset")
-    
-    # Daily state reset
     today = datetime.now(ET).date()
     if _last_reset_date != today:
         reset_daily_state()
         _last_reset_date = today
-    
     if not is_market_open():
         log.info("Market closed")
         return
-    
-    # Get actual cash from Alpaca (single source of truth)
+
     cash = get_current_cash()
-    
-    # Get current positions
     try:
         positions = trading_client.get_all_positions()
         held = {p.symbol: p for p in positions}
     except Exception as e:
         sb_log(f"Account error: {e}")
         return
-    
-    # EOD liquidation on Friday
+
     if is_eod_window():
         for p in positions:
             try:
@@ -1096,67 +1050,49 @@ def run_strategy():
             except Exception as e:
                 sb_log(f"EOW error {p.symbol}: {e}")
         return
-    
-    # Monitor existing positions
+
     monitor_positions(held)
-    
-    # Check for pending limit order fills
     filled_cost = check_pending_fills()
     if filled_cost > 0:
-        # Refresh cash after fills
         cash = get_current_cash()
         sb_log(f"Limit order fills detected: ${filled_cost:.2f} deducted, current cash: ${cash:.2f}")
-    
-    # Check cash buffer before new trades
+
     if cash <= CASH_BUFFER:
         log.info(f"Cash ${cash:.2f} below buffer (${CASH_BUFFER:.2f}) — no new trades")
         return
-    
-    # Run current strategy to get setups
+
     session = get_current_session()
     setups = []
-    
     if session in STRATEGIES:
         setups = STRATEGIES[session]["entry_func"]()
     else:
         log.info("Outside trading hours or no active strategy")
         return
-    
-    # Place orders for setups
+
     total_pending = 0.0
     for symbol, entry, stop, target, qty, strategy, is_limit in setups:
-        # Re-check cash before each order
         current_cash = get_current_cash()
-        estimated_cost = qty * entry * 1.01  # Add 1% buffer for slippage
-        
+        estimated_cost = qty * entry * 1.01
         if current_cash - estimated_cost < CASH_BUFFER:
             sb_log(f"SKIP {symbol} — would breach cash buffer (cash ${current_cash:.2f} - ${estimated_cost:.2f} < ${CASH_BUFFER})")
             continue
-        
         if place_order(symbol, qty, entry, stop, target, strategy, is_limit):
             total_pending += estimated_cost
-    
     if total_pending > 0:
         sb_log(f"{session} orders placed, estimated total: ${total_pending:.2f}")
 
-# ─────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
     sb_log("🤖 Scalable Trading Bot started (strategy registry)")
     sb_log(f"Watchlist: {len(WATCHLIST)} stocks")
     sb_log(f"Trading capital: ${TRADING_CAPITAL:.2f} (${RISK_PER_TRADE_PCT*100:.1f}% risk = ${TRADING_CAPITAL*RISK_PER_TRADE_PCT:.2f} per trade)")
     sb_log(f"Max position size: ${TRADING_CAPITAL*MAX_POSITION_PCT:.2f} ({MAX_POSITION_PCT*100:.0f}% of capital)")
     sb_log(f"Registered strategies: {', '.join(STRATEGIES.keys())}")
-    
     baseline = load_baseline()
     sb_log(f"Weekly baseline: ${baseline:,.2f}")
-    
     if FINNHUB_API_KEY:
         connect_websocket()
     else:
         log.warning("FINNHUB_API_KEY not set – using Alpaca IEX data (delayed).")
-    
     while True:
         try:
             run_strategy()
