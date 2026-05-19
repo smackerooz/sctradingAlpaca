@@ -1,8 +1,12 @@
 """
-Dynamic Dashboard – Works with any strategy defined in Supabase 'strategies' table
-- Toggle between Last Completed Session (real trades) and Current Session
-- Portfolio Backtest: select strategy from dropdown
-- Manual override, liquidation, daily P&L charts, signal scanner
+Complete Dashboard for Trading Bot (ORB-R + VWAP + MOM + Touch & Turn)
+- Dynamic strategies from Supabase
+- Manual override with PIN
+- Manual liquidation with PIN
+- Auto-refresh trades every 60 seconds
+- Trading session P&L (9:30pm SGT → 4:00am SGT)
+- Daily P&L bar chart with cumulative line
+- Finnhub WebSocket status (improved)
 """
 
 import streamlit as st
@@ -26,7 +30,6 @@ st.set_page_config(page_title="Trading Bot", page_icon="📈", layout="wide")
 
 # ─────────────────────────────────────────────
 # KEEPALIVE (prevents Streamlit Cloud sleep)
-# Note: st.components.v1.html will be deprecated; replace with st.iframe if needed
 # ─────────────────────────────────────────────
 import streamlit.components.v1 as components
 import os
@@ -118,7 +121,7 @@ ET = pytz.timezone('US/Eastern')
 TARGET_PROFIT = 200.0
 CASH_BUFFER = 95000.0
 SCAN_INTERVAL = 10
-MAX_TRADE_USD = 750.0
+MAX_TRADE_USD = 750.0  # Not used for risk sizing in bot, but kept for display
 
 WATCHLIST = [
     "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM", "MSTR", "PANW",
@@ -224,7 +227,6 @@ def get_trading_session_start(date_str: str, time_str: str) -> str:
         return dt.date().isoformat()
 
 def get_last_completed_session_from_trades() -> str:
-    """Return the most recent trading session start date that actually has trades."""
     try:
         rows = supabase.table("realized_trades").select("date, time_sgt").execute()
         if not rows.data:
@@ -238,7 +240,6 @@ def get_last_completed_session_from_trades() -> str:
         return (datetime.now(SGT).date() - timedelta(days=1)).isoformat()
 
 def get_current_session_start() -> str:
-    """Return the start date of the current ongoing trading session (9:30pm SGT → 4:00am SGT next day)."""
     now = datetime.now(SGT)
     if now.hour >= 21 and now.minute >= 30:
         return now.date().isoformat()
@@ -248,7 +249,6 @@ def get_current_session_start() -> str:
         return now.date().isoformat()
 
 def load_realized_trades(session_date: str = None) -> list:
-    """Load trades for a specific trading session date. If None, use the latest session that has trades."""
     try:
         rows = supabase.table("realized_trades") \
                    .select("*") \
@@ -270,8 +270,7 @@ def load_realized_trades(session_date: str = None) -> list:
                     "Reason": r["reason"], "_pl_usd": float(r["pl_usd"]),
                 })
         return result
-    except Exception as e:
-        print(f"Error loading trades: {e}")
+    except Exception:
         return []
 
 def load_all_trades() -> list:
@@ -293,7 +292,6 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
     all_trades = load_all_trades()
     if not all_trades:
         return pd.DataFrame()
-    
     session_data = {}
     for trade in all_trades:
         session_start = get_trading_session_start(trade["date"], trade["Time (SGT)"])
@@ -304,7 +302,6 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
         if strategy not in session_data[session_start]:
             session_data[session_start][strategy] = 0.0
         session_data[session_start][strategy] += pl
-    
     rows = []
     for session_start, strategies in session_data.items():
         row = {"Trading Session Date": session_start}
@@ -318,7 +315,6 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
     if not df.empty:
         df = df.sort_values("Trading Session Date", ascending=True)
     return df
-    
 
 def get_current_strategy_display():
     forced = st.session_state.forced_strategy
@@ -520,7 +516,6 @@ def run_strategy():
         log("Market closed — skipping scan")
         st.session_state.last_scan = datetime.now(SGT)
         return
-    
     try:
         account = trading_client.get_account()
         alpaca_bp = float(account.buying_power)
@@ -531,7 +526,6 @@ def run_strategy():
     except Exception as e:
         log(f"Account fetch error: {e}")
         return
-    
     if is_eod_window():
         for p in positions:
             try:
@@ -542,8 +536,6 @@ def run_strategy():
             except Exception as e:
                 log(f"EOW sell error {p.symbol}: {e}")
         return
-    
-    # ── EXIT LOGIC (monitor positions) ────────────────────────────────────
     for sym, p in held.items():
         try:
             df = get_bars(sym)
@@ -572,23 +564,10 @@ def run_strategy():
                 sell_limit(sym, p.qty, curr_p, f"TREND REVERSED (SMA5 < SMA20, P&L {profit_pct*100:+.2f}%)", entry_p)
         except Exception as e:
             log(f"Exit error {sym}: {e}")
-    
-    # ─────────────────────────────────────────────
-    # CHECK FOR TOUCH & TURN LIMIT ORDER FILLS
-    # ─────────────────────────────────────────────
-    filled_cost = check_touch_and_turn_fills(cash, held)
-    if filled_cost > 0:
-        cash -= filled_cost
-        st.session_state.local_cash = cash
-        log(f"Touch & Turn fills deducted: ${filled_cost:.2f}, remaining cash: ${cash:.2f}")
-    
-    # ── CASH BUFFER CHECK ────────────────────────────────────────────────
     if cash <= CASH_BUFFER:
         log("Cash below buffer — skipping buy scan")
         st.session_state.last_scan = datetime.now(SGT)
         return
-    
-    # ── BUY LOGIC ─────────────────────────────────────────────────────────
     for symbol in WATCHLIST:
         if symbol in held: continue
         try:
@@ -615,7 +594,6 @@ def run_strategy():
                 log(f"BUY {qty} {symbol} @ ${curr_p:.2f} = ${actual_cost:.2f} (SMA5 > SMA20, RSI+MACD ✓)")
         except Exception as e:
             log(f"Buy scan error {symbol}: {e}")
-    
     st.session_state.last_scan = datetime.now(SGT)
 
 def is_market_open() -> bool:
@@ -869,37 +847,42 @@ try:
 except Exception:
     st.info("👁️ DASHBOARD MODE — Bot is running autonomously on Railway.", icon="🤖")
 
-# ─────────────────────────────────────────────
-# Check Finnhub connection status (if bot is running)
-# ─────────────────────────────────────────────
+# Finnhub WebSocket status (improved)
 try:
-    # Look for ANY WebSocket connection log in the last 5 minutes
-    five_min_ago = (datetime.now(SGT) - timedelta(minutes=5)).isoformat()
-    ws_status = supabase.table("bot_logs") \
-        .select("message, created_at") \
-        .like("message", "%WebSocket%") \
-        .gte("created_at", five_min_ago) \
+    # Look for any WebSocket trade activity in the last 2 minutes
+    two_min_ago = (datetime.now(SGT) - timedelta(minutes=2)).isoformat()
+    trade_activity = supabase.table("bot_logs") \
+        .select("message", "created_at") \
+        .like("message", "%WebSocket received%") \
+        .gte("created_at", two_min_ago) \
         .order("created_at", desc=True) \
-        .limit(5) \
+        .limit(1) \
         .execute()
     
-    if ws_status.data:
-        # Check if any recent message indicates connection
-        connected = any("connected" in msg["message"].lower() for msg in ws_status.data)
-        if connected:
-            st.success("🔌 Finnhub WebSocket: CONNECTED", icon="✅")
-        else:
-            st.warning("🔌 Finnhub WebSocket: DISCONNECTED (market closed?)", icon="⚠️")
+    if trade_activity.data:
+        st.success("🔌 Finnhub WebSocket: CONNECTED (data flowing)", icon="✅")
     else:
-        # No recent logs – check if market is open
-        now_et = datetime.now(ET)
-        market_opens = now_et.replace(hour=9, minute=30, second=0)
-        market_closes = now_et.replace(hour=16, minute=0, second=0)
+        # No recent trades – look for connection message
+        conn_log = supabase.table("bot_logs") \
+            .select("message", "created_at") \
+            .like("message", "%WebSocket connected%") \
+            .gte("created_at", two_min_ago) \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
         
-        if now_et >= market_opens and now_et <= market_closes:
-            st.warning("🔌 Finnhub WebSocket: Connecting...", icon="🔄")
+        if conn_log.data:
+            st.info("🔌 Finnhub WebSocket: CONNECTED (awaiting data)", icon="🔄")
         else:
-            st.info("🔌 Finnhub WebSocket: Market closed (connects at 9:30 AM ET)", icon="⏸️")
+            # No connection – check market hours
+            now_et = datetime.now(ET)
+            market_opens = now_et.replace(hour=9, minute=30, second=0)
+            market_closes = now_et.replace(hour=16, minute=0, second=0)
+            
+            if now_et >= market_opens and now_et <= market_closes:
+                st.warning("🔌 Finnhub WebSocket: Connecting...", icon="🔄")
+            else:
+                st.info("🔌 Finnhub WebSocket: Market closed (connects at 9:30 AM ET)", icon="⏸️")
 except Exception:
     st.info("🔌 Finnhub WebSocket: Status unavailable", icon="❓")
 
@@ -1012,12 +995,12 @@ if st.session_state.pending_strategy is not None:
 
 st.markdown("---")
 
-# TABS
+# TABS (Backtesting removed)
 tab_live, tab_signals, tab_portfolio = st.tabs(["Live Trading", "Signal Scanner", "Portfolio Backtest"])
 
-# ─────────────────────────────────────────────
+# ════════════════════════════════════════════
 # TAB 1 — LIVE TRADING
-# ─────────────────────────────────────────────
+# ════════════════════════════════════════════
 with tab_live:
     st.write(f"## 🎯 Weekly Goal: ${TARGET_PROFIT:.0f} USD")
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -1107,20 +1090,77 @@ with tab_live:
         else:
             st.info("No completed trades in this session yet.")
 
+    # Daily P&L Bar Chart (by trading session)
     st.markdown("### 📊 Daily P&L by Trading Session")
     daily_df = compute_daily_pnl_overview()
     if not daily_df.empty:
         fig = go.Figure()
+        # Dummy trace for legend (sets legend color to green)
+        fig.add_trace(go.Bar(
+            x=[None], y=[None],
+            name="Total P&L (green = profit, red = loss)",
+            marker_color="#26a65b",
+            showlegend=True,
+            legendgroup="total",
+        ))
+        # Actual Total bars with dynamic colors
         fig.add_trace(go.Bar(
             x=daily_df["Trading Session Date"],
             y=daily_df["Total"],
-            name="Total P&L",
             marker_color=["#26a65b" if x >= 0 else "#e74c3c" for x in daily_df["Total"]],
+            text=[f"${x:+.2f}" for x in daily_df["Total"]],
+            textposition="outside",
+            showlegend=False,
+            legendgroup="total",
         ))
-        fig.update_layout(height=400, template="plotly_dark")
+        # Strategy columns (only those in strategies table)
+        valid_strategies = [s["name"] for s in st.session_state.strategies]
+        for col in daily_df.columns:
+            if col not in ["Trading Session Date", "Total"] and col in valid_strategies:
+                fig.add_trace(go.Bar(
+                    x=daily_df["Trading Session Date"],
+                    y=daily_df[col],
+                    name=col,
+                    opacity=0.7,
+                ))
+        fig.update_layout(
+            barmode="group",
+            height=400,
+            template="plotly_dark",
+            xaxis_title="Trading Session (start evening SGT)",
+            yaxis_title="P&L (USD)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            margin=dict(l=0, r=0, t=30, b=0),
+        )
         st.plotly_chart(fig, use_container_width=True)
+
+        # Cumulative chart
+        daily_sorted = daily_df.sort_values("Trading Session Date", ascending=True)
+        daily_sorted["Cumulative Total"] = daily_sorted["Total"].cumsum()
+        fig_cum = go.Figure()
+        fig_cum.add_trace(go.Scatter(
+            x=daily_sorted["Trading Session Date"],
+            y=daily_sorted["Cumulative Total"],
+            mode="lines+markers",
+            name="Cumulative P&L",
+            line=dict(color="#f39c12", width=3),
+            marker=dict(size=8, color="#e67e22"),
+            fill="tozeroy",
+            fillcolor="rgba(243,156,18,0.1)",
+            text=[f"${x:+.2f}" for x in daily_sorted["Cumulative Total"]],
+            textposition="top center",
+        ))
+        fig_cum.update_layout(
+            height=300,
+            template="plotly_dark",
+            xaxis_title="Trading Session (start evening SGT)",
+            yaxis_title="Cumulative P&L (USD)",
+            margin=dict(l=0, r=0, t=30, b=0),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_cum, use_container_width=True)
     else:
-        st.info("No data")
+        st.info("No trade data available yet for daily P&L chart.")
 
     with st.expander("📋 Open Positions (Unrealized)", expanded=False):
         try:
@@ -1213,9 +1253,9 @@ with tab_live:
         except Exception as e:
             st.error(f"Could not load logs: {e}")
 
-# ─────────────────────────────────────────────
+# ════════════════════════════════════════════
 # TAB 2 — SIGNAL SCANNER
-# ─────────────────────────────────────────────
+# ════════════════════════════════════════════
 with tab_signals:
     st.write("## 📡 Signal Scanner — Bullish/Bearish Rankings (1–100)")
     st.write("Scores each stock from 1 to 100 using Trend, RSI, MACD, and Momentum.")
@@ -1301,9 +1341,9 @@ with tab_signals:
     else:
         st.info("👆 Click **Run Signal Scan** to score all stocks.")
 
-# ─────────────────────────────────────────────
+# ════════════════════════════════════════════
 # TAB 3 — PORTFOLIO BACKTEST (dynamic strategy selection)
-# ─────────────────────────────────────────────
+# ════════════════════════════════════════════
 with tab_portfolio:
     st.write("## 📂 Portfolio Backtest — Shared Capital Simulation")
     st.write("Simulates all stocks trading simultaneously from a single shared capital pool using one strategy.")
