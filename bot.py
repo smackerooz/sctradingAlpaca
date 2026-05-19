@@ -1,7 +1,7 @@
 """
 bot.py — Scalable trading bot with strategy registry
 Run on Railway:
-    Start command: python botscalable.py
+    Start command: python bot.py
     Environment: ALPACA_API_KEY, ALPACA_SECRET_KEY, SUPABASE_URL, SUPABASE_KEY, FINNHUB_API_KEY
 """
 
@@ -40,8 +40,14 @@ log = logging.getLogger(__name__)
 ET            = pytz.timezone("US/Eastern")
 SGT           = pytz.timezone("Asia/Singapore")
 SCAN_INTERVAL = 45
-MAX_TRADE_USD = 750.0
-CASH_BUFFER   = 95000.0
+
+# ── RISK MANAGEMENT ──────────────────────────────────────────────────────
+TOTAL_EQUITY = 100000.0      # Total account balance
+CASH_BUFFER = 95000.0         # Reserved cash (not for trading)
+TRADING_CAPITAL = TOTAL_EQUITY - CASH_BUFFER  # = 5000.0
+
+RISK_PER_TRADE_PCT = 0.01     # 1% of trading capital = $50 risk per trade
+MAX_POSITION_PCT = 0.5        # Max 50% of trading capital per trade = $2,500
 
 # Strategy configs (used by individual strategies)
 ORB_RETEST_TOLERANCE_PCT = 0.002
@@ -118,6 +124,29 @@ _last_forced_check = None
 # ─────────────────────────────────────────────
 # SHARED UTILITIES
 # ─────────────────────────────────────────────
+def calculate_qty(entry_price: float, stop_price: float) -> float:
+    """
+    Calculate position size using professional risk management.
+    - Risk per trade: 1% of trading capital ($50)
+    - Max position size: 50% of trading capital ($2,500)
+    """
+    risk_per_share = entry_price - stop_price
+    if risk_per_share <= 0.01:
+        return 0.0
+    
+    # Risk-based quantity
+    dollar_risk = TRADING_CAPITAL * RISK_PER_TRADE_PCT
+    qty_by_risk = dollar_risk / risk_per_share
+    
+    # Cash-based cap (max 50% of trading capital per trade)
+    max_cash_per_trade = TRADING_CAPITAL * MAX_POSITION_PCT
+    qty_by_cash = max_cash_per_trade / entry_price
+    
+    # Take the smaller of the two
+    qty = min(qty_by_risk, qty_by_cash)
+    
+    return qty
+
 def sb_log(msg: str):
     try:
         supabase.table("bot_logs").insert({
@@ -160,7 +189,7 @@ def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 def get_current_cash() -> float:
-    """Get actual cash from Alpaca - single source of truth"""
+    """Get actual cash from Alpaca - single source of truth."""
     try:
         account = trading_client.get_account()
         return float(account.buying_power)
@@ -513,107 +542,8 @@ def check_orb_retest(symbol: str, box_high: float) -> bool:
     return (latest_low <= box_high * (1 + ORB_RETEST_TOLERANCE_PCT) and
             latest_high >= box_high * (1 - ORB_RETEST_TOLERANCE_PCT))
 
-def place_order(symbol: str, qty: float, entry_price: float, stop_price: float, 
-                target_price: float, strategy: str, is_limit: bool = False) -> bool:
-    """Place order and store pending info. Returns True if order placed."""
-    if qty <= 0:
-        return False
-    
-    try:
-        if is_limit:
-            order = LimitOrderRequest(
-                symbol=symbol,
-                qty=qty,
-                side=OrderSide.BUY,
-                limit_price=entry_price,
-                time_in_force=TimeInForce.DAY,
-            )
-            trading_client.submit_order(order)
-            order_type = "LIMIT"
-        else:
-            order = MarketOrderRequest(
-                symbol=symbol,
-                qty=qty,
-                side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY,
-            )
-            trading_client.submit_order(order)
-            order_type = "MARKET"
-        
-        # Store pending trade info
-        if symbol not in symbol_state:
-            symbol_state[symbol] = {}
-        symbol_state[symbol]["pending_trade"] = {
-            "strategy": strategy,
-            "stop": stop_price,
-            "target": target_price,
-            "qty": qty,
-            "is_limit": is_limit,
-            "limit_price": entry_price if is_limit else None,
-            "placed_at": datetime.now(ET).isoformat()
-        }
-        
-        sb_log(f"🟢 {strategy} {order_type} ORDER placed for {qty:.4f} {symbol} | Target:${entry_price:.2f} | Stop:${stop_price:.2f}")
-        return True
-    except Exception as e:
-        sb_log(f"Order error {symbol}: {e}")
-        return False
-
-def check_pending_fills() -> float:
-    """Check for fills on ALL pending orders and return total cost of new fills."""
-    total_cost = 0.0
-    try:
-        positions = trading_client.get_all_positions()
-        position_dict = {p.symbol: p for p in positions}
-        
-        for symbol, s in list(symbol_state.items()):
-            if s.get("pending_trade") and not s.get("in_trade"):
-                pending = s["pending_trade"]
-                
-                # Check if position exists now
-                if symbol in position_dict:
-                    p = position_dict[symbol]
-                    entry_price = float(p.avg_entry_price)
-                    qty = float(p.qty)
-                    actual_cost = qty * entry_price
-                    
-                    # Verify we're not double-counting
-                    if s.get("pending_filled"):
-                        continue
-                    
-                    s["in_trade"] = True
-                    s["strategy"] = pending["strategy"]
-                    s["entry"] = entry_price
-                    s["stop"] = pending["stop"]
-                    s["target"] = pending["target"]
-                    s["qty"] = qty
-                    s["pending_filled"] = True
-                    
-                    # Mark daily flags based on strategy
-                    flag_map = {
-                        "MOM": "mom_traded_today",
-                        "ORB-R": "orb_traded_today", 
-                        "VWAP": "vwap_traded_today",
-                        "TOUCH_TURN": "turn_traded_today"
-                    }
-                    if pending["strategy"] in flag_map:
-                        s[flag_map[pending["strategy"]]] = True
-                    
-                    total_cost += actual_cost
-                    sb_log(f"✅ {pending['strategy']} order filled for {qty:.4f} {symbol} @ ${entry_price:.2f} (cost: ${actual_cost:.2f})")
-                    
-                    # Clean up pending
-                    del s["pending_trade"]
-    except Exception as e:
-        log.warning(f"Check fills error: {e}")
-    return total_cost
-
-# ─────────────────────────────────────────────
-# STRATEGY FUNCTIONS (only check setups, don't deduct cash)
-# ─────────────────────────────────────────────
-
 def run_orb_strategy() -> list:
-    """Check ORB-R setups, return list of (symbol, entry, stop, target, qty)"""
+    """Check ORB-R setups, return list of (symbol, entry, stop, target, qty, strategy, is_limit)"""
     setups = []
     for symbol in WATCHLIST:
         if symbol in symbol_state and symbol_state[symbol].get("in_trade"):
@@ -670,16 +600,25 @@ def run_orb_strategy() -> list:
             if risk <= 0:
                 continue
             target_price = round(entry_price + (ORB_REWARD_RISK * risk), 4)
+            sb_log(f"Adjusted {symbol} stop to {stop_price:.2f} (min {min_stop_pct*100:.1f}%)")
         else:
             risk = entry_price - stop_price
             if risk <= 0 or risk / entry_price > 0.05:
                 continue
             target_price = round(entry_price + (ORB_REWARD_RISK * risk), 4)
         
-        qty = MAX_TRADE_USD / entry_price
+        qty = calculate_qty(entry_price, stop_price)
+        if qty <= 0:
+            continue
+        
         setups.append((symbol, entry_price, stop_price, target_price, qty, "ORB-R", False))
         s["orb_traded_today"] = True
     return setups
+
+# ─────────────────────────────────────────────
+# VWAP STRATEGY
+# ─────────────────────────────────────────────
+VWAP_REWARD_RISK = 1.5
 
 def run_vwap_strategy() -> list:
     """Check VWAP setups, return list of (symbol, entry, stop, target, qty, strategy, is_limit)"""
@@ -691,15 +630,12 @@ def run_vwap_strategy() -> list:
             symbol_state[symbol] = {
                 "strategy": None,
                 "in_trade": False,
-                "entry": 0.0,
-                "stop": 0.0,
-                "target": 0.0,
-                "qty": 0.0,
                 "vwap_traded_today": False,
             }
         s = symbol_state[symbol]
         if s.get("vwap_traded_today") or s.get("in_trade"):
             continue
+        
         df_5m = get_bars(symbol, timeframe_minutes=5, days_back=1)
         if df_5m.empty or len(df_5m) < 10:
             continue
@@ -712,6 +648,7 @@ def run_vwap_strategy() -> list:
         
         if vwap is None:
             continue
+        
         current_price = float(df_5m["close"].iloc[-1])
         if current_price < vwap:
             continue
@@ -721,6 +658,7 @@ def run_vwap_strategy() -> list:
         today_bars = df_5m[df_5m.index.date == today_et]
         if today_bars.empty or len(today_bars) < 3:
             continue
+        
         latest = today_bars.iloc[-1]
         prev = today_bars.iloc[-2] if len(today_bars) > 1 else latest
         candle_low = float(latest["low"])
@@ -728,6 +666,7 @@ def run_vwap_strategy() -> list:
         vwap_near = (candle_low <= vwap * 1.001 and candle_high >= vwap * 0.999)
         if not vwap_near:
             continue
+        
         hammer = is_hammer(latest)
         inv_hammer = is_inverted_hammer(latest)
         engulfing = is_bullish_engulfing(prev, latest) if len(today_bars) > 1 else False
@@ -750,11 +689,19 @@ def run_vwap_strategy() -> list:
                 continue
             target_price = round(entry_price + (VWAP_REWARD_RISK * risk), 4)
         
+        qty = calculate_qty(entry_price, stop_price)
+        if qty <= 0:
+            continue
+        
         sb_log(f"📊 {symbol} VWAP retest detected at ${vwap:.2f}")
-        qty = MAX_TRADE_USD / entry_price
         setups.append((symbol, entry_price, stop_price, target_price, qty, "VWAP", False))
         s["vwap_traded_today"] = True
     return setups
+
+# ─────────────────────────────────────────────
+# MOM STRATEGY (Momentum Breakout)
+# ─────────────────────────────────────────────
+MOM_REWARD_RISK = 2.0
 
 def run_mom_strategy() -> list:
     """Check MOM setups, return list of (symbol, entry, stop, target, qty, strategy, is_limit)"""
@@ -766,10 +713,6 @@ def run_mom_strategy() -> list:
             symbol_state[symbol] = {
                 "strategy": None,
                 "in_trade": False,
-                "entry": 0.0,
-                "stop": 0.0,
-                "target": 0.0,
-                "qty": 0.0,
                 "mom_traded_today": False,
             }
         s = symbol_state[symbol]
@@ -800,14 +743,25 @@ def run_mom_strategy() -> list:
                     stop_pct = 0.008
                 stop_price = round(entry_price * (1 - stop_pct), 4)
                 risk = entry_price - stop_price
-                target_price = round(entry_price + (2.0 * risk), 4)
+                if risk <= 0:
+                    continue
+                target_price = round(entry_price + (MOM_REWARD_RISK * risk), 4)
+                
+                qty = calculate_qty(entry_price, stop_price)
+                if qty <= 0:
+                    continue
+                
                 sb_log(f"🔥 MOM breakout detected for {symbol} at ${entry_price} (RSI: {rsi:.1f})")
-                qty = MAX_TRADE_USD / entry_price
                 setups.append((symbol, entry_price, stop_price, target_price, qty, "MOM", False))
                 s["mom_traded_today"] = True
         except Exception as e:
             log.warning(f"MOM check error {symbol}: {e}")
     return setups
+
+# ─────────────────────────────────────────────
+# TOUCH AND TURN STRATEGY
+# ─────────────────────────────────────────────
+TURN_REWARD_RISK = 2.0
 
 def run_touch_and_turn_strategy() -> list:
     """Check Touch & Turn setups, return list of (symbol, entry, stop, target, qty, strategy, is_limit)"""
@@ -819,10 +773,6 @@ def run_touch_and_turn_strategy() -> list:
             symbol_state[symbol] = {
                 "strategy": None,
                 "in_trade": False,
-                "entry": 0.0,
-                "stop": 0.0,
-                "target": 0.0,
-                "qty": 0.0,
                 "turn_traded_today": False,
             }
         s = symbol_state[symbol]
@@ -844,10 +794,11 @@ def run_touch_and_turn_strategy() -> list:
             low = float(first_candle["low"])
             close = float(first_candle["close"])
             
+            # Must be a red candle (close < open)
             if close >= open_price:
                 continue
             
-            # Calculate ATR
+            # Calculate ATR for volatility check
             end = datetime.now(pytz.utc)
             start = end - timedelta(days=30)
             req = StockBarsRequest(
@@ -876,20 +827,29 @@ def run_touch_and_turn_strategy() -> list:
             if candle_range < min_range or atr == 0:
                 continue
             
+            # Entry at the low of the opening candle
             entry_price = round(low, 4)
-            risk = (high - low) * 0.382
+            
+            # Stop loss based on volatility (same as MOM)
+            if symbol in HIGH_VOL_STOCKS:
+                stop_pct = 0.012  # 1.2%
+            else:
+                stop_pct = 0.008   # 0.8%
+            stop_price = round(entry_price * (1 - stop_pct), 4)
+            
+            risk = entry_price - stop_price
             if risk <= 0:
                 continue
-            target_price = round(entry_price + (2.0 * risk), 4)
-            stop_price = round(entry_price - risk, 4)
+            target_price = round(entry_price + (TURN_REWARD_RISK * risk), 4)
             
-            # Check time window
+            # Check time window (9:30 - 10:30 AM ET)
             now_et = datetime.now(ET)
             window_end_et = now_et.replace(hour=10, minute=30, second=0, microsecond=0)
             if now_et > window_end_et:
                 s["turn_traded_today"] = True
                 continue
             
+            # Check current price is not too far from entry (prevent stale setups)
             current_price = get_current_price(symbol)
             if current_price is None:
                 continue
@@ -899,35 +859,197 @@ def run_touch_and_turn_strategy() -> list:
                 s["turn_traded_today"] = True
                 continue
             
+            qty = calculate_qty(entry_price, stop_price)
+            if qty <= 0:
+                continue
+            
             sb_log(f"🎯 Touch & Turn setup for {symbol}: Entry LIMIT ${entry_price}, Stop ${stop_price}, Target ${target_price}, ATR: {atr:.2f}")
-            qty = MAX_TRADE_USD / entry_price
             setups.append((symbol, entry_price, stop_price, target_price, qty, "TOUCH_TURN", True))
             s["turn_traded_today"] = True
         except Exception as e:
             log.warning(f"Touch & Turn error {symbol}: {e}")
     return setups
 
+# ─────────────────────────────────────────────
+# STRATEGY REGISTRY
+# ─────────────────────────────────────────────
+STRATEGIES = {
+    "TOUCH_TURN": {
+        "name": "TOUCH_TURN",
+        "time_window_start": (9, 30),
+        "time_window_end": (10, 30),
+        "entry_func": run_touch_and_turn_strategy,
+        "state_flag": "turn_traded_today",
+    },
+    "MOM": {
+        "name": "MOM",
+        "time_window_start": (9, 30),
+        "time_window_end": (10, 30),
+        "entry_func": run_mom_strategy,
+        "state_flag": "mom_traded_today",
+    },
+    "ORB-R": {
+        "name": "ORB-R",
+        "time_window_start": (9, 30),
+        "time_window_end": (12, 0),
+        "entry_func": run_orb_strategy,
+        "state_flag": "orb_traded_today",
+    },
+    "VWAP": {
+        "name": "VWAP",
+        "time_window_start": (12, 0),
+        "time_window_end": (15, 30),
+        "entry_func": run_vwap_strategy,
+        "state_flag": "vwap_traded_today",
+    },
+}
+
 def get_current_session() -> str:
+    """Returns the strategy name or 'CLOSED'."""
     forced = get_forced_strategy()
     now_et = datetime.now(ET)
     market_open = is_market_open()
-    if market_open and forced in ["TOUCH_TURN", "MOM", "ORB-R", "VWAP"]:
+
+    # Manual override takes precedence when market is open
+    if market_open and forced in STRATEGIES:
         return forced
     if market_open and forced == "AUTO":
-        # Touch & Turn: 9:30 - 10:30 ET
-        if now_et.hour == 9 and now_et.minute >= 30 or now_et.hour == 10 and now_et.minute <= 30:
-            return "TOUCH_TURN"
-        # MOM: 9:30 - 10:30 ET (same window as Touch & Turn)
-        if now_et.hour == 9 and now_et.minute >= 30 or now_et.hour == 10 and now_et.minute <= 30:
-            return "MOM"
-        # ORB-R: 9:30 - 12:00 ET
-        if now_et.hour < 12 or (now_et.hour == 12 and now_et.minute == 0):
-            return "ORB-R"
-        # VWAP: 12:00 - 15:30 ET
-        if now_et.hour >= 12 and (now_et.hour < 15 or (now_et.hour == 15 and now_et.minute <= 30)):
-            return "VWAP"
+        # Find first strategy whose time window contains now
+        for strat_name, cfg in STRATEGIES.items():
+            start_h, start_m = cfg["time_window_start"]
+            end_h, end_m = cfg["time_window_end"]
+            start_time = now_et.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+            end_time = now_et.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+            if start_time <= now_et <= end_time:
+                return strat_name
     return "CLOSED"
 
+# ─────────────────────────────────────────────
+# ORDER PLACEMENT AND FILL DETECTION
+# ─────────────────────────────────────────────
+def place_order(symbol: str, qty: float, entry_price: float, stop_price: float, 
+                target_price: float, strategy: str, is_limit: bool = False) -> bool:
+    """Place order and store pending info. Returns True if order placed."""
+    if qty <= 0:
+        return False
+    
+    try:
+        if is_limit:
+            order = LimitOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                limit_price=entry_price,
+                time_in_force=TimeInForce.DAY,
+            )
+            trading_client.submit_order(order)
+            order_type = "LIMIT"
+            sb_log(f"🟢 {strategy} LIMIT ORDER placed for {qty:.4f} {symbol} @ ${entry_price:.2f} | Stop:${stop_price:.2f} | Target:${target_price:.2f}")
+        else:
+            order = MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.DAY,
+            )
+            trading_client.submit_order(order)
+            order_type = "MARKET"
+            sb_log(f"🟢 {strategy} MARKET ORDER placed for {qty:.4f} {symbol} | Entry: ~${entry_price:.2f} | Stop:${stop_price:.2f} | Target:${target_price:.2f}")
+        
+        # Store pending trade info
+        if symbol not in symbol_state:
+            symbol_state[symbol] = {}
+        symbol_state[symbol]["pending_trade"] = {
+            "strategy": strategy,
+            "stop": stop_price,
+            "target": target_price,
+            "qty": qty,
+            "is_limit": is_limit,
+            "limit_price": entry_price if is_limit else None,
+            "placed_at": datetime.now(ET).isoformat()
+        }
+        
+        # For market orders, assume immediate fill and update state now
+        if not is_limit:
+            s = symbol_state[symbol]
+            s["in_trade"] = True
+            s["strategy"] = strategy
+            s["entry"] = entry_price
+            s["stop"] = stop_price
+            s["target"] = target_price
+            s["qty"] = qty
+            # Mark daily flags
+            flag_map = {
+                "MOM": "mom_traded_today",
+                "ORB-R": "orb_traded_today", 
+                "VWAP": "vwap_traded_today",
+                "TOUCH_TURN": "turn_traded_today"
+            }
+            if strategy in flag_map:
+                s[flag_map[strategy]] = True
+            symbol_state[symbol] = s
+        
+        return True
+    except Exception as e:
+        sb_log(f"Order error {symbol}: {e}")
+        return False
+
+def check_pending_fills() -> float:
+    """Check for fills on pending limit orders and return total cost of new fills."""
+    total_cost = 0.0
+    try:
+        positions = trading_client.get_all_positions()
+        position_dict = {p.symbol: p for p in positions}
+        
+        for symbol, s in list(symbol_state.items()):
+            if s.get("pending_trade") and not s.get("in_trade"):
+                pending = s["pending_trade"]
+                
+                # Only process limit orders (market orders already filled immediately)
+                if not pending.get("is_limit", False):
+                    continue
+                
+                # Check if position exists now
+                if symbol in position_dict:
+                    p = position_dict[symbol]
+                    entry_price = float(p.avg_entry_price)
+                    qty = float(p.qty)
+                    actual_cost = qty * entry_price
+                    
+                    # Verify we're not double-counting
+                    if s.get("pending_filled"):
+                        continue
+                    
+                    s["in_trade"] = True
+                    s["strategy"] = pending["strategy"]
+                    s["entry"] = entry_price
+                    s["stop"] = pending["stop"]
+                    s["target"] = pending["target"]
+                    s["qty"] = qty
+                    s["pending_filled"] = True
+                    
+                    # Mark daily flags
+                    flag_map = {
+                        "MOM": "mom_traded_today",
+                        "ORB-R": "orb_traded_today", 
+                        "VWAP": "vwap_traded_today",
+                        "TOUCH_TURN": "turn_traded_today"
+                    }
+                    if pending["strategy"] in flag_map:
+                        s[flag_map[pending["strategy"]]] = True
+                    
+                    total_cost += actual_cost
+                    sb_log(f"✅ {pending['strategy']} limit order filled for {qty:.4f} {symbol} @ ${entry_price:.2f} (cost: ${actual_cost:.2f})")
+                    
+                    # Clean up pending
+                    del s["pending_trade"]
+    except Exception as e:
+        log.warning(f"Check fills error: {e}")
+    return total_cost
+
+# ─────────────────────────────────────────────
+# MAIN LOOP
+# ─────────────────────────────────────────────
 _last_reset_date = None
 
 def run_strategy():
@@ -978,12 +1100,12 @@ def run_strategy():
     # Monitor existing positions
     monitor_positions(held)
     
-    # Check for pending fills from previous orders
+    # Check for pending limit order fills
     filled_cost = check_pending_fills()
     if filled_cost > 0:
         # Refresh cash after fills
         cash = get_current_cash()
-        sb_log(f"Fills detected: ${filled_cost:.2f} deducted, current cash: ${cash:.2f}")
+        sb_log(f"Limit order fills detected: ${filled_cost:.2f} deducted, current cash: ${cash:.2f}")
     
     # Check cash buffer before new trades
     if cash <= CASH_BUFFER:
@@ -994,22 +1116,16 @@ def run_strategy():
     session = get_current_session()
     setups = []
     
-    if session == "TOUCH_TURN":
-        setups = run_touch_and_turn_strategy()
-    elif session == "MOM":
-        setups = run_mom_strategy()
-    elif session == "ORB-R":
-        setups = run_orb_strategy()
-    elif session == "VWAP":
-        setups = run_vwap_strategy()
+    if session in STRATEGIES:
+        setups = STRATEGIES[session]["entry_func"]()
     else:
         log.info("Outside trading hours or no active strategy")
         return
     
-    # Place orders for setups (cash check happens at placement time)
+    # Place orders for setups
     total_pending = 0.0
     for symbol, entry, stop, target, qty, strategy, is_limit in setups:
-        # Re-check cash before each order (in case previous orders changed it)
+        # Re-check cash before each order
         current_cash = get_current_cash()
         estimated_cost = qty * entry * 1.01  # Add 1% buffer for slippage
         
@@ -1023,10 +1139,16 @@ def run_strategy():
     if total_pending > 0:
         sb_log(f"{session} orders placed, estimated total: ${total_pending:.2f}")
 
+# ─────────────────────────────────────────────
+# ENTRY POINT
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
     sb_log("🤖 Scalable Trading Bot started (strategy registry)")
-    sb_log(f"Watchlist: {len(WATCHLIST)} stocks | Max trade: ${MAX_TRADE_USD} | Cash buffer: ${CASH_BUFFER}")
-    sb_log(f"Registered strategies: TOUCH_TURN, MOM, ORB-R, VWAP")
+    sb_log(f"Watchlist: {len(WATCHLIST)} stocks")
+    sb_log(f"Trading capital: ${TRADING_CAPITAL:.2f} (${RISK_PER_TRADE_PCT*100:.1f}% risk = ${TRADING_CAPITAL*RISK_PER_TRADE_PCT:.2f} per trade)")
+    sb_log(f"Max position size: ${TRADING_CAPITAL*MAX_POSITION_PCT:.2f} ({MAX_POSITION_PCT*100:.0f}% of capital)")
+    sb_log(f"Registered strategies: {', '.join(STRATEGIES.keys())}")
+    
     baseline = load_baseline()
     sb_log(f"Weekly baseline: ${baseline:,.2f}")
     
