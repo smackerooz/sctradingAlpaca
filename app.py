@@ -226,8 +226,8 @@ def get_trading_session_start(date_str: str, time_str: str) -> str:
             return (dt.date() - timedelta(days=1)).isoformat()
         else:
             return dt.date().isoformat()
-    except Exception as e:
-        # Fallback: return the raw date in ISO format
+    except Exception:
+        # Fallback to raw date in ISO format
         if "/" in date_str:
             d, m, y = date_str.split("/")
             return f"{y}-{m.zfill(2)}-{d.zfill(2)}"
@@ -302,7 +302,6 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
         return pd.DataFrame()
     
     session_data = {}
-    debug_info = []
     
     for trade in all_trades:
         try:
@@ -311,12 +310,9 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
             pl = trade["_pl_usd"]
             strategy = trade.get("Strategy", "Unknown")
             
-            # Compute session start (with robust error handling)
             session_start = get_trading_session_start(date_str, time_str)
-            debug_info.append(f"{date_str} {time_str} → session {session_start}")
-            
-            if session_start is None:
-                # Fallback: use the raw date as session (to avoid empty chart)
+            if not session_start:
+                # Fallback to raw date
                 if "/" in date_str:
                     d, m, y = date_str.split("/")
                     session_start = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
@@ -328,30 +324,11 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
             if strategy not in session_data[session_start]:
                 session_data[session_start][strategy] = 0.0
             session_data[session_start][strategy] += pl
-        except Exception as e:
-            st.error(f"Error processing trade {trade.get('Symbol', '?')}: {e}")
-    
-    # Optional: show debug info (expandable, can be removed later)
-    with st.expander("🔍 Debug: Session start calculation", expanded=False):
-        st.code("\n".join(debug_info[-20:]))
+        except Exception:
+            continue
     
     if not session_data:
-        st.warning("No session data could be extracted. Falling back to raw dates.")
-        # Fallback: group by raw date (ignoring session logic)
-        for trade in all_trades:
-            date_str = trade["date"]
-            pl = trade["_pl_usd"]
-            strategy = trade.get("Strategy", "Unknown")
-            if "/" in date_str:
-                d, m, y = date_str.split("/")
-                date_iso = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
-            else:
-                date_iso = date_str
-            if date_iso not in session_data:
-                session_data[date_iso] = {}
-            if strategy not in session_data[date_iso]:
-                session_data[date_iso][strategy] = 0.0
-            session_data[date_iso][strategy] += pl
+        return pd.DataFrame()
     
     rows = []
     for session_start, strategies in session_data.items():
@@ -365,10 +342,9 @@ def compute_daily_pnl_overview() -> pd.DataFrame:
     
     df = pd.DataFrame(rows)
     if not df.empty:
+        # Convert to datetime for proper sorting
+        df["Trading Session Date"] = pd.to_datetime(df["Trading Session Date"])
         df = df.sort_values("Trading Session Date", ascending=True)
-        st.success(f"Chart data: {len(df)} sessions found, total P&L range: {df['Total'].min()} to {df['Total'].max()}")
-    else:
-        st.error("No chart data – check that your realized_trades table has rows with valid dates and times.")
     return df
 
 def get_current_strategy_display():
