@@ -38,7 +38,7 @@ ET            = pytz.timezone("US/Eastern")
 SGT           = pytz.timezone("Asia/Singapore")
 SCAN_INTERVAL = 45
 MAX_TRADE_USD = 750.0
-CASH_BUFFER   = 95000.0
+CASH_BUFFER   = 90000.0
 
 # ORB-R config
 ORB_REWARD_RISK = 3.0
