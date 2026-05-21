@@ -1436,6 +1436,158 @@ with tab_portfolio:
     elif not run_portfolio:
         st.info("👆 Configure settings above and click **Run Portfolio Backtest**.")
 
+
+# ============================================
+# TAB 4: INDIVIDUAL LIQUIDATION (PIN Protected)
+# ============================================
+# Note: If you already have 3 tabs, this adds a 4th.
+# Adjust the index if you have more tabs.
+# ============================================
+
+# If you are adding this to an app that already defines tabs, you need to redefine them.
+# To avoid breaking existing code, I'll show how to add a fourth tab safely.
+
+# Assuming your existing tabs are defined like:
+# tab_live, tab_signals, tab_backtest, tab_portfolio = st.tabs([...])
+
+# You can either:
+# 1. Add a fourth tab by including "Individual Liquidation" in the list, OR
+# 2. Create a separate expander in the sidebar or main area.
+
+# For simplicity and easy removal, I'll create a separate expander in the main dashboard area.
+# This avoids modifying your existing tab structure.
+
+# Place this block anywhere in the main dashboard area (after your existing tabs or in an expander).
+with st.expander("🔐 Individual Position Liquidation (PIN protected)", expanded=False):
+    # PIN state for this feature (separate from liquidation PIN, but reusing same PIN logic)
+    if "liq_individual_authorized" not in st.session_state:
+        st.session_state.liq_individual_authorized = False
+
+    if not st.session_state.liq_individual_authorized:
+        with st.form("indiv_liq_pin_form"):
+            indiv_liq_pin = st.text_input("Enter PIN to access individual liquidation:", type="password")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                verify_btn = st.form_submit_button("🔓 Unlock", use_container_width=True)
+            with col_b:
+                cancel_btn = st.form_submit_button("❌ Cancel", use_container_width=True)
+
+            if verify_btn:
+                try:
+                    row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
+                    if row.data and row.data[0]["pin"] == indiv_liq_pin:
+                        st.session_state.liq_individual_authorized = True
+                        st.success("Access granted!")
+                        st.rerun()
+                    else:
+                        st.error("Incorrect PIN")
+                except Exception:
+                    st.error("Could not verify PIN")
+            if cancel_btn:
+                st.session_state.liq_individual_authorized = False
+                st.rerun()
+    else:
+        st.success("✅ Access granted – you can liquidate individual positions")
+        st.info("ℹ️ **Order type:** Market order during regular hours (9:30 AM – 4:00 PM ET) – supports fractional shares. Limit order during extended hours (integer shares only).")
+
+        try:
+            positions = trading_client.get_all_positions()
+            if not positions:
+                st.info("No open positions to liquidate.")
+            else:
+                # Build dropdown options
+                position_options = {}
+                for p in positions:
+                    symbol = p.symbol
+                    qty = float(p.qty)
+                    current_price = float(p.current_price)
+                    market_value = float(p.market_value)
+                    unrealized_pl = float(p.unrealized_pl)
+                    position_options[f"{symbol} | Qty: {qty:.4f} | Mkt Val: ${market_value:.2f} | P&L: ${unrealized_pl:+.2f}"] = {
+                        "symbol": symbol,
+                        "qty": qty,
+                        "current_price": current_price,
+                        "entry_price": float(p.avg_entry_price),
+                    }
+
+                selected_label = st.selectbox("Select position to liquidate", list(position_options.keys()))
+                selected = position_options[selected_label]
+                symbol = selected["symbol"]
+                qty = selected["qty"]
+                current_price = selected["current_price"]
+                entry_price = selected["entry_price"]
+
+                # Display position details
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Symbol", symbol)
+                col2.metric("Quantity", f"{qty:.4f}")
+                col3.metric("Current Price", f"${current_price:.2f}")
+                col4.metric("Estimated Proceeds", f"${qty * current_price:.2f}")
+
+                # Determine market session
+                now_et = datetime.now(ET)
+                regular_start = now_et.replace(hour=9, minute=30, second=0)
+                regular_end = now_et.replace(hour=16, minute=0, second=0)
+                is_regular_hours = regular_start <= now_et <= regular_end
+
+                if is_regular_hours:
+                    st.info("🟢 **Regular market hours** – will use a **market order** (supports fractional shares).")
+                else:
+                    st.warning("🟡 **Extended hours** – will use a **limit order** (only whole shares). Any fractional remainder will stay in your account.")
+
+                confirm = st.checkbox("I confirm that I want to sell this position immediately.")
+                col_liq, col_cancel = st.columns(2)
+                with col_liq:
+                    if st.button("🔥 LIQUIDATE THIS POSITION", use_container_width=True, type="primary", disabled=not confirm):
+                        try:
+                            if is_regular_hours:
+                                # Market order during regular hours (supports fractional)
+                                trading_client.submit_order(MarketOrderRequest(
+                                    symbol=symbol,
+                                    qty=qty,
+                                    side=OrderSide.SELL,
+                                    time_in_force=TimeInForce.DAY,
+                                ))
+                                st.success(f"✅ Market order placed to sell {qty:.4f} shares of {symbol}.")
+                                st.session_state.liq_individual_authorized = False
+                                st.rerun()
+                            else:
+                                # Extended hours: limit order, integer shares only
+                                whole_shares = int(qty)
+                                fractional_remainder = qty - whole_shares
+                                if fractional_remainder > 0:
+                                    st.warning(f"⚠️ Extended hours only support whole shares. Will sell {whole_shares} shares. The remaining {fractional_remainder:.4f} shares will stay in your account.")
+                                if whole_shares == 0:
+                                    st.error("No whole shares to sell during extended hours. Please wait for regular market hours to sell fractional shares.")
+                                else:
+                                    limit_price = round(current_price * 0.99, 2)
+                                    trading_client.submit_order(
+                                        symbol=symbol,
+                                        qty=whole_shares,
+                                        side=OrderSide.SELL,
+                                        type="limit",
+                                        limit_price=limit_price,
+                                        time_in_force="day",
+                                        extended_hours=True
+                                    )
+                                    st.success(f"✅ Limit order placed to sell {whole_shares} shares of {symbol} at ${limit_price:.2f}.")
+                                    st.session_state.liq_individual_authorized = False
+                                    st.rerun()
+                        except Exception as e:
+                            st.error(f"Error placing order: {e}")
+                with col_cancel:
+                    if st.button("❌ Cancel", use_container_width=True):
+                        st.session_state.liq_individual_authorized = False
+                        st.rerun()
+
+        except Exception as e:
+            st.error(f"Could not fetch positions: {e}")
+
+        # Lock button
+        if st.button("🔒 Lock Individual Liquidation", use_container_width=True):
+            st.session_state.liq_individual_authorized = False
+            st.rerun()
+
 # ─────────────────────────────────────────────
 # AUTO-REFRESH (dashboard only)
 # ─────────────────────────────────────────────
