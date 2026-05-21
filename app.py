@@ -1436,30 +1436,11 @@ with tab_portfolio:
     elif not run_portfolio:
         st.info("👆 Configure settings above and click **Run Portfolio Backtest**.")
 
-
 # ============================================
-# TAB 4: INDIVIDUAL LIQUIDATION (PIN Protected)
+# INDIVIDUAL LIQUIDATION (PIN Protected)
 # ============================================
-# Note: If you already have 3 tabs, this adds a 4th.
-# Adjust the index if you have more tabs.
-# ============================================
-
-# If you are adding this to an app that already defines tabs, you need to redefine them.
-# To avoid breaking existing code, I'll show how to add a fourth tab safely.
-
-# Assuming your existing tabs are defined like:
-# tab_live, tab_signals, tab_backtest, tab_portfolio = st.tabs([...])
-
-# You can either:
-# 1. Add a fourth tab by including "Individual Liquidation" in the list, OR
-# 2. Create a separate expander in the sidebar or main area.
-
-# For simplicity and easy removal, I'll create a separate expander in the main dashboard area.
-# This avoids modifying your existing tab structure.
-
-# Place this block anywhere in the main dashboard area (after your existing tabs or in an expander).
 with st.expander("🔐 Individual Position Liquidation (PIN protected)", expanded=False):
-    # PIN state for this feature (separate from liquidation PIN, but reusing same PIN logic)
+    # PIN state for this feature
     if "liq_individual_authorized" not in st.session_state:
         st.session_state.liq_individual_authorized = False
 
@@ -1525,7 +1506,8 @@ with st.expander("🔐 Individual Position Liquidation (PIN protected)", expande
                 col4.metric("Estimated Proceeds", f"${qty * current_price:.2f}")
 
                 # Determine market session
-                now_et = datetime.now(ET)
+                from datetime import datetime as dt
+                now_et = dt.now(ET)
                 regular_start = now_et.replace(hour=9, minute=30, second=0)
                 regular_end = now_et.replace(hour=16, minute=0, second=0)
                 is_regular_hours = regular_start <= now_et <= regular_end
@@ -1541,7 +1523,7 @@ with st.expander("🔐 Individual Position Liquidation (PIN protected)", expande
                     if st.button("🔥 LIQUIDATE THIS POSITION", use_container_width=True, type="primary", disabled=not confirm):
                         try:
                             if is_regular_hours:
-                                # Market order during regular hours (supports fractional)
+                                # Market order (fractional shares allowed)
                                 trading_client.submit_order(MarketOrderRequest(
                                     symbol=symbol,
                                     qty=qty,
@@ -1552,7 +1534,7 @@ with st.expander("🔐 Individual Position Liquidation (PIN protected)", expande
                                 st.session_state.liq_individual_authorized = False
                                 st.rerun()
                             else:
-                                # Extended hours: limit order, integer shares only
+                                # Extended hours: limit order, whole shares only
                                 whole_shares = int(qty)
                                 fractional_remainder = qty - whole_shares
                                 if fractional_remainder > 0:
@@ -1560,16 +1542,16 @@ with st.expander("🔐 Individual Position Liquidation (PIN protected)", expande
                                 if whole_shares == 0:
                                     st.error("No whole shares to sell during extended hours. Please wait for regular market hours to sell fractional shares.")
                                 else:
+                                    # Use a limit order with a small buffer (1% below current) to increase fill probability
                                     limit_price = round(current_price * 0.99, 2)
-                                    trading_client.submit_order(
+                                    trading_client.submit_order(LimitOrderRequest(
                                         symbol=symbol,
                                         qty=whole_shares,
                                         side=OrderSide.SELL,
-                                        type="limit",
                                         limit_price=limit_price,
-                                        time_in_force="day",
+                                        time_in_force=TimeInForce.DAY,
                                         extended_hours=True
-                                    )
+                                    ))
                                     st.success(f"✅ Limit order placed to sell {whole_shares} shares of {symbol} at ${limit_price:.2f}.")
                                     st.session_state.liq_individual_authorized = False
                                     st.rerun()
@@ -1587,6 +1569,7 @@ with st.expander("🔐 Individual Position Liquidation (PIN protected)", expande
         if st.button("🔒 Lock Individual Liquidation", use_container_width=True):
             st.session_state.liq_individual_authorized = False
             st.rerun()
+
 
 # ─────────────────────────────────────────────
 # AUTO-REFRESH (dashboard only)
