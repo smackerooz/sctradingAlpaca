@@ -1458,7 +1458,7 @@ with st.expander("🔐 Individual Position Liquidation (PIN protected)", expande
                     row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
                     if row.data and row.data[0]["pin"] == indiv_liq_pin:
                         st.session_state.liq_individual_authorized = True
-                        st.success("Access granted!")
+                        st.success("Access granted! You can now liquidate positions.")
                         st.rerun()
                     else:
                         st.error("Incorrect PIN")
@@ -1491,12 +1491,12 @@ with st.expander("🔐 Individual Position Liquidation (PIN protected)", expande
                         "entry_price": float(p.avg_entry_price),
                     }
 
-                selected_label = st.selectbox("Select position to liquidate", list(position_options.keys()))
+                selected_label = st.selectbox("Select position to liquidate", list(position_options.keys()), key="liq_select")
                 selected = position_options[selected_label]
                 symbol = selected["symbol"]
                 qty = selected["qty"]
                 current_price = selected["current_price"]
-                entry_price = selected["entry_price"]
+                entry_price_from_position = selected["entry_price"]
 
                 # Display position details
                 col1, col2, col3, col4 = st.columns(4)
@@ -1517,10 +1517,10 @@ with st.expander("🔐 Individual Position Liquidation (PIN protected)", expande
                 else:
                     st.warning("🟡 **Extended hours** – will use a **limit order** (only whole shares). Any fractional remainder will stay in your account.")
 
-                confirm = st.checkbox("I confirm that I want to sell this position immediately.")
+                confirm = st.checkbox("I confirm that I want to sell this position immediately.", key="liq_confirm")
                 col_liq, col_cancel = st.columns(2)
                 with col_liq:
-                    if st.button("🔥 LIQUIDATE THIS POSITION", use_container_width=True, type="primary", disabled=not confirm):
+                    if st.button("🔥 LIQUIDATE THIS POSITION", use_container_width=True, type="primary", disabled=not confirm, key="liq_execute"):
                         try:
                             if is_regular_hours:
                                 # Market order (fractional shares allowed)
@@ -1531,18 +1531,15 @@ with st.expander("🔐 Individual Position Liquidation (PIN protected)", expande
                                     time_in_force=TimeInForce.DAY,
                                 ))
                                 st.success(f"✅ Market order placed to sell {qty:.4f} shares of {symbol}.")
-                                st.session_state.liq_individual_authorized = False
-                                st.rerun()
                             else:
                                 # Extended hours: limit order, whole shares only
                                 whole_shares = int(qty)
                                 fractional_remainder = qty - whole_shares
                                 if fractional_remainder > 0:
-                                    st.warning(f"⚠️ Extended hours only support whole shares. Will sell {whole_shares} shares. The remaining {fractional_remainder:.4f} shares will stay in your account.")
+                                    st.warning(f"⚠️ Extended hours only support whole shares. Will sell {whole_shares} shares. Remaining {fractional_remainder:.4f} shares will stay.")
                                 if whole_shares == 0:
-                                    st.error("No whole shares to sell during extended hours. Please wait for regular market hours to sell fractional shares.")
+                                    st.error("No whole shares to sell during extended hours.")
                                 else:
-                                    # Use a limit order with a small buffer (1% below current) to increase fill probability
                                     limit_price = round(current_price * 0.99, 2)
                                     trading_client.submit_order(LimitOrderRequest(
                                         symbol=symbol,
@@ -1553,20 +1550,59 @@ with st.expander("🔐 Individual Position Liquidation (PIN protected)", expande
                                         extended_hours=True
                                     ))
                                     st.success(f"✅ Limit order placed to sell {whole_shares} shares of {symbol} at ${limit_price:.2f}.")
-                                    st.session_state.liq_individual_authorized = False
-                                    st.rerun()
+
+                            # --- AFTER ORDER SUCCESS, LOG THE TRADE ---
+                            # Get original strategy from symbol_state (if available)
+                            original_strategy = symbol_state.get(symbol, {}).get("strategy", "MANUAL_LIQUIDATION")
+                            entry_price = symbol_state.get(symbol, {}).get("entry", 0.0)
+                            if entry_price == 0.0:
+                                # Fallback: use avg_entry_price from the position object
+                                entry_price = entry_price_from_position
+
+                            # Calculate P&L (use the qty that was actually sold)
+                            sold_qty = qty if is_regular_hours else (whole_shares if 'whole_shares' in locals() else qty)
+                            pl_usd = (current_price - entry_price) * sold_qty
+                            pl_pct = (pl_usd / (entry_price * sold_qty)) * 100 if entry_price * sold_qty != 0 else 0
+
+                            # Save to Supabase using the dashboard's existing function
+                            trade_record = {
+                                "date": datetime.now(SGT).date().isoformat(),
+                                "Symbol": symbol,
+                                "Strategy": original_strategy,
+                                "Buy Price": f"${entry_price:.2f}",
+                                "Sell Price": f"${current_price:.2f}",
+                                "Qty": round(sold_qty, 4),
+                                "_pl_usd": pl_usd,
+                                "P&L ($)": f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}",
+                                "P&L (%)": f"{pl_pct:+.2f}%",
+                                "Time (SGT)": datetime.now(SGT).strftime("%H:%M:%S"),
+                                "Reason": "Manual liquidation via dashboard",
+                            }
+                            save_trade_to_supabase(trade_record)
+
+                            # Update local session state to show the trade immediately
+                            st.session_state.realized_trades.insert(0, trade_record)
+
+                            # Remove the position from symbol_state (prevents stale data)
+                            if symbol in symbol_state:
+                                symbol_state[symbol]["in_trade"] = False
+
+                            # Refresh the page to show updated holdings and trades
+                            st.rerun()
+
                         except Exception as e:
                             st.error(f"Error placing order: {e}")
                 with col_cancel:
-                    if st.button("❌ Cancel", use_container_width=True):
-                        st.session_state.liq_individual_authorized = False
+                    if st.button("❌ Cancel", use_container_width=True, key="liq_cancel"):
+                        # Just close the expander? No, just clear selection? We'll keep unlocked.
+                        st.info("Liquidation cancelled.")
                         st.rerun()
 
         except Exception as e:
             st.error(f"Could not fetch positions: {e}")
 
-        # Lock button
-        if st.button("🔒 Lock Individual Liquidation", use_container_width=True):
+        # Lock button – allows user to re‑lock the tab
+        if st.button("🔒 Lock Individual Liquidation", use_container_width=True, key="liq_lock"):
             st.session_state.liq_individual_authorized = False
             st.rerun()
 
