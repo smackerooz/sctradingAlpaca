@@ -220,23 +220,30 @@ def calculate_vwap(df: pd.DataFrame) -> float:
 # ORB-R SPECIFIC FUNCTIONS
 # ─────────────────────────────────────────────
 def get_yesterday_box(symbol: str) -> tuple:
-    df = get_bars(symbol, timeframe_minutes=15, days_back=5)
+    """Get the most recent trading day's regular session high and low (up to 5 days back)."""
+    df = get_bars(symbol, timeframe_minutes=15, days_back=7)  # fetch enough historical data
     if df.empty:
         return None, None
+    
     today_et = datetime.now(ET).date()
-    yesterday = today_et - timedelta(days=1)
-    while yesterday.weekday() >= 5:
-        yesterday -= timedelta(days=1)
-    session_bars = df[
-        (df.index.date == yesterday) &
-        (df.index.time >= pd.Timestamp("09:30").time()) &
-        (df.index.time <= pd.Timestamp("16:00").time())
-    ]
-    if session_bars.empty or len(session_bars) < 4:
-        return None, None
-    box_high = round(float(session_bars["high"].max()), 4)
-    box_low = round(float(session_bars["low"].min()), 4)
-    return box_high, box_low
+    # Start from yesterday and go back up to 5 days
+    for offset in range(1, 6):
+        check_date = today_et - timedelta(days=offset)
+        # Skip weekends (optional, but Alpaca already won't have bars for weekends)
+        session_bars = df[
+            (df.index.date == check_date) &
+            (df.index.time >= pd.Timestamp("09:30").time()) &
+            (df.index.time <= pd.Timestamp("16:00").time())
+        ]
+        if not session_bars.empty and len(session_bars) >= 4:
+            box_high = round(float(session_bars["high"].max()), 4)
+            box_low = round(float(session_bars["low"].min()), 4)
+            sb_log(f"📦 {symbol} box set from {check_date}: High=${box_high:.2f} Low=${box_low:.2f}")
+            return box_high, box_low
+    
+    # If no valid trading day found in the last 5 days
+    sb_log(f"⚠️ No valid trading day found for {symbol} in the last 5 days")
+    return None, None
 
 def is_hammer(candle: pd.Series) -> bool:
     body = abs(candle["close"] - candle["open"])
