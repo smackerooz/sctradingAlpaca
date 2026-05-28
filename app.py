@@ -619,7 +619,7 @@ with tab_backtest:
         st.dataframe(results)
 
 # ─────────────────────────────────────────────
-# TAB 4 — INDIVIDUAL LIQUIDATION (with PIN) – CORRECT COLUMNS
+# TAB 4 — INDIVIDUAL LIQUIDATION (with PIN) – FIXED DROPDOWN
 # ─────────────────────────────────────────────
 with tab_liq:
     st.write("## 🧹 Individual Position Liquidation")
@@ -642,14 +642,12 @@ with tab_liq:
                     row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
                     if row.data and row.data[0]["pin"] == indiv_liq_pin:
                         st.session_state.liq_individual_authorized = True
-                        st.success("Access granted!")
                         st.rerun()
                     else:
                         st.error("Incorrect PIN")
                 except Exception:
                     st.error("Could not verify PIN")
             if cancel_btn:
-                st.session_state.liq_individual_authorized = False
                 st.rerun()
     else:
         st.success("✅ Access granted – you can liquidate individual positions")
@@ -659,7 +657,11 @@ with tab_liq:
             positions = trading_client.get_all_positions()
             if not positions:
                 st.info("No open positions to liquidate.")
+                # Clear stored selection
+                if "liq_selected_label" in st.session_state:
+                    del st.session_state.liq_selected_label
             else:
+                # Build dropdown options (same format as before)
                 position_options = {}
                 for p in positions:
                     symbol = p.symbol
@@ -667,14 +669,34 @@ with tab_liq:
                     current_price = float(p.current_price)
                     market_value = float(p.market_value)
                     unrealized_pl = float(p.unrealized_pl)
-                    position_options[f"{symbol} | Qty: {qty:.4f} | Mkt Val: ${market_value:.2f} | P&L: ${unrealized_pl:+.2f}"] = {
+                    label = f"{symbol} | Qty: {qty:.4f} | Mkt Val: ${market_value:.2f} | P&L: ${unrealized_pl:+.2f}"
+                    position_options[label] = {
                         "symbol": symbol,
                         "qty": qty,
                         "current_price": current_price,
                         "entry_price": float(p.avg_entry_price),
                     }
 
-                selected_label = st.selectbox("Select position to liquidate", list(position_options.keys()), key="liq_select")
+                option_labels = list(position_options.keys())
+
+                # Initialize session state for selected label if not set or if it's no longer valid
+                if "liq_selected_label" not in st.session_state or st.session_state.liq_selected_label not in option_labels:
+                    st.session_state.liq_selected_label = option_labels[0] if option_labels else None
+
+                # Create selectbox, using the stored value as default
+                selected_label = st.selectbox(
+                    "Select position to liquidate",
+                    option_labels,
+                    index=option_labels.index(st.session_state.liq_selected_label) if st.session_state.liq_selected_label in option_labels else 0,
+                    key="liq_select_widget"
+                )
+
+                # Update session state if the user changed selection
+                if selected_label != st.session_state.liq_selected_label:
+                    st.session_state.liq_selected_label = selected_label
+                    # No rerun needed; the widget will reflect the new selection on next cycle
+
+                # Get selected position data
                 selected = position_options[selected_label]
                 symbol = selected["symbol"]
                 qty = selected["qty"]
@@ -687,6 +709,7 @@ with tab_liq:
                 col3.metric("Current Price", f"${current_price:.2f}")
                 col4.metric("Estimated Proceeds", f"${qty * current_price:.2f}")
 
+                # Strategy dropdown (no persistence needed, but can add if desired)
                 available = supabase.table("strategies").select("name").execute()
                 strategy_options = [s["name"] for s in available.data] if available.data else ["ORB-R", "VWAP"]
                 selected_strategy = st.selectbox("Strategy that opened this position (for correct P&L attribution)", strategy_options, key="liq_strategy")
@@ -760,19 +783,22 @@ with tab_liq:
 
                             # Insert into Supabase
                             result = supabase.table("realized_trades").insert(trade_record).execute()
-
                             if hasattr(result, 'error') and result.error:
                                 st.error(f"Supabase insert error: {result.error}")
                             else:
                                 st.success("✅ Trade recorded in database.")
-                                # Convert to format expected by session state (add all fields)
+                                # Add to session state for immediate display
                                 st.session_state.realized_trades.insert(0, trade_record)
 
-                            # Remove from open_positions table if exists
+                            # Remove from open_positions table
                             try:
                                 supabase.table("open_positions").delete().eq("symbol", symbol).execute()
                             except:
                                 pass
+
+                            # Clear stored selection because this position no longer exists
+                            if "liq_selected_label" in st.session_state:
+                                del st.session_state.liq_selected_label
 
                             st.rerun()
                         except Exception as e:
@@ -788,6 +814,8 @@ with tab_liq:
 
         if st.button("🔒 Lock Individual Liquidation", use_container_width=True, key="liq_lock"):
             st.session_state.liq_individual_authorized = False
+            if "liq_selected_label" in st.session_state:
+                del st.session_state.liq_selected_label
             st.rerun()
 
 # ─────────────────────────────────────────────
