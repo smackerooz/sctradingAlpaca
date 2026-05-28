@@ -151,7 +151,6 @@ def compute_daily_pnl_overview():
     if not trades:
         return pd.DataFrame()
     df = pd.DataFrame(trades)
-    # Use 'pl_usd' column (your table has this, not '_pl_usd')
     if "pl_usd" in df.columns:
         df["pl_usd"] = df["pl_usd"]
     elif "P&L ($)" in df.columns:
@@ -164,13 +163,7 @@ def compute_daily_pnl_overview():
     return daily
 
 def get_trading_session_start_for_trade(trade_date, time_sgt_str):
-    """
-    Returns the trading session start date (as date object) for a given trade.
-    Trading session runs from 21:30 SGT to 04:00 SGT next day.
-    - If trade time >= 21:30, session start = trade_date
-    - If trade time < 04:00, session start = trade_date - 1 day
-    """
-    # Convert trade_date to date object if it's a string or Timestamp
+    # Convert trade_date to date object if needed
     if isinstance(trade_date, str):
         trade_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
     elif hasattr(trade_date, 'date'):
@@ -179,7 +172,6 @@ def get_trading_session_start_for_trade(trade_date, time_sgt_str):
     try:
         time_obj = datetime.strptime(time_sgt_str, "%H:%M:%S").time()
     except:
-        # fallback to 12:00 (should not happen)
         return trade_date
     if time_obj >= datetime.strptime("21:30:00", "%H:%M:%S").time():
         return trade_date
@@ -189,19 +181,13 @@ def get_trading_session_start_for_trade(trade_date, time_sgt_str):
         return trade_date
 
 def filter_trades_by_session(trades_df, target_session_date):
-    """
-    Filters trades_df (must have 'date' and 'time_sgt' columns) to those
-    belonging to the given trading session start date.
-    """
     if trades_df.empty:
         return trades_df
     
     df = trades_df.copy()
-    # Ensure 'date' column is datetime.date
     if 'date' in df.columns:
         df['date'] = pd.to_datetime(df['date']).dt.date
     
-    # Compute session start for each trade
     df["session_start"] = df.apply(
         lambda row: get_trading_session_start_for_trade(row["date"], row.get("time_sgt", "12:00:00")),
         axis=1
@@ -209,20 +195,15 @@ def filter_trades_by_session(trades_df, target_session_date):
     return df[df["session_start"] == target_session_date].drop(columns=["session_start"])
 
 def get_current_session_date(now_sgt):
-    """Returns the trading session start date for the current session."""
     if now_sgt.time() >= datetime.strptime("21:30:00", "%H:%M:%S").time():
         return now_sgt.date()
     else:
         return (now_sgt - timedelta(days=1)).date()
 
 def get_last_completed_session_date(now_sgt):
-    """Returns the trading session start date for the most recently completed session."""
-    current = get_current_session_date(now_sgt)
-    # Last completed session ended at 04:00 today (or yesterday's session)
-    return current - timedelta(days=1)
+    return get_current_session_date(now_sgt) - timedelta(days=1)
 
 def get_current_strategy_display():
-    """Reads forced_strategy from bot_config, validates against strategies table"""
     try:
         available = supabase.table("strategies").select("name", "description").execute()
         available_names = [s["name"] for s in available.data] if available.data else []
@@ -430,7 +411,6 @@ current_session_date = get_current_session_date(now_sgt)
 trades_df_full = pd.DataFrame(st.session_state.realized_trades)
 if not trades_df_full.empty and "time_sgt" in trades_df_full.columns:
     current_session_trades = filter_trades_by_session(trades_df_full, current_session_date)
-    # Use 'pl_usd' column (not '_pl_usd')
     current_session_realized_pl = current_session_trades["pl_usd"].sum() if "pl_usd" in current_session_trades.columns else 0.0
 else:
     current_session_realized_pl = 0.0
@@ -477,18 +457,30 @@ with tab_live:
         if session_trades.empty:
             st.info(f"No realized trades found for {session_label}.")
         else:
-            # Display trades table (no need to drop pl_usd – it's numeric, but we can keep it)
+            # Display trades table
             st.dataframe(session_trades, use_container_width=True)
             
-            # P&L per strategy using 'pl_usd'
-            if "pl_usd" in session_trades.columns and "Strategy" in session_trades.columns:
-                pl_by_strategy = session_trades.groupby("Strategy")["pl_usd"].sum().reset_index()
+            # ---- PER-STRATEGY P&L ----
+            # Find strategy column (case-insensitive) and pl_usd column
+            strategy_col = None
+            for col in session_trades.columns:
+                if col.lower() == 'strategy':
+                    strategy_col = col
+                    break
+            
+            if "pl_usd" in session_trades.columns and strategy_col:
+                pl_by_strategy = session_trades.groupby(strategy_col)["pl_usd"].sum().reset_index()
                 pl_by_strategy.columns = ["Strategy", "Realized P&L (USD)"]
                 pl_by_strategy["Realized P&L (USD)"] = pl_by_strategy["Realized P&L (USD)"].apply(lambda x: f"${x:+.2f}")
                 st.markdown("### Per‑Strategy P&L for this Session")
                 st.dataframe(pl_by_strategy, use_container_width=True, hide_index=True)
             else:
-                st.warning("P&L breakdown not available (missing 'pl_usd' or 'Strategy' column).")
+                missing = []
+                if "pl_usd" not in session_trades.columns:
+                    missing.append("'pl_usd'")
+                if not strategy_col:
+                    missing.append("'strategy' column (case-insensitive)")
+                st.warning(f"P&L breakdown not available (missing {', '.join(missing)}). Available columns: {list(session_trades.columns)}")
     else:
         st.info("No trade data available or missing 'time_sgt' column. Please ensure trades are saved with 'time_sgt' field.")
     
@@ -703,11 +695,11 @@ with tab_liq:
                             trade_record = {
                                 "date": datetime.now(SGT).date().isoformat(),
                                 "Symbol": symbol,
-                                "Strategy": selected_strategy,
+                                "strategy": selected_strategy,      # lowercase to match Supabase
                                 "Buy Price": f"${entry_price:.2f}",
                                 "Sell Price": f"${current_price:.2f}",
                                 "Qty": round(sold_qty, 4),
-                                "pl_usd": pl_usd,  # Use pl_usd, not _pl_usd
+                                "pl_usd": pl_usd,
                                 "P&L ($)": f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}",
                                 "P&L (%)": f"{pl_pct:+.2f}%",
                                 "time_sgt": datetime.now(SGT).strftime("%H:%M:%S"),
