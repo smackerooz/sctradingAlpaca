@@ -619,7 +619,7 @@ with tab_backtest:
         st.dataframe(results)
 
 # ─────────────────────────────────────────────
-# TAB 4 — INDIVIDUAL LIQUIDATION (with PIN) – DIAGNOSTIC
+# TAB 4 — INDIVIDUAL LIQUIDATION (with PIN) – CORRECT COLUMNS
 # ─────────────────────────────────────────────
 with tab_liq:
     st.write("## 🧹 Individual Position Liquidation")
@@ -737,39 +737,37 @@ with tab_liq:
 
                             # Calculate P&L
                             entry_price = entry_price_from_position
-                            pl_usd = (current_price - entry_price) * sold_qty
+                            sell_price = current_price
+                            pl_usd = (sell_price - entry_price) * sold_qty
                             pl_pct = (pl_usd / (entry_price * sold_qty)) * 100 if entry_price * sold_qty != 0 else 0
+                            pl_display = f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}"
+                            pl_pct_str = f"{pl_pct:+.2f}%"
 
-                            # Build trade record – match your Supabase column names exactly
                             now_sgt = datetime.now(SGT)
                             trade_record = {
                                 "date": now_sgt.date().isoformat(),
-                                "Symbol": symbol,
-                                "strategy": selected_strategy,   # lowercase 'strategy'
-                                "Buy Price": f"${entry_price:.2f}",
-                                "Sell Price": f"${current_price:.2f}",
-                                "Qty": round(sold_qty, 4),
+                                "symbol": symbol,
+                                "buy_price": entry_price,
+                                "sell_price": sell_price,
+                                "qty": round(sold_qty, 4),
                                 "pl_usd": pl_usd,
-                                "P&L ($)": f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}",
-                                "P&L (%)": f"{pl_pct:+.2f}%",
+                                "pl_display": pl_display,
+                                "pl_pct": pl_pct_str,
                                 "time_sgt": now_sgt.strftime("%H:%M:%S"),
-                                "Reason": "Manual liquidation via dashboard",
+                                "reason": "Manual liquidation via dashboard",
+                                "strategy": selected_strategy,
                             }
-                            
-                            # ⭐ DEBUG: Show the record being inserted
-                            st.write("**Inserting trade record:**", trade_record)
-                            
+
                             # Insert into Supabase
                             result = supabase.table("realized_trades").insert(trade_record).execute()
-                            
-                            # Check for errors
+
                             if hasattr(result, 'error') and result.error:
                                 st.error(f"Supabase insert error: {result.error}")
                             else:
                                 st.success("✅ Trade recorded in database.")
-                                # Add to session state for immediate display
+                                # Convert to format expected by session state (add all fields)
                                 st.session_state.realized_trades.insert(0, trade_record)
-                            
+
                             # Remove from open_positions table if exists
                             try:
                                 supabase.table("open_positions").delete().eq("symbol", symbol).execute()
@@ -779,7 +777,7 @@ with tab_liq:
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error during liquidation: {e}")
-                            st.exception(e)  # Shows full traceback
+                            st.exception(e)
                 with col_cancel:
                     if st.button("❌ Cancel", use_container_width=True, key="liq_cancel"):
                         st.info("Liquidation cancelled.")
