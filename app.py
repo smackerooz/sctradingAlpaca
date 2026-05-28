@@ -118,7 +118,6 @@ ET = pytz.timezone('US/Eastern')
 # CONSTANTS & WATCHLIST
 # ─────────────────────────────────────────────
 TARGET_PROFIT = 200.0
-SCAN_INTERVAL = 10
 
 WATCHLIST = [
     "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM", "MSTR", "PANW",
@@ -135,6 +134,8 @@ if "realized_trades" not in st.session_state:
     st.session_state.realized_trades = []
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = datetime.now(SGT)
+if "liq_selected_label" not in st.session_state:
+    st.session_state.liq_selected_label = None
 
 # ─────────────────────────────────────────────
 # HELPER FUNCTIONS
@@ -231,7 +232,6 @@ def set_forced_strategy(strategy):
         st.error(f"Failed to save strategy: {e}")
 
 def get_weekly_baseline():
-    """Fetch the most recent weekly baseline from the 'baseline' column."""
     try:
         row = supabase.table("weekly_baseline").select("baseline").order("updated_at", desc=True).limit(1).execute()
         if not row.data:
@@ -243,7 +243,6 @@ def get_weekly_baseline():
     return 0.0
 
 def set_weekly_baseline(amount):
-    """Insert a new baseline record."""
     try:
         today = datetime.now(SGT).date().isoformat()
         now_iso = datetime.now(SGT).isoformat()
@@ -314,7 +313,14 @@ def run_backtest(strategy, start_date, end_date):
     return pd.DataFrame({"date": [start_date], "return": [0.05]})
 
 # ─────────────────────────────────────────────
-# FETCH LIVE ACCOUNT DATA
+# INITIAL DATA LOAD (only once)
+# ─────────────────────────────────────────────
+if "initial_load_done" not in st.session_state:
+    st.session_state.realized_trades = load_realized_trades()
+    st.session_state.initial_load_done = True
+
+# ─────────────────────────────────────────────
+# FETCH LIVE ACCOUNT DATA (refreshed on each run)
 # ─────────────────────────────────────────────
 try:
     account = trading_client.get_account()
@@ -328,13 +334,6 @@ except:
     portfolio_value = cash = buying_power = daily_pl_alpaca = total_holdings = weekly_baseline = 0.0
 
 # ─────────────────────────────────────────────
-# AUTO-REFRESH TRADES
-# ─────────────────────────────────────────────
-if (datetime.now(SGT) - st.session_state.last_refresh).seconds > SCAN_INTERVAL:
-    st.session_state.realized_trades = load_realized_trades()
-    st.session_state.last_refresh = datetime.now(SGT)
-
-# ─────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────
 st.sidebar.image("https://alpaca.markets/docs/assets/images/alpaca-logo.png", width=200)
@@ -346,6 +345,11 @@ st.sidebar.metric("Today's P&L (Alpaca)", f"${daily_pl_alpaca:+.2f}")
 st.sidebar.metric("Weekly Baseline", f"${weekly_baseline:,.2f}")
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Market Open:** {'✅ Yes' if is_market_open() else '❌ No'}")
+
+# Manual refresh button
+if st.sidebar.button("🔄 Refresh Trades Data", use_container_width=True):
+    st.session_state.realized_trades = load_realized_trades()
+    st.rerun()
 
 # Weekly Baseline Admin
 with st.sidebar.expander("📅 Weekly Baseline Settings (admin)"):
@@ -619,7 +623,7 @@ with tab_backtest:
         st.dataframe(results)
 
 # ─────────────────────────────────────────────
-# TAB 4 — INDIVIDUAL LIQUIDATION (with PIN) – FIXED DROPDOWN
+# TAB 4 — INDIVIDUAL LIQUIDATION (with PIN, persistent dropdown, no auto-refresh)
 # ─────────────────────────────────────────────
 with tab_liq:
     st.write("## 🧹 Individual Position Liquidation")
@@ -657,11 +661,9 @@ with tab_liq:
             positions = trading_client.get_all_positions()
             if not positions:
                 st.info("No open positions to liquidate.")
-                # Clear stored selection
-                if "liq_selected_label" in st.session_state:
-                    del st.session_state.liq_selected_label
+                st.session_state.liq_selected_label = None
             else:
-                # Build dropdown options (same format as before)
+                # Build dropdown options
                 position_options = {}
                 for p in positions:
                     symbol = p.symbol
@@ -679,24 +681,21 @@ with tab_liq:
 
                 option_labels = list(position_options.keys())
 
-                # Initialize session state for selected label if not set or if it's no longer valid
-                if "liq_selected_label" not in st.session_state or st.session_state.liq_selected_label not in option_labels:
+                # Validate stored selection
+                if st.session_state.liq_selected_label not in option_labels:
                     st.session_state.liq_selected_label = option_labels[0] if option_labels else None
 
-                # Create selectbox, using the stored value as default
+                # Selectbox with stored value
                 selected_label = st.selectbox(
                     "Select position to liquidate",
                     option_labels,
                     index=option_labels.index(st.session_state.liq_selected_label) if st.session_state.liq_selected_label in option_labels else 0,
                     key="liq_select_widget"
                 )
-
-                # Update session state if the user changed selection
+                # Update stored selection if changed
                 if selected_label != st.session_state.liq_selected_label:
                     st.session_state.liq_selected_label = selected_label
-                    # No rerun needed; the widget will reflect the new selection on next cycle
 
-                # Get selected position data
                 selected = position_options[selected_label]
                 symbol = selected["symbol"]
                 qty = selected["qty"]
@@ -709,7 +708,6 @@ with tab_liq:
                 col3.metric("Current Price", f"${current_price:.2f}")
                 col4.metric("Estimated Proceeds", f"${qty * current_price:.2f}")
 
-                # Strategy dropdown (no persistence needed, but can add if desired)
                 available = supabase.table("strategies").select("name").execute()
                 strategy_options = [s["name"] for s in available.data] if available.data else ["ORB-R", "VWAP"]
                 selected_strategy = st.selectbox("Strategy that opened this position (for correct P&L attribution)", strategy_options, key="liq_strategy")
@@ -787,7 +785,6 @@ with tab_liq:
                                 st.error(f"Supabase insert error: {result.error}")
                             else:
                                 st.success("✅ Trade recorded in database.")
-                                # Add to session state for immediate display
                                 st.session_state.realized_trades.insert(0, trade_record)
 
                             # Remove from open_positions table
@@ -796,10 +793,8 @@ with tab_liq:
                             except:
                                 pass
 
-                            # Clear stored selection because this position no longer exists
-                            if "liq_selected_label" in st.session_state:
-                                del st.session_state.liq_selected_label
-
+                            # Clear stored selection and refresh
+                            st.session_state.liq_selected_label = None
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error during liquidation: {e}")
@@ -814,8 +809,7 @@ with tab_liq:
 
         if st.button("🔒 Lock Individual Liquidation", use_container_width=True, key="liq_lock"):
             st.session_state.liq_individual_authorized = False
-            if "liq_selected_label" in st.session_state:
-                del st.session_state.liq_selected_label
+            st.session_state.liq_selected_label = None
             st.rerun()
 
 # ─────────────────────────────────────────────
@@ -847,7 +841,5 @@ ORDER BY session_start_date DESC, strategy;
     """, language="sql")
 
 # ─────────────────────────────────────────────
-# AUTO-REFRESH DASHBOARD
+# NO AUTO-REFRESH – user must click Refresh Trades Data button
 # ─────────────────────────────────────────────
-time.sleep(SCAN_INTERVAL)
-st.rerun()
