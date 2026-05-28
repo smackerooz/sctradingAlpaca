@@ -28,7 +28,7 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 st.set_page_config(page_title="Trading Bot", page_icon="📈", layout="wide")
 
 # ─────────────────────────────────────────────
-# KEEPALIVE PING (unchanged)
+# KEEPALIVE PING
 # ─────────────────────────────────────────────
 import streamlit.components.v1 as components
 import os
@@ -163,26 +163,67 @@ def compute_daily_pnl_overview():
     daily.columns = ["Trading Session Date", "Total"]
     return daily
 
+def get_trading_session_start_for_trade(trade_date, time_sgt_str):
+    """
+    Returns the trading session start date (as date object) for a given trade.
+    Trading session runs from 21:30 SGT to 04:00 SGT next day.
+    - If trade time >= 21:30, session start = trade_date
+    - If trade time < 04:00, session start = trade_date - 1 day
+    """
+    try:
+        time_obj = datetime.strptime(time_sgt_str, "%H:%M:%S").time()
+    except:
+        # fallback to 12:00 (should not happen)
+        return trade_date
+    if time_obj >= datetime.strptime("21:30:00", "%H:%M:%S").time():
+        return trade_date
+    elif time_obj < datetime.strptime("04:00:00", "%H:%M:%S").time():
+        return trade_date - timedelta(days=1)
+    else:
+        return trade_date
+
+def filter_trades_by_session(trades_df, target_session_date):
+    """
+    Filters trades_df (must have 'date' and 'time_sgt' columns) to those
+    belonging to the given trading session start date.
+    """
+    if trades_df.empty:
+        return trades_df
+    # Compute session start for each trade
+    trades_df["session_start"] = trades_df.apply(
+        lambda row: get_trading_session_start_for_trade(row["date"], row.get("time_sgt", "12:00:00")),
+        axis=1
+    )
+    return trades_df[trades_df["session_start"] == target_session_date].drop(columns=["session_start"])
+
+def get_current_session_date(now_sgt):
+    """Returns the trading session start date for the current session."""
+    if now_sgt.time() >= datetime.strptime("21:30:00", "%H:%M:%S").time():
+        return now_sgt.date()
+    else:
+        return (now_sgt - timedelta(days=1)).date()
+
+def get_last_completed_session_date(now_sgt):
+    """Returns the trading session start date for the most recently completed session."""
+    current = get_current_session_date(now_sgt)
+    # Last completed session ended at 04:00 today (or yesterday's session)
+    return current - timedelta(days=1)
+
 def get_current_strategy_display():
     """Reads forced_strategy from bot_config, validates against strategies table"""
     try:
-        # Get available strategies from Supabase
         available = supabase.table("strategies").select("name", "description").execute()
         available_names = [s["name"] for s in available.data] if available.data else []
         
-        # Get forced strategy from bot_config
         row = supabase.table("bot_config").select("forced_strategy").eq("id", 1).execute()
         forced = row.data[0].get("forced_strategy") if row.data else None
         
         if forced and forced in available_names:
-            # Valid forced strategy
             desc = next((s["description"] for s in available.data if s["name"] == forced), "No description")
             return forced, desc
         elif available_names:
-            # No forced strategy or invalid – use first available as default
             default = available_names[0]
             desc = next((s["description"] for s in available.data if s["name"] == default), "")
-            # Optionally update the database to this default
             supabase.table("bot_config").update({"forced_strategy": default}).eq("id", 1).execute()
             return default, desc
         else:
@@ -192,14 +233,12 @@ def get_current_strategy_display():
         return "Error", "Could not load strategy"
 
 def set_forced_strategy(strategy):
-    """Updates the forced_strategy column in bot_config"""
     try:
         supabase.table("bot_config").update({"forced_strategy": strategy}).eq("id", 1).execute()
     except Exception as e:
         st.error(f"Failed to save strategy: {e}")
 
 def get_weekly_baseline():
-    """Fetch the most recent weekly baseline amount from weekly_baseline table"""
     try:
         row = supabase.table("weekly_baseline").select("baseline_amount").order("created_at", desc=True).limit(1).execute()
         if row.data:
@@ -209,7 +248,6 @@ def get_weekly_baseline():
     return 0.0
 
 def get_total_holdings_value():
-    """Sum market value of all open positions from Alpaca"""
     try:
         positions = trading_client.get_all_positions()
         total = sum(float(p.market_value) for p in positions)
@@ -274,11 +312,11 @@ try:
     portfolio_value = float(account.portfolio_value)
     cash = float(account.cash)
     buying_power = float(account.buying_power)
-    daily_pl = float(account.equity) - float(account.last_equity) if hasattr(account, 'last_equity') else 0.0
+    daily_pl_alpaca = float(account.equity) - float(account.last_equity) if hasattr(account, 'last_equity') else 0.0
     total_holdings = get_total_holdings_value()
     weekly_baseline = get_weekly_baseline()
 except:
-    portfolio_value = cash = buying_power = daily_pl = total_holdings = weekly_baseline = 0.0
+    portfolio_value = cash = buying_power = daily_pl_alpaca = total_holdings = weekly_baseline = 0.0
 
 # ─────────────────────────────────────────────
 # AUTO-REFRESH TRADES
@@ -288,14 +326,14 @@ if (datetime.now(SGT) - st.session_state.last_refresh).seconds > SCAN_INTERVAL:
     st.session_state.last_refresh = datetime.now(SGT)
 
 # ─────────────────────────────────────────────
-# SIDEBAR (with weekly baseline and daily delta)
+# SIDEBAR
 # ─────────────────────────────────────────────
 st.sidebar.image("https://alpaca.markets/docs/assets/images/alpaca-logo.png", width=200)
 st.sidebar.markdown("## Account Summary")
 st.sidebar.metric("Portfolio Value", f"${portfolio_value:,.2f}")
 st.sidebar.metric("Cash", f"${cash:,.2f}")
 st.sidebar.metric("Buying Power", f"${buying_power:,.2f}")
-st.sidebar.metric("Today's P&L (Alpaca)", f"${daily_pl:+.2f}")
+st.sidebar.metric("Today's P&L (Alpaca)", f"${daily_pl_alpaca:+.2f}")
 st.sidebar.metric("Weekly Baseline", f"${weekly_baseline:,.2f}")
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Market Open:** {'✅ Yes' if is_market_open() else '❌ No'}")
@@ -341,7 +379,6 @@ with st.expander("🔧 Manual Strategy Override (admin)"):
             if cancel_btn:
                 st.rerun()
     else:
-        # Fetch available strategies dynamically
         available = supabase.table("strategies").select("name").execute()
         strategy_names = [s["name"] for s in available.data] if available.data else []
         if not strategy_names:
@@ -356,7 +393,6 @@ with st.expander("🔧 Manual Strategy Override (admin)"):
                                 index=strategy_names.index(current_strategy) if current_strategy in strategy_names else 0)
         if st.button("Apply Override"):
             if selected == "NONE":
-                # Clear forced strategy – set to first available
                 first_available = strategy_names[0] if strategy_names and strategy_names[0] != "NONE" else None
                 if first_available:
                     set_forced_strategy(first_available)
@@ -375,35 +411,76 @@ with st.expander("🔧 Manual Strategy Override (admin)"):
 st.markdown("---")
 
 # ============================================
-# TABS (4 tabs)
+# MAIN METRICS – Daily Realized P&L (Current Session)
+# ============================================
+now_sgt = datetime.now(SGT)
+current_session_date = get_current_session_date(now_sgt)
+trades_df_full = pd.DataFrame(st.session_state.realized_trades)
+if not trades_df_full.empty and "time_sgt" in trades_df_full.columns:
+    current_session_trades = filter_trades_by_session(trades_df_full, current_session_date)
+    current_session_realized_pl = current_session_trades["_pl_usd"].sum() if "_pl_usd" in current_session_trades.columns else 0.0
+else:
+    current_session_realized_pl = 0.0
+
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Portfolio Value", f"${portfolio_value:,.2f}")
+col2.metric("Cash", f"${cash:,.2f}")
+col3.metric("Total Holdings", f"${total_holdings:,.2f}")
+col4.metric("Daily Realized P&L (Current Session)", f"${current_session_realized_pl:+.2f}")
+
+st.markdown("---")
+
+# ============================================
+# TABS
 # ============================================
 tab_live, tab_signals, tab_backtest, tab_liq = st.tabs(
     ["Live Trading", "Signal Scanner", "Portfolio Backtest", "Individual Liquidation"]
 )
 
 # ─────────────────────────────────────────────
-# TAB 1 — LIVE TRADING
+# TAB 1 — LIVE TRADING (with session selector)
 # ─────────────────────────────────────────────
 with tab_live:
     st.write(f"## 🎯 Weekly Goal: ${TARGET_PROFIT:.0f} USD")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Portfolio Value", f"${portfolio_value:,.2f}")
-    col2.metric("Cash", f"${cash:,.2f}")
-    col3.metric("Total Holdings", f"${total_holdings:,.2f}")
-    col4.metric("Daily P&L (Alpaca)", f"${daily_pl:+.2f}")
-
-    # Today's completed trades toggle
-    show_today = st.checkbox("Show only today's trades")
-    trades_df = pd.DataFrame(st.session_state.realized_trades)
-    if not trades_df.empty:
-        if show_today:
-            today_str = datetime.now(SGT).date().isoformat()
-            trades_df = trades_df[trades_df["date"] == today_str]
-        st.dataframe(trades_df, use_container_width=True)
+    
+    session_option = st.radio(
+        "Select trading session to view:",
+        ["Current Session", "Last Completed Session"],
+        horizontal=True,
+        key="session_selector"
+    )
+    
+    if session_option == "Current Session":
+        selected_session = current_session_date
+        session_label = f"Current Session (started {selected_session})"
     else:
-        st.info("No trades recorded yet.")
-
-    # Charts inside expander
+        selected_session = get_last_completed_session_date(now_sgt)
+        session_label = f"Last Completed Session ({selected_session})"
+    
+    st.subheader(f"📋 Realized Trades – {session_label}")
+    
+    if not trades_df_full.empty and "time_sgt" in trades_df_full.columns:
+        session_trades = filter_trades_by_session(trades_df_full, selected_session)
+        if session_trades.empty:
+            st.info(f"No realized trades found for {session_label}.")
+        else:
+            # Display trades table (drop _pl_usd if present for cleaner view)
+            display_cols = [c for c in session_trades.columns if c != "_pl_usd"]
+            st.dataframe(session_trades[display_cols], use_container_width=True)
+            
+            # P&L per strategy
+            if "_pl_usd" in session_trades.columns:
+                pl_by_strategy = session_trades.groupby("Strategy")["_pl_usd"].sum().reset_index()
+                pl_by_strategy.columns = ["Strategy", "Realized P&L (USD)"]
+                pl_by_strategy["Realized P&L (USD)"] = pl_by_strategy["Realized P&L (USD)"].apply(lambda x: f"${x:+.2f}")
+                st.markdown("### Per‑Strategy P&L for this Session")
+                st.dataframe(pl_by_strategy, use_container_width=True, hide_index=True)
+            else:
+                st.warning("P&L breakdown not available (missing '_pl_usd' column).")
+    else:
+        st.info("No trade data available or missing 'time_sgt' column. Please ensure trades are saved with 'time_sgt' field.")
+    
+    # Charts (all-time)
     with st.expander("📊 Daily P&L Charts (Bar + Cumulative)", expanded=True):
         daily_df = compute_daily_pnl_overview()
         if not daily_df.empty:
@@ -420,8 +497,8 @@ with tab_live:
             st.plotly_chart(fig_cum, use_container_width=True)
         else:
             st.info("No trade data available yet for daily P&L chart.")
-
-    # Open positions with strategy column
+    
+    # Open positions
     with st.expander("📋 Open Positions (Unrealized)", expanded=False):
         try:
             positions = trading_client.get_all_positions()
@@ -481,7 +558,6 @@ with tab_signals:
 with tab_backtest:
     st.write("## 📈 Portfolio Backtest")
     st.caption("Run a backtest for a selected strategy over a date range")
-    # Dynamically load strategies for backtest dropdown
     available = supabase.table("strategies").select("name").execute()
     strategy_names = [s["name"] for s in available.data] if available.data else ["ORB-R", "VWAP"]
     strategy_choice = st.selectbox("Select strategy", strategy_names)
@@ -560,7 +636,6 @@ with tab_liq:
                 col3.metric("Current Price", f"${current_price:.2f}")
                 col4.metric("Estimated Proceeds", f"${qty * current_price:.2f}")
 
-                # Strategy selection – use available strategies
                 available = supabase.table("strategies").select("name").execute()
                 strategy_options = [s["name"] for s in available.data] if available.data else ["ORB-R", "VWAP"]
                 selected_strategy = st.selectbox("Strategy that opened this position (for correct P&L attribution)", strategy_options, key="liq_strategy")
@@ -623,7 +698,7 @@ with tab_liq:
                                 "_pl_usd": pl_usd,
                                 "P&L ($)": f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}",
                                 "P&L (%)": f"{pl_pct:+.2f}%",
-                                "Time (SGT)": datetime.now(SGT).strftime("%H:%M:%S"),
+                                "time_sgt": datetime.now(SGT).strftime("%H:%M:%S"),
                                 "Reason": "Manual liquidation via dashboard",
                             }
                             save_trade_to_supabase(trade_record)
