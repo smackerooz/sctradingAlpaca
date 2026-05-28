@@ -619,7 +619,7 @@ with tab_backtest:
         st.dataframe(results)
 
 # ─────────────────────────────────────────────
-# TAB 4 — INDIVIDUAL LIQUIDATION (with PIN)
+# TAB 4 — INDIVIDUAL LIQUIDATION (with PIN) – DIAGNOSTIC
 # ─────────────────────────────────────────────
 with tab_liq:
     st.write("## 🧹 Individual Position Liquidation")
@@ -735,26 +735,42 @@ with tab_liq:
                                 ))
                                 st.success(f"✅ Market order placed to sell {qty:.4f} shares of {symbol}.")
 
+                            # Calculate P&L
                             entry_price = entry_price_from_position
                             pl_usd = (current_price - entry_price) * sold_qty
                             pl_pct = (pl_usd / (entry_price * sold_qty)) * 100 if entry_price * sold_qty != 0 else 0
 
+                            # Build trade record – match your Supabase column names exactly
+                            now_sgt = datetime.now(SGT)
                             trade_record = {
-                                "date": datetime.now(SGT).date().isoformat(),
+                                "date": now_sgt.date().isoformat(),
                                 "Symbol": symbol,
-                                "strategy": selected_strategy,
+                                "strategy": selected_strategy,   # lowercase 'strategy'
                                 "Buy Price": f"${entry_price:.2f}",
                                 "Sell Price": f"${current_price:.2f}",
                                 "Qty": round(sold_qty, 4),
                                 "pl_usd": pl_usd,
                                 "P&L ($)": f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}",
                                 "P&L (%)": f"{pl_pct:+.2f}%",
-                                "time_sgt": datetime.now(SGT).strftime("%H:%M:%S"),
+                                "time_sgt": now_sgt.strftime("%H:%M:%S"),
                                 "Reason": "Manual liquidation via dashboard",
                             }
-                            save_trade_to_supabase(trade_record)
-                            st.session_state.realized_trades.insert(0, trade_record)
-
+                            
+                            # ⭐ DEBUG: Show the record being inserted
+                            st.write("**Inserting trade record:**", trade_record)
+                            
+                            # Insert into Supabase
+                            result = supabase.table("realized_trades").insert(trade_record).execute()
+                            
+                            # Check for errors
+                            if hasattr(result, 'error') and result.error:
+                                st.error(f"Supabase insert error: {result.error}")
+                            else:
+                                st.success("✅ Trade recorded in database.")
+                                # Add to session state for immediate display
+                                st.session_state.realized_trades.insert(0, trade_record)
+                            
+                            # Remove from open_positions table if exists
                             try:
                                 supabase.table("open_positions").delete().eq("symbol", symbol).execute()
                             except:
@@ -762,13 +778,15 @@ with tab_liq:
 
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Error placing order: {e}")
+                            st.error(f"Error during liquidation: {e}")
+                            st.exception(e)  # Shows full traceback
                 with col_cancel:
                     if st.button("❌ Cancel", use_container_width=True, key="liq_cancel"):
                         st.info("Liquidation cancelled.")
                         st.rerun()
         except Exception as e:
             st.error(f"Could not fetch positions: {e}")
+            st.exception(e)
 
         if st.button("🔒 Lock Individual Liquidation", use_container_width=True, key="liq_lock"):
             st.session_state.liq_individual_authorized = False
