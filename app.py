@@ -170,6 +170,12 @@ def get_trading_session_start_for_trade(trade_date, time_sgt_str):
     - If trade time >= 21:30, session start = trade_date
     - If trade time < 04:00, session start = trade_date - 1 day
     """
+    # Convert trade_date to date object if it's a string or Timestamp
+    if isinstance(trade_date, str):
+        trade_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
+    elif hasattr(trade_date, 'date'):
+        trade_date = trade_date.date()
+    
     try:
         time_obj = datetime.strptime(time_sgt_str, "%H:%M:%S").time()
     except:
@@ -189,12 +195,18 @@ def filter_trades_by_session(trades_df, target_session_date):
     """
     if trades_df.empty:
         return trades_df
+    
+    df = trades_df.copy()
+    # Ensure 'date' column is datetime.date
+    if 'date' in df.columns:
+        df['date'] = pd.to_datetime(df['date']).dt.date
+    
     # Compute session start for each trade
-    trades_df["session_start"] = trades_df.apply(
+    df["session_start"] = df.apply(
         lambda row: get_trading_session_start_for_trade(row["date"], row.get("time_sgt", "12:00:00")),
         axis=1
     )
-    return trades_df[trades_df["session_start"] == target_session_date].drop(columns=["session_start"])
+    return df[df["session_start"] == target_session_date].drop(columns=["session_start"])
 
 def get_current_session_date(now_sgt):
     """Returns the trading session start date for the current session."""
