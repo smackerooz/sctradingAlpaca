@@ -135,7 +135,6 @@ STOCK_PROFILES = {
     "NVDA": {"name": "NVIDIA Corp", "sector": "Semiconductors"},
     "AMD": {"name": "Advanced Micro Devices", "sector": "Semiconductors"},
     "AVGO": {"name": "Broadcom Inc", "sector": "Semiconductors"},
-    # Add more as needed – keep your original dictionary here
 }
 
 # ─────────────────────────────────────────────
@@ -143,19 +142,16 @@ STOCK_PROFILES = {
 # ─────────────────────────────────────────────
 if "realized_trades" not in st.session_state:
     st.session_state.realized_trades = []
-if "forced_strategy" not in st.session_state:
-    st.session_state.forced_strategy = None
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = datetime.now(SGT)
 
 # ─────────────────────────────────────────────
-# HELPER FUNCTIONS (all original logic, now implemented)
+# HELPER FUNCTIONS
 # ─────────────────────────────────────────────
 def parse_datetime(dt_str):
     return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
 
 def get_trading_session_start(date):
-    # Returns the start datetime of the trading session in SGT
     return SGT.localize(datetime(date.year, date.month, date.day, 21, 30))
 
 def load_realized_trades():
@@ -173,25 +169,57 @@ def compute_daily_pnl_overview():
     if not trades:
         return pd.DataFrame()
     df = pd.DataFrame(trades)
+    # Use '_pl_usd' field if available, otherwise parse from 'P&L ($)' string
+    if "_pl_usd" in df.columns:
+        df["pl_usd"] = df["_pl_usd"]
+    elif "P&L ($)" in df.columns:
+        df["pl_usd"] = df["P&L ($)"].apply(lambda x: float(x.split('$')[1].replace('+','').replace(',','')) if '$' in str(x) else 0)
+    else:
+        df["pl_usd"] = 0
     df["date"] = pd.to_datetime(df["date"]).dt.date
-    df["pl_usd"] = df["P&L ($)"].apply(lambda x: float(x.split('$')[1].replace('+','').replace(',',''))) if "P&L ($)" in df.columns else 0
     daily = df.groupby("date")["pl_usd"].sum().reset_index()
     daily.columns = ["Trading Session Date", "Total"]
     return daily
 
 def get_current_strategy_display():
-    if st.session_state.forced_strategy:
-        return f"🔧 MANUAL OVERRIDE: {st.session_state.forced_strategy}", "User‑selected strategy overrides bot's auto‑selection."
+    """Reads the active strategy from bot_config (key='current_strategy')"""
     try:
-        row = supabase.table("strategies").select("name, description").eq("is_active", True).execute()
-        if row.data:
-            return row.data[0]["name"], row.data[0]["description"]
-    except:
+        row = supabase.table("bot_config").select("value").eq("key", "current_strategy").execute()
+        if row.data and row.data[0]["value"]:
+            strategy_name = row.data[0]["value"]
+            # Fetch description from strategies table
+            desc_row = supabase.table("strategies").select("description").eq("name", strategy_name).execute()
+            desc = desc_row.data[0]["description"] if desc_row.data else "No description"
+            return strategy_name, desc
+    except Exception:
         pass
-    return "Default Strategy", "No active strategy found in Supabase."
+    return "MOM", "Momentum strategy (default)"
 
 def set_forced_strategy(strategy):
-    st.session_state.forced_strategy = strategy
+    """Writes the forced strategy to bot_config"""
+    try:
+        supabase.table("bot_config").upsert({"key": "current_strategy", "value": strategy}).execute()
+    except Exception as e:
+        st.error(f"Failed to save strategy: {e}")
+
+def get_weekly_baseline():
+    """Fetch weekly baseline from supabase weekly_baseline table (most recent)"""
+    try:
+        row = supabase.table("weekly_baseline").select("baseline_amount").order("created_at", desc=True).limit(1).execute()
+        if row.data:
+            return float(row.data[0]["baseline_amount"])
+    except:
+        pass
+    return 0.0
+
+def get_total_holdings_value():
+    """Sum market value of all open positions from Alpaca"""
+    try:
+        positions = trading_client.get_all_positions()
+        total = sum(float(p.market_value) for p in positions)
+        return total
+    except:
+        return 0.0
 
 def log(msg):
     print(f"[LOG] {datetime.now()} - {msg}")
@@ -210,7 +238,7 @@ def get_bars(symbol, days=1):
 
 def is_eod_window():
     now_et = datetime.now(ET)
-    return now_et.hour >= 15 and now_et.minute >= 50  # 3:50 PM ET
+    return now_et.hour >= 15 and now_et.minute >= 50
 
 def save_baseline():
     pass
@@ -277,15 +305,13 @@ def save_trade_to_supabase(trade):
 
 def run_strategy(strategy_name):
     log(f"Running strategy {strategy_name}")
-    # Placeholder for actual strategy logic
-    pass
 
 def is_market_open():
     clock = trading_client.get_clock()
     return clock.is_open
 
 def run_backtest(strategy, start_date, end_date):
-    # Simple stub – replace with your actual backtest logic
+    # Stub – replace with actual logic
     return pd.DataFrame({"date": [start_date], "return": [0.05]})
 
 # ─────────────────────────────────────────────
@@ -297,8 +323,10 @@ try:
     cash = float(account.cash)
     buying_power = float(account.buying_power)
     daily_pl = float(account.equity) - float(account.last_equity) if hasattr(account, 'last_equity') else 0.0
+    total_holdings = get_total_holdings_value()
+    weekly_baseline = get_weekly_baseline()
 except:
-    portfolio_value = cash = buying_power = daily_pl = 0.0
+    portfolio_value = cash = buying_power = daily_pl = total_holdings = weekly_baseline = 0.0
 
 # ─────────────────────────────────────────────
 # AUTO-REFRESH TRADES
@@ -308,15 +336,15 @@ if (datetime.now(SGT) - st.session_state.last_refresh).seconds > SCAN_INTERVAL:
     st.session_state.last_refresh = datetime.now(SGT)
 
 # ─────────────────────────────────────────────
-# SIDEBAR
+# SIDEBAR (updated with weekly baseline and daily delta)
 # ─────────────────────────────────────────────
 st.sidebar.image("https://alpaca.markets/docs/assets/images/alpaca-logo.png", width=200)
 st.sidebar.markdown("## Account Summary")
 st.sidebar.metric("Portfolio Value", f"${portfolio_value:,.2f}")
 st.sidebar.metric("Cash", f"${cash:,.2f}")
 st.sidebar.metric("Buying Power", f"${buying_power:,.2f}")
-st.sidebar.metric("Today's P&L", f"${daily_pl:+.2f}")
-
+st.sidebar.metric("Today's P&L (Alpaca)", f"${daily_pl:+.2f}")
+st.sidebar.metric("Weekly Baseline", f"${weekly_baseline:,.2f}")
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Market Open:** {'✅ Yes' if is_market_open() else '❌ No'}")
 
@@ -334,33 +362,69 @@ st.markdown(f"📌 **Current Strategy:** {strategy_title}")
 st.markdown(f"{strategy_desc}")
 st.markdown("---")
 
-# Manual Strategy Override
+# Manual Strategy Override (with PIN protection)
 with st.expander("🔧 Manual Strategy Override (admin)"):
-    strategies = ["ORB-R", "VWAP", "TOUCH_TURN", "MOM", "NONE"]
-    selected = st.selectbox("Override active strategy", strategies)
-    if st.button("Apply Override"):
-        set_forced_strategy(selected if selected != "NONE" else None)
-        st.success(f"Strategy set to {selected if selected != 'NONE' else 'Auto'}")
-        st.rerun()
+    if "override_authorized" not in st.session_state:
+        st.session_state.override_authorized = False
+
+    if not st.session_state.override_authorized:
+        with st.form("override_pin_form"):
+            override_pin = st.text_input("Enter PIN to change strategy:", type="password")
+            col1, col2 = st.columns(2)
+            with col1:
+                verify_btn = st.form_submit_button("Unlock")
+            with col2:
+                cancel_btn = st.form_submit_button("Cancel")
+            if verify_btn:
+                try:
+                    row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
+                    if row.data and row.data[0]["pin"] == override_pin:
+                        st.session_state.override_authorized = True
+                        st.success("Access granted")
+                        st.rerun()
+                    else:
+                        st.error("Incorrect PIN")
+                except:
+                    st.error("PIN verification failed")
+            if cancel_btn:
+                st.rerun()
+    else:
+        strategies = ["ORB-R", "VWAP", "TOUCH_TURN", "MOM", "NONE"]
+        current = strategy_title if strategy_title in strategies else "MOM"
+        selected = st.selectbox("Override active strategy", strategies, index=strategies.index(current) if current in strategies else 3)
+        if st.button("Apply Override"):
+            if selected == "NONE":
+                # Remove override? Or set to default? We'll set to MOM as fallback
+                set_forced_strategy("MOM")
+                st.success("Strategy reset to default (MOM)")
+            else:
+                set_forced_strategy(selected)
+                st.success(f"Strategy set to {selected}")
+            st.session_state.override_authorized = False
+            st.rerun()
+        if st.button("Lock & Cancel"):
+            st.session_state.override_authorized = False
+            st.rerun()
 
 st.markdown("---")
 
 # ============================================
-# TABS – now exactly 4 tabs to match variable count
+# TABS – exactly 4 tabs
 # ============================================
 tab_live, tab_signals, tab_backtest, tab_liq = st.tabs(
     ["Live Trading", "Signal Scanner", "Portfolio Backtest", "Individual Liquidation"]
 )
 
 # ─────────────────────────────────────────────
-# TAB 1 — LIVE TRADING
+# TAB 1 — LIVE TRADING (with total holdings added)
 # ─────────────────────────────────────────────
 with tab_live:
     st.write(f"## 🎯 Weekly Goal: ${TARGET_PROFIT:.0f} USD")
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("Portfolio Value", f"${portfolio_value:,.2f}")
     col2.metric("Cash", f"${cash:,.2f}")
-    col3.metric("Daily P&L", f"${daily_pl:+.2f}")
+    col3.metric("Total Holdings", f"${total_holdings:,.2f}")
+    col4.metric("Daily P&L (Alpaca)", f"${daily_pl:+.2f}")
 
     # Today's completed trades toggle
     show_today = st.checkbox("Show only today's trades")
@@ -459,7 +523,7 @@ with tab_backtest:
         st.dataframe(results)
 
 # ─────────────────────────────────────────────
-# TAB 4 — INDIVIDUAL LIQUIDATION
+# TAB 4 — INDIVIDUAL LIQUIDATION (unchanged except PIN already present)
 # ─────────────────────────────────────────────
 with tab_liq:
     st.write("## 🧹 Individual Position Liquidation")
