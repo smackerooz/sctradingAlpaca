@@ -611,8 +611,11 @@ def reset_daily_state():
         if not state.get("in_trade"):
             to_delete.append(sym)
         else:
-            state["traded_today"] = False
-            state["vwap_traded_today"] = False
+            # Only reset flags that exist in the state
+            if "traded_today" in state:
+                state["traded_today"] = False
+            if "vwap_traded_today" in state:
+                state["vwap_traded_today"] = False
     for sym in to_delete:
         del symbol_state[sym]
     sb_log("Daily state reset")
