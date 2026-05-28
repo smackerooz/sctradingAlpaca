@@ -151,9 +151,9 @@ def compute_daily_pnl_overview():
     if not trades:
         return pd.DataFrame()
     df = pd.DataFrame(trades)
-    # Use '_pl_usd' if present, otherwise parse from 'P&L ($)' column
-    if "_pl_usd" in df.columns:
-        df["pl_usd"] = df["_pl_usd"]
+    # Use 'pl_usd' column (your table has this, not '_pl_usd')
+    if "pl_usd" in df.columns:
+        df["pl_usd"] = df["pl_usd"]
     elif "P&L ($)" in df.columns:
         df["pl_usd"] = df["P&L ($)"].apply(lambda x: float(x.split('$')[1].replace('+','').replace(',','')) if '$' in str(x) else 0)
     else:
@@ -430,7 +430,8 @@ current_session_date = get_current_session_date(now_sgt)
 trades_df_full = pd.DataFrame(st.session_state.realized_trades)
 if not trades_df_full.empty and "time_sgt" in trades_df_full.columns:
     current_session_trades = filter_trades_by_session(trades_df_full, current_session_date)
-    current_session_realized_pl = current_session_trades["_pl_usd"].sum() if "_pl_usd" in current_session_trades.columns else 0.0
+    # Use 'pl_usd' column (not '_pl_usd')
+    current_session_realized_pl = current_session_trades["pl_usd"].sum() if "pl_usd" in current_session_trades.columns else 0.0
 else:
     current_session_realized_pl = 0.0
 
@@ -476,19 +477,18 @@ with tab_live:
         if session_trades.empty:
             st.info(f"No realized trades found for {session_label}.")
         else:
-            # Display trades table (drop _pl_usd if present for cleaner view)
-            display_cols = [c for c in session_trades.columns if c != "_pl_usd"]
-            st.dataframe(session_trades[display_cols], use_container_width=True)
+            # Display trades table (no need to drop pl_usd – it's numeric, but we can keep it)
+            st.dataframe(session_trades, use_container_width=True)
             
-            # P&L per strategy
-            if "_pl_usd" in session_trades.columns:
-                pl_by_strategy = session_trades.groupby("Strategy")["_pl_usd"].sum().reset_index()
+            # P&L per strategy using 'pl_usd'
+            if "pl_usd" in session_trades.columns and "Strategy" in session_trades.columns:
+                pl_by_strategy = session_trades.groupby("Strategy")["pl_usd"].sum().reset_index()
                 pl_by_strategy.columns = ["Strategy", "Realized P&L (USD)"]
                 pl_by_strategy["Realized P&L (USD)"] = pl_by_strategy["Realized P&L (USD)"].apply(lambda x: f"${x:+.2f}")
                 st.markdown("### Per‑Strategy P&L for this Session")
                 st.dataframe(pl_by_strategy, use_container_width=True, hide_index=True)
             else:
-                st.warning("P&L breakdown not available (missing '_pl_usd' column).")
+                st.warning("P&L breakdown not available (missing 'pl_usd' or 'Strategy' column).")
     else:
         st.info("No trade data available or missing 'time_sgt' column. Please ensure trades are saved with 'time_sgt' field.")
     
@@ -707,7 +707,7 @@ with tab_liq:
                                 "Buy Price": f"${entry_price:.2f}",
                                 "Sell Price": f"${current_price:.2f}",
                                 "Qty": round(sold_qty, 4),
-                                "_pl_usd": pl_usd,
+                                "pl_usd": pl_usd,  # Use pl_usd, not _pl_usd
                                 "P&L ($)": f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}",
                                 "P&L (%)": f"{pl_pct:+.2f}%",
                                 "time_sgt": datetime.now(SGT).strftime("%H:%M:%S"),
