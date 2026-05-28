@@ -13,7 +13,6 @@ import streamlit as st
 import pytz
 import time
 import pandas as pd
-import yfinance as yf
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from alpaca.trading.client import TradingClient
@@ -29,7 +28,7 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 st.set_page_config(page_title="Trading Bot", page_icon="📈", layout="wide")
 
 # ─────────────────────────────────────────────
-# KEEPALIVE (unchanged)
+# KEEPALIVE PING (unchanged)
 # ─────────────────────────────────────────────
 import streamlit.components.v1 as components
 import os
@@ -119,9 +118,7 @@ ET = pytz.timezone('US/Eastern')
 # CONSTANTS & WATCHLIST
 # ─────────────────────────────────────────────
 TARGET_PROFIT = 200.0
-CASH_BUFFER = 95000.0
 SCAN_INTERVAL = 10
-MAX_TRADE_USD = 750.0
 
 WATCHLIST = [
     "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM", "MSTR", "PANW",
@@ -130,12 +127,6 @@ WATCHLIST = [
     "UBER", "DASH", "TSLA", "ISRG", "VRTX", "LLY", "MRK",
     "AAPL", "JNJ", "PEP", "LIN", "REGN", "INTC", "PG", "NKE", "ADSK", "MDT"
 ]
-
-STOCK_PROFILES = {
-    "NVDA": {"name": "NVIDIA Corp", "sector": "Semiconductors"},
-    "AMD": {"name": "Advanced Micro Devices", "sector": "Semiconductors"},
-    "AVGO": {"name": "Broadcom Inc", "sector": "Semiconductors"},
-}
 
 # ─────────────────────────────────────────────
 # SESSION STATE INIT
@@ -148,12 +139,6 @@ if "last_refresh" not in st.session_state:
 # ─────────────────────────────────────────────
 # HELPER FUNCTIONS
 # ─────────────────────────────────────────────
-def parse_datetime(dt_str):
-    return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
-
-def get_trading_session_start(date):
-    return SGT.localize(datetime(date.year, date.month, date.day, 21, 30))
-
 def load_realized_trades():
     try:
         response = supabase.table("realized_trades").select("*").order("date", desc=True).execute()
@@ -161,15 +146,12 @@ def load_realized_trades():
     except:
         return []
 
-def load_all_trades():
-    return load_realized_trades()
-
 def compute_daily_pnl_overview():
     trades = load_realized_trades()
     if not trades:
         return pd.DataFrame()
     df = pd.DataFrame(trades)
-    # Use '_pl_usd' field if available, otherwise parse from 'P&L ($)' string
+    # Use '_pl_usd' if present, otherwise parse from 'P&L ($)' column
     if "_pl_usd" in df.columns:
         df["pl_usd"] = df["_pl_usd"]
     elif "P&L ($)" in df.columns:
@@ -182,28 +164,42 @@ def compute_daily_pnl_overview():
     return daily
 
 def get_current_strategy_display():
-    """Reads the active strategy from bot_config (key='current_strategy')"""
+    """Reads forced_strategy from bot_config, validates against strategies table"""
     try:
-        row = supabase.table("bot_config").select("value").eq("key", "current_strategy").execute()
-        if row.data and row.data[0]["value"]:
-            strategy_name = row.data[0]["value"]
-            # Fetch description from strategies table
-            desc_row = supabase.table("strategies").select("description").eq("name", strategy_name).execute()
-            desc = desc_row.data[0]["description"] if desc_row.data else "No description"
-            return strategy_name, desc
-    except Exception:
-        pass
-    return "MOM", "Momentum strategy (default)"
+        # Get available strategies from Supabase
+        available = supabase.table("strategies").select("name", "description").execute()
+        available_names = [s["name"] for s in available.data] if available.data else []
+        
+        # Get forced strategy from bot_config
+        row = supabase.table("bot_config").select("forced_strategy").eq("id", 1).execute()
+        forced = row.data[0].get("forced_strategy") if row.data else None
+        
+        if forced and forced in available_names:
+            # Valid forced strategy
+            desc = next((s["description"] for s in available.data if s["name"] == forced), "No description")
+            return forced, desc
+        elif available_names:
+            # No forced strategy or invalid – use first available as default
+            default = available_names[0]
+            desc = next((s["description"] for s in available.data if s["name"] == default), "")
+            # Optionally update the database to this default
+            supabase.table("bot_config").update({"forced_strategy": default}).eq("id", 1).execute()
+            return default, desc
+        else:
+            return "No Strategy", "No strategies defined in Supabase"
+    except Exception as e:
+        st.error(f"Error reading strategy: {e}")
+        return "Error", "Could not load strategy"
 
 def set_forced_strategy(strategy):
-    """Writes the forced strategy to bot_config"""
+    """Updates the forced_strategy column in bot_config"""
     try:
-        supabase.table("bot_config").upsert({"key": "current_strategy", "value": strategy}).execute()
+        supabase.table("bot_config").update({"forced_strategy": strategy}).eq("id", 1).execute()
     except Exception as e:
         st.error(f"Failed to save strategy: {e}")
 
 def get_weekly_baseline():
-    """Fetch weekly baseline from supabase weekly_baseline table (most recent)"""
+    """Fetch the most recent weekly baseline amount from weekly_baseline table"""
     try:
         row = supabase.table("weekly_baseline").select("baseline_amount").order("created_at", desc=True).limit(1).execute()
         if row.data:
@@ -221,9 +217,6 @@ def get_total_holdings_value():
     except:
         return 0.0
 
-def log(msg):
-    print(f"[LOG] {datetime.now()} - {msg}")
-
 def get_bars(symbol, days=1):
     end = datetime.now(ET)
     start = end - timedelta(days=days)
@@ -235,19 +228,6 @@ def get_bars(symbol, days=1):
     )
     bars = data_client.get_stock_bars(request).data.get(symbol, [])
     return pd.DataFrame([{"time": b.timestamp, "close": b.close, "high": b.high, "low": b.low} for b in bars])
-
-def is_eod_window():
-    now_et = datetime.now(ET)
-    return now_et.hour >= 15 and now_et.minute >= 50
-
-def save_baseline():
-    pass
-
-def reset_baseline_if_needed():
-    pass
-
-def profile(stock):
-    return STOCK_PROFILES.get(stock, {"name": stock, "sector": "Unknown"})
 
 def calc_rsi(prices, period=14):
     delta = prices.diff()
@@ -264,21 +244,6 @@ def calc_macd(prices):
     signal = macd.ewm(span=9, adjust=False).mean()
     return macd, signal
 
-def compute_signal_score(symbol):
-    bars = get_bars(symbol, days=5)
-    if len(bars) < 50:
-        return 0
-    closes = bars["close"]
-    rsi = calc_rsi(closes).iloc[-1]
-    macd, signal = calc_macd(closes)
-    macd_hist = macd.iloc[-1] - signal.iloc[-1]
-    score = 0
-    if rsi < 30:
-        score += 1
-    if macd_hist > 0:
-        score += 1
-    return score
-
 def rsi_macd_confirmed_buy(symbol):
     bars = get_bars(symbol, days=5)
     if len(bars) < 50:
@@ -287,31 +252,18 @@ def rsi_macd_confirmed_buy(symbol):
     macd, signal = calc_macd(bars["close"])
     return rsi < 30 and (macd.iloc[-1] - signal.iloc[-1]) > 0
 
-def sell_limit(symbol, qty, price):
-    order = LimitOrderRequest(
-        symbol=symbol,
-        qty=qty,
-        side=OrderSide.SELL,
-        limit_price=price,
-        time_in_force=TimeInForce.DAY
-    )
-    trading_client.submit_order(order)
-
 def save_trade_to_supabase(trade):
     try:
         supabase.table("realized_trades").insert(trade).execute()
     except Exception as e:
         print(f"Failed to save trade: {e}")
 
-def run_strategy(strategy_name):
-    log(f"Running strategy {strategy_name}")
-
 def is_market_open():
     clock = trading_client.get_clock()
     return clock.is_open
 
 def run_backtest(strategy, start_date, end_date):
-    # Stub – replace with actual logic
+    # Placeholder – replace with your actual backtest logic
     return pd.DataFrame({"date": [start_date], "return": [0.05]})
 
 # ─────────────────────────────────────────────
@@ -336,7 +288,7 @@ if (datetime.now(SGT) - st.session_state.last_refresh).seconds > SCAN_INTERVAL:
     st.session_state.last_refresh = datetime.now(SGT)
 
 # ─────────────────────────────────────────────
-# SIDEBAR (updated with weekly baseline and daily delta)
+# SIDEBAR (with weekly baseline and daily delta)
 # ─────────────────────────────────────────────
 st.sidebar.image("https://alpaca.markets/docs/assets/images/alpaca-logo.png", width=200)
 st.sidebar.markdown("## Account Summary")
@@ -352,17 +304,17 @@ st.sidebar.markdown(f"**Market Open:** {'✅ Yes' if is_market_open() else '❌ 
 # MAIN DASHBOARD
 # ─────────────────────────────────────────────
 st.title("📈 Auto Trading Bot")
-
-# Bot health indicator
 st.markdown("🟢 **Bot Status:** Active" if is_market_open() else "🔴 **Bot Status:** Market Closed")
-
 st.markdown("---")
+
 strategy_title, strategy_desc = get_current_strategy_display()
 st.markdown(f"📌 **Current Strategy:** {strategy_title}")
 st.markdown(f"{strategy_desc}")
 st.markdown("---")
 
-# Manual Strategy Override (with PIN protection)
+# ─────────────────────────────────────────────
+# MANUAL STRATEGY OVERRIDE (with PIN)
+# ─────────────────────────────────────────────
 with st.expander("🔧 Manual Strategy Override (admin)"):
     if "override_authorized" not in st.session_state:
         st.session_state.override_authorized = False
@@ -389,14 +341,28 @@ with st.expander("🔧 Manual Strategy Override (admin)"):
             if cancel_btn:
                 st.rerun()
     else:
-        strategies = ["ORB-R", "VWAP", "TOUCH_TURN", "MOM", "NONE"]
-        current = strategy_title if strategy_title in strategies else "MOM"
-        selected = st.selectbox("Override active strategy", strategies, index=strategies.index(current) if current in strategies else 3)
+        # Fetch available strategies dynamically
+        available = supabase.table("strategies").select("name").execute()
+        strategy_names = [s["name"] for s in available.data] if available.data else []
+        if not strategy_names:
+            st.warning("No strategies found in database. Add some to the 'strategies' table.")
+            strategy_names = ["NONE"]
+        
+        current_strategy, _ = get_current_strategy_display()
+        if current_strategy not in strategy_names and "NONE" not in strategy_names:
+            strategy_names.insert(0, current_strategy)
+        
+        selected = st.selectbox("Override active strategy", strategy_names + ["NONE"], 
+                                index=strategy_names.index(current_strategy) if current_strategy in strategy_names else 0)
         if st.button("Apply Override"):
             if selected == "NONE":
-                # Remove override? Or set to default? We'll set to MOM as fallback
-                set_forced_strategy("MOM")
-                st.success("Strategy reset to default (MOM)")
+                # Clear forced strategy – set to first available
+                first_available = strategy_names[0] if strategy_names and strategy_names[0] != "NONE" else None
+                if first_available:
+                    set_forced_strategy(first_available)
+                    st.success(f"Strategy reset to default ({first_available})")
+                else:
+                    st.warning("No strategies available")
             else:
                 set_forced_strategy(selected)
                 st.success(f"Strategy set to {selected}")
@@ -409,14 +375,14 @@ with st.expander("🔧 Manual Strategy Override (admin)"):
 st.markdown("---")
 
 # ============================================
-# TABS – exactly 4 tabs
+# TABS (4 tabs)
 # ============================================
 tab_live, tab_signals, tab_backtest, tab_liq = st.tabs(
     ["Live Trading", "Signal Scanner", "Portfolio Backtest", "Individual Liquidation"]
 )
 
 # ─────────────────────────────────────────────
-# TAB 1 — LIVE TRADING (with total holdings added)
+# TAB 1 — LIVE TRADING
 # ─────────────────────────────────────────────
 with tab_live:
     st.write(f"## 🎯 Weekly Goal: ${TARGET_PROFIT:.0f} USD")
@@ -515,7 +481,10 @@ with tab_signals:
 with tab_backtest:
     st.write("## 📈 Portfolio Backtest")
     st.caption("Run a backtest for a selected strategy over a date range")
-    strategy_choice = st.selectbox("Select strategy", ["ORB-R", "VWAP", "TOUCH_TURN", "MOM"])
+    # Dynamically load strategies for backtest dropdown
+    available = supabase.table("strategies").select("name").execute()
+    strategy_names = [s["name"] for s in available.data] if available.data else ["ORB-R", "VWAP"]
+    strategy_choice = st.selectbox("Select strategy", strategy_names)
     start_date = st.date_input("Start date", datetime.now() - timedelta(days=30))
     end_date = st.date_input("End date", datetime.now())
     if st.button("Run Backtest"):
@@ -523,7 +492,7 @@ with tab_backtest:
         st.dataframe(results)
 
 # ─────────────────────────────────────────────
-# TAB 4 — INDIVIDUAL LIQUIDATION (unchanged except PIN already present)
+# TAB 4 — INDIVIDUAL LIQUIDATION (with PIN)
 # ─────────────────────────────────────────────
 with tab_liq:
     st.write("## 🧹 Individual Position Liquidation")
@@ -591,7 +560,9 @@ with tab_liq:
                 col3.metric("Current Price", f"${current_price:.2f}")
                 col4.metric("Estimated Proceeds", f"${qty * current_price:.2f}")
 
-                strategy_options = ["ORB-R", "VWAP", "TOUCH_TURN", "MOM", "MANUAL_LIQUIDATION"]
+                # Strategy selection – use available strategies
+                available = supabase.table("strategies").select("name").execute()
+                strategy_options = [s["name"] for s in available.data] if available.data else ["ORB-R", "VWAP"]
                 selected_strategy = st.selectbox("Strategy that opened this position (for correct P&L attribution)", strategy_options, key="liq_strategy")
 
                 now_et = datetime.now(ET)
@@ -678,18 +649,16 @@ with tab_liq:
             st.rerun()
 
 # ─────────────────────────────────────────────
-# P&L RECONCILIATION EXPANDER (optional)
+# P&L RECONCILIATION HELPER (optional)
 # ─────────────────────────────────────────────
 with st.expander("🔍 P&L Reconciliation Helper", expanded=False):
     st.markdown("""
-    **Why ORB‑R + VWAP totals may not match Alpaca daily change?**
+    **Why realized P&L may not match Alpaca daily change?**
     - Alpaca's daily change includes **unrealized P&L** on open positions.
     - Your dashboard’s realized P&L only includes **closed trades**.
-    - Also, the dashboard uses **trading session dates** (9:30 PM SGT → 4:00 AM SGT), while Alpaca uses calendar days.
+    - Trading session dates (9:30 PM SGT → 4:00 AM SGT) differ from calendar days.
     
-    **To verify:**
-    - Run the SQL query below in your Supabase SQL editor to see realised P&L per trading session.
-    - Compare the sum of all sessions in a week with your weekly baseline change.
+    **SQL to verify trading session P&L:**
     """)
     st.code("""
 WITH session_trades AS (
@@ -703,13 +672,12 @@ WITH session_trades AS (
 )
 SELECT session_start_date, strategy, SUM(pl_usd) AS total_pl
 FROM session_trades
-WHERE session_start_date >= '2026-05-18' AND session_start_date <= '2026-05-22'
 GROUP BY session_start_date, strategy
 ORDER BY session_start_date DESC, strategy;
     """, language="sql")
 
 # ─────────────────────────────────────────────
-# AUTO-REFRESH (dashboard only)
+# AUTO-REFRESH DASHBOARD
 # ─────────────────────────────────────────────
 time.sleep(SCAN_INTERVAL)
 st.rerun()
