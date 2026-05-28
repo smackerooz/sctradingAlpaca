@@ -233,9 +233,9 @@ def set_forced_strategy(strategy):
 
 def get_weekly_baseline():
     try:
-        row = supabase.table("weekly_baseline").select("baseline_amount").order("created_at", desc=True).limit(1).execute()
+        row = supabase.table("weekly_baseline").select("baseline").order("created_at", desc=True).limit(1).execute()
         if row.data:
-            return float(row.data[0]["baseline_amount"])
+            return float(row.data[0]["baseline"])
     except:
         pass
     return 0.0
