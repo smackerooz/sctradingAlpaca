@@ -122,7 +122,7 @@ _forced_strategy_cache = "AUTO"
 _last_forced_check = None
 
 def get_forced_strategy() -> str:
-    """Read manual override from Supabase bot_config table. Returns 'AUTO', 'ORB-R', or 'VWAP'."""
+    """Read manual override from Supabase bot_config table."""
     global _forced_strategy_cache, _last_forced_check
     now = time.time()
     if _last_forced_check is None or (now - _last_forced_check) > 10:
@@ -154,7 +154,6 @@ def is_market_open() -> bool:
         return weekday < 5 and after_open and before_close
 
 def get_current_session() -> str:
-    """Returns 'ORB', 'VWAP', or 'CLOSED', respecting manual override if market open."""
     forced = get_forced_strategy()
     now_et = datetime.now(ET)
     market_open = is_market_open()
@@ -164,7 +163,6 @@ def get_current_session() -> str:
     if market_open and forced == "VWAP":
         return "VWAP"
 
-    # Fallback to time-based
     orb_start = now_et.replace(hour=ORB_WINDOW_START[0], minute=ORB_WINDOW_START[1], second=0, microsecond=0)
     orb_end   = now_et.replace(hour=ORB_WINDOW_END[0], minute=ORB_WINDOW_END[1], second=0, microsecond=0)
     vwap_start = now_et.replace(hour=VWAP_WINDOW_START[0], minute=VWAP_WINDOW_START[1], second=0, microsecond=0)
@@ -221,15 +219,13 @@ def calculate_vwap(df: pd.DataFrame) -> float:
 # ─────────────────────────────────────────────
 def get_yesterday_box(symbol: str) -> tuple:
     """Get the most recent trading day's regular session high and low (up to 5 days back)."""
-    df = get_bars(symbol, timeframe_minutes=15, days_back=7)  # fetch enough historical data
+    df = get_bars(symbol, timeframe_minutes=15, days_back=7)
     if df.empty:
         return None, None
-    
+
     today_et = datetime.now(ET).date()
-    # Start from yesterday and go back up to 5 days
     for offset in range(1, 6):
         check_date = today_et - timedelta(days=offset)
-        # Skip weekends (optional, but Alpaca already won't have bars for weekends)
         session_bars = df[
             (df.index.date == check_date) &
             (df.index.time >= pd.Timestamp("09:30").time()) &
@@ -240,8 +236,6 @@ def get_yesterday_box(symbol: str) -> tuple:
             box_low = round(float(session_bars["low"].min()), 4)
             sb_log(f"📦 {symbol} box set from {check_date}: High=${box_high:.2f} Low=${box_low:.2f}")
             return box_high, box_low
-    
-    # If no valid trading day found in the last 5 days
     sb_log(f"⚠️ No valid trading day found for {symbol} in the last 5 days")
     return None, None
 
@@ -312,38 +306,30 @@ def check_vwap_retest(symbol: str, current_vwap: float) -> tuple:
     df_5m = get_bars(symbol, timeframe_minutes=5, days_back=VWAP_LOOKBACK_DAYS)
     if df_5m.empty or len(df_5m) < 10:
         return False, 0, 0, 0, 0
-    
+
     today_et = datetime.now(ET).date()
     today_bars = df_5m[df_5m.index.date == today_et]
     if today_bars.empty or len(today_bars) < 3:
         return False, 0, 0, 0, 0
-    
+
     latest = today_bars.iloc[-1]
     prev = today_bars.iloc[-2] if len(today_bars) > 1 else latest
-    
     candle_low = float(latest["low"])
     candle_high = float(latest["high"])
     vwap_near = (candle_low <= current_vwap * 1.001 and candle_high >= current_vwap * 0.999)
-    
     if not vwap_near:
         return False, 0, 0, 0, 0
-    
+
     hammer = is_hammer(latest)
     inv_hammer = is_inverted_hammer(latest)
     engulfing = is_bullish_engulfing(prev, latest) if len(today_bars) > 1 else False
-    
     if not (hammer or inv_hammer or engulfing):
         return False, 0, 0, 0, 0
-    
+
     entry_price = round(float(latest["close"]), 4)
-    # Base stop: min(0.2% below VWAP, candle low)
     stop_price = round(min(current_vwap * (1 - VWAP_STOP_PCT), float(latest["low"])), 4)
-    
-    # Enforce minimum stop percentage
-    min_stop_pct = 0.003  # 0.3% for normal stocks
-    if symbol in HIGH_VOL_STOCKS:
-        min_stop_pct = 0.006  # 0.6% for volatile stocks
-    
+
+    min_stop_pct = 0.003 if symbol not in HIGH_VOL_STOCKS else 0.006
     min_stop_distance = entry_price * min_stop_pct
     if entry_price - stop_price < min_stop_distance:
         stop_price = entry_price - min_stop_distance
@@ -353,16 +339,15 @@ def check_vwap_retest(symbol: str, current_vwap: float) -> tuple:
         target_price = round(entry_price + (VWAP_REWARD_RISK * risk), 4)
         log.info(f"Adjusted VWAP {symbol} stop to {stop_price:.2f} (min {min_stop_pct*100:.1f}%)")
         return True, entry_price, stop_price, target_price, float(latest["low"])
-    
+
     risk = entry_price - stop_price
     if risk <= 0:
         return False, 0, 0, 0, 0
     target_price = round(entry_price + (VWAP_REWARD_RISK * risk), 4)
-    
     return True, entry_price, stop_price, target_price, float(latest["low"])
 
 # ─────────────────────────────────────────────
-# TRADE EXECUTION
+# TRADE EXECUTION & OPEN POSITION TRACKING
 # ─────────────────────────────────────────────
 def sb_log(msg: str):
     try:
@@ -373,6 +358,26 @@ def sb_log(msg: str):
     except Exception:
         pass
     log.info(msg)
+
+def save_open_position(symbol: str, strategy: str, entry_price: float, qty: float):
+    """Store open position with its strategy in Supabase (for dashboard display)."""
+    try:
+        supabase.table("open_positions").upsert({
+            "symbol": symbol,
+            "strategy": strategy,
+            "entry_price": entry_price,
+            "qty": qty,
+            "updated_at": datetime.now(SGT).isoformat(),
+        }, on_conflict="symbol").execute()
+    except Exception as e:
+        sb_log(f"Error saving open position: {e}")
+
+def remove_open_position(symbol: str):
+    """Delete open position from Supabase when closed."""
+    try:
+        supabase.table("open_positions").delete().eq("symbol", symbol).execute()
+    except Exception:
+        pass
 
 def save_trade(symbol, entry_price, exit_price, qty, reason, strategy):
     try:
@@ -393,6 +398,8 @@ def save_trade(symbol, entry_price, exit_price, qty, reason, strategy):
             "reason": reason,
         }).execute()
         sb_log(f"Trade saved: {symbol} {reason}")
+        # Remove from open positions if closed
+        remove_open_position(symbol)
     except Exception as e:
         sb_log(f"Save trade error: {e}")
 
@@ -414,6 +421,8 @@ def enter_trade(symbol: str, entry_price: float, stop_price: float,
             time_in_force=TimeInForce.DAY,
         ))
         sb_log(f"🟢 {strategy} BUY {qty:.4f} {symbol} | Entry:${entry_price:.2f} | Stop:${stop_price:.2f} | Target:${target_price:.2f}")
+        # Save open position for dashboard
+        save_open_position(symbol, strategy, entry_price, qty)
         return actual_cost
     except Exception as e:
         sb_log(f"Order error {symbol}: {e}")
@@ -443,10 +452,10 @@ def monitor_positions(held: dict):
         qty = s.get("qty", 0.0)
         strategy = s.get("strategy", "UNKNOWN")
         curr_p = float(p.current_price)
-        
+
         if entry == 0:
             continue
-        
+
         if curr_p <= stop:
             exit_trade(sym, qty, curr_p, entry, f"STOP LOSS (hit ${stop:.2f})", strategy)
             symbol_state[sym]["in_trade"] = False
@@ -465,7 +474,7 @@ def run_orb_strategy(cash: float, held: dict) -> float:
     for symbol in WATCHLIST:
         if symbol in held:
             continue
-        
+
         if symbol not in symbol_state:
             symbol_state[symbol] = {
                 "strategy": None,
@@ -479,11 +488,11 @@ def run_orb_strategy(cash: float, held: dict) -> float:
                 "qty": 0.0,
                 "traded_today": False,
             }
-        
+
         s = symbol_state[symbol]
         if s["traded_today"] or s.get("in_trade"):
             continue
-        
+
         if s["box_high"] is None:
             box_high, box_low = get_yesterday_box(symbol)
             if box_high is None:
@@ -496,38 +505,35 @@ def run_orb_strategy(cash: float, held: dict) -> float:
                 continue
             s["box_high"] = box_high
             s["box_low"] = box_low
-        
+
         box_high = s["box_high"]
-        
+
         if not s["breakout_confirmed"]:
             if check_orb_breakout(symbol, box_high):
                 s["breakout_confirmed"] = True
                 sb_log(f"🚀 {symbol} ORB BREAKOUT confirmed")
             else:
                 continue
-        
+
         if not check_orb_retest(symbol, box_high):
             continue
-        
+
         df_5m = get_bars(symbol, timeframe_minutes=5, days_back=2)
         if df_5m.empty:
             continue
         today_et = datetime.now(ET).date()
         df_5m_today = df_5m[df_5m.index.date == today_et]
-        
+
         if not check_orb_reversal_candle(df_5m_today, box_high):
             continue
-        
+
         confirm_candle = df_5m_today.iloc[-1]
         entry_price = round(float(confirm_candle["close"]), 4)
         stop_price = round(float(confirm_candle["low"]) * 0.999, 4)
         if entry_price - stop_price < 0.01:
             stop_price = entry_price - 0.01
-        
-        # Enforce min stop %
-        min_stop_pct = 0.005
-        if symbol in HIGH_VOL_STOCKS:
-            min_stop_pct = 0.01
+
+        min_stop_pct = 0.005 if symbol not in HIGH_VOL_STOCKS else 0.01
         min_stop_distance = entry_price * min_stop_pct
         if entry_price - stop_price < min_stop_distance:
             stop_price = entry_price - min_stop_distance
@@ -541,7 +547,7 @@ def run_orb_strategy(cash: float, held: dict) -> float:
             if risk <= 0 or risk / entry_price > 0.05:
                 continue
             target_price = round(entry_price + (ORB_REWARD_RISK * risk), 4)
-        
+
         cost = enter_trade(symbol, entry_price, stop_price, target_price, cash - total_cost, "ORB-R")
         if cost > 0:
             total_cost += cost
@@ -559,7 +565,7 @@ def run_vwap_strategy(cash: float, held: dict) -> float:
     for symbol in WATCHLIST:
         if symbol in held:
             continue
-        
+
         if symbol not in symbol_state:
             symbol_state[symbol] = {
                 "strategy": None,
@@ -570,27 +576,27 @@ def run_vwap_strategy(cash: float, held: dict) -> float:
                 "qty": 0.0,
                 "vwap_traded_today": False,
             }
-        
+
         s = symbol_state[symbol]
         if s.get("vwap_traded_today") or s.get("in_trade"):
             continue
-        
+
         df_5m = get_bars(symbol, timeframe_minutes=5, days_back=1)
         if df_5m.empty or len(df_5m) < 10:
             continue
-        
+
         vwap = calculate_vwap(df_5m)
         if vwap is None:
             continue
-        
+
         current_price = float(df_5m["close"].iloc[-1])
         if current_price < vwap:
             continue
-        
+
         is_retest, entry_price, stop_price, target_price, _ = check_vwap_retest(symbol, vwap)
         if not is_retest:
             continue
-        
+
         sb_log(f"📊 {symbol} VWAP retest detected at ${vwap:.2f}")
         cost = enter_trade(symbol, entry_price, stop_price, target_price, cash - total_cost, "VWAP")
         if cost > 0:
@@ -611,7 +617,7 @@ def reset_daily_state():
         if not state.get("in_trade"):
             to_delete.append(sym)
         else:
-            # Only reset flags that exist in the state
+            # Reset only the flags that exist in the state
             if "traded_today" in state:
                 state["traded_today"] = False
             if "vwap_traded_today" in state:
@@ -664,23 +670,23 @@ _last_reset_date = None
 
 def run_strategy():
     global baseline, _last_reset_date
-    
+
     now_et = datetime.now(ET)
     if now_et.weekday() == 0 and now_et.hour == 9 and now_et.minute == 30:
         new_bl = float(trading_client.get_account().equity)
         baseline = new_bl
         save_baseline(new_bl)
         sb_log("Weekly baseline reset")
-    
+
     today = datetime.now(ET).date()
     if _last_reset_date != today:
         reset_daily_state()
         _last_reset_date = today
-    
+
     if not is_market_open():
         log.info("Market closed")
         return
-    
+
     try:
         account = trading_client.get_account()
         cash = float(account.buying_power)
@@ -689,7 +695,7 @@ def run_strategy():
     except Exception as e:
         sb_log(f"Account error: {e}")
         return
-    
+
     if is_eod_window():
         for p in positions:
             try:
@@ -701,15 +707,15 @@ def run_strategy():
             except Exception as e:
                 sb_log(f"EOW error {p.symbol}: {e}")
         return
-    
+
     monitor_positions(held)
-    
+
     if cash <= CASH_BUFFER:
         log.info(f"Cash ${cash:.2f} below buffer")
         return
-    
+
     session = get_current_session()
-    
+
     if session == "ORB":
         total_cost = run_orb_strategy(cash, held)
         if total_cost:
@@ -721,18 +727,15 @@ def run_strategy():
     else:
         log.info("Outside trading hours")
 
-# ─────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
     sb_log("🤖 Trading Bot started (ORB-R + VWAP) with manual override support")
     sb_log(f"Watchlist: {len(WATCHLIST)} stocks | Max trade: ${MAX_TRADE_USD}")
     sb_log(f"ORB-R window: 9:30–12:00 ET | VWAP window: 12:00–15:30 ET")
     sb_log(f"Stop loss: min 0.5% normal, 1.0% volatile")
-    
+
     baseline = load_baseline()
     sb_log(f"Weekly baseline: ${baseline:,.2f}")
-    
+
     while True:
         try:
             run_strategy()
