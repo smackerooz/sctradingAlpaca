@@ -163,7 +163,6 @@ def compute_daily_pnl_overview():
     return daily
 
 def get_trading_session_start_for_trade(trade_date, time_sgt_str):
-    # Convert trade_date to date object if needed
     if isinstance(trade_date, str):
         trade_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
     elif hasattr(trade_date, 'date'):
@@ -232,13 +231,30 @@ def set_forced_strategy(strategy):
         st.error(f"Failed to save strategy: {e}")
 
 def get_weekly_baseline():
+    """Fetch the most recent weekly baseline from the 'baseline' column."""
     try:
-        row = supabase.table("weekly_baseline").select("baseline").order("created_at", desc=True).limit(1).execute()
-        if row.data:
+        row = supabase.table("weekly_baseline").select("baseline").order("updated_at", desc=True).limit(1).execute()
+        if not row.data:
+            row = supabase.table("weekly_baseline").select("baseline").order("date", desc=True).limit(1).execute()
+        if row.data and "baseline" in row.data[0]:
             return float(row.data[0]["baseline"])
-    except:
-        pass
+    except Exception as e:
+        st.error(f"Error reading weekly_baseline: {e}")
     return 0.0
+
+def set_weekly_baseline(amount):
+    """Insert a new baseline record."""
+    try:
+        today = datetime.now(SGT).date().isoformat()
+        now_iso = datetime.now(SGT).isoformat()
+        supabase.table("weekly_baseline").insert({
+            "baseline": amount,
+            "date": today,
+            "updated_at": now_iso
+        }).execute()
+        st.success(f"Weekly baseline set to ${amount:,.2f}")
+    except Exception as e:
+        st.error(f"Failed to save baseline: {e}")
 
 def get_total_holdings_value():
     try:
@@ -331,6 +347,41 @@ st.sidebar.metric("Weekly Baseline", f"${weekly_baseline:,.2f}")
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Market Open:** {'✅ Yes' if is_market_open() else '❌ No'}")
 
+# Weekly Baseline Admin
+with st.sidebar.expander("📅 Weekly Baseline Settings (admin)"):
+    if "baseline_authorized" not in st.session_state:
+        st.session_state.baseline_authorized = False
+
+    if not st.session_state.baseline_authorized:
+        with st.form("baseline_pin_form"):
+            baseline_pin = st.text_input("Enter PIN to change baseline:", type="password")
+            if st.form_submit_button("Unlock"):
+                try:
+                    row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
+                    if row.data and row.data[0]["pin"] == baseline_pin:
+                        st.session_state.baseline_authorized = True
+                        st.rerun()
+                    else:
+                        st.error("Incorrect PIN")
+                except:
+                    st.error("PIN verification failed")
+    else:
+        new_baseline = st.number_input("Set weekly baseline amount ($)", min_value=0.0, value=weekly_baseline, step=100.0, format="%.2f")
+        if st.button("Update Baseline"):
+            set_weekly_baseline(new_baseline)
+            st.rerun()
+        if st.button("Lock"):
+            st.session_state.baseline_authorized = False
+            st.rerun()
+
+# Optional debug
+if weekly_baseline == 0.0 and st.sidebar.checkbox("Show weekly_baseline debug info", value=False):
+    try:
+        raw = supabase.table("weekly_baseline").select("*").order("updated_at", desc=True).execute()
+        st.sidebar.write("Raw table (latest first):", raw.data)
+    except:
+        st.sidebar.error("Could not fetch table")
+
 # ─────────────────────────────────────────────
 # MAIN DASHBOARD
 # ─────────────────────────────────────────────
@@ -343,9 +394,7 @@ st.markdown(f"📌 **Current Strategy:** {strategy_title}")
 st.markdown(f"{strategy_desc}")
 st.markdown("---")
 
-# ─────────────────────────────────────────────
-# MANUAL STRATEGY OVERRIDE (with PIN)
-# ─────────────────────────────────────────────
+# Manual Strategy Override (admin)
 with st.expander("🔧 Manual Strategy Override (admin)"):
     if "override_authorized" not in st.session_state:
         st.session_state.override_authorized = False
@@ -457,11 +506,9 @@ with tab_live:
         if session_trades.empty:
             st.info(f"No realized trades found for {session_label}.")
         else:
-            # Display trades table
             st.dataframe(session_trades, use_container_width=True)
             
-            # ---- PER-STRATEGY P&L ----
-            # Find strategy column (case-insensitive) and pl_usd column
+            # Per‑strategy P&L (case‑insensitive)
             strategy_col = None
             for col in session_trades.columns:
                 if col.lower() == 'strategy':
@@ -479,10 +526,10 @@ with tab_live:
                 if "pl_usd" not in session_trades.columns:
                     missing.append("'pl_usd'")
                 if not strategy_col:
-                    missing.append("'strategy' column (case-insensitive)")
+                    missing.append("'strategy' column")
                 st.warning(f"P&L breakdown not available (missing {', '.join(missing)}). Available columns: {list(session_trades.columns)}")
     else:
-        st.info("No trade data available or missing 'time_sgt' column. Please ensure trades are saved with 'time_sgt' field.")
+        st.info("No trade data available or missing 'time_sgt' column.")
     
     # Charts (all-time)
     with st.expander("📊 Daily P&L Charts (Bar + Cumulative)", expanded=True):
@@ -695,7 +742,7 @@ with tab_liq:
                             trade_record = {
                                 "date": datetime.now(SGT).date().isoformat(),
                                 "Symbol": symbol,
-                                "strategy": selected_strategy,      # lowercase to match Supabase
+                                "strategy": selected_strategy,
                                 "Buy Price": f"${entry_price:.2f}",
                                 "Sell Price": f"${current_price:.2f}",
                                 "Qty": round(sold_qty, 4),
