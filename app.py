@@ -7,6 +7,7 @@ Dynamic Dashboard – Works with any strategy defined in Supabase 'strategies' t
 - Strategy selection for manual liquidation
 - Charts inside expander
 - Strategy column in open positions
+- NEW: Weekly delta (realized + unrealized), Unrealized P&L, Goal tracker
 """
 
 import streamlit as st
@@ -263,6 +264,40 @@ def get_total_holdings_value():
     except:
         return 0.0
 
+def get_total_unrealized_pl():
+    """Sum of unrealized P&L from all open positions."""
+    try:
+        positions = trading_client.get_all_positions()
+        total_pl = sum(float(p.unrealized_pl) for p in positions)
+        return total_pl
+    except:
+        return 0.0
+
+def get_weekly_realized_pl():
+    """Sum of pl_usd for trades with date in the current week (Monday-Sunday)."""
+    trades = st.session_state.realized_trades
+    if not trades:
+        return 0.0
+    today = datetime.now(SGT).date()
+    # Find Monday of current week
+    start_of_week = today - timedelta(days=today.weekday())
+    end_of_week = start_of_week + timedelta(days=6)
+    total = 0.0
+    for t in trades:
+        trade_date = t.get("date")
+        if trade_date:
+            if isinstance(trade_date, str):
+                trade_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
+            if start_of_week <= trade_date <= end_of_week:
+                total += t.get("pl_usd", 0.0)
+    return total
+
+def get_weekly_delta():
+    """Realized + unrealized P&L for current week."""
+    realized = get_weekly_realized_pl()
+    unrealized = get_total_unrealized_pl()
+    return realized + unrealized, realized, unrealized
+
 def get_bars(symbol, days=1):
     end = datetime.now(ET)
     start = end - timedelta(days=days)
@@ -330,8 +365,10 @@ try:
     daily_pl_alpaca = float(account.equity) - float(account.last_equity) if hasattr(account, 'last_equity') else 0.0
     total_holdings = get_total_holdings_value()
     weekly_baseline = get_weekly_baseline()
+    total_unrealized_pl = get_total_unrealized_pl()
+    weekly_delta, weekly_realized, _ = get_weekly_delta()
 except:
-    portfolio_value = cash = buying_power = daily_pl_alpaca = total_holdings = weekly_baseline = 0.0
+    portfolio_value = cash = buying_power = daily_pl_alpaca = total_holdings = weekly_baseline = total_unrealized_pl = weekly_delta = weekly_realized = 0.0
 
 # ─────────────────────────────────────────────
 # SIDEBAR
@@ -457,7 +494,7 @@ with st.expander("🔧 Manual Strategy Override (admin)"):
 st.markdown("---")
 
 # ============================================
-# MAIN METRICS – Daily Realized P&L (Current Session)
+# MAIN METRICS (4 columns plus extra rows for new features)
 # ============================================
 now_sgt = datetime.now(SGT)
 current_session_date = get_current_session_date(now_sgt)
@@ -473,6 +510,27 @@ col1.metric("Portfolio Value", f"${portfolio_value:,.2f}")
 col2.metric("Cash", f"${cash:,.2f}")
 col3.metric("Total Holdings", f"${total_holdings:,.2f}")
 col4.metric("Daily Realized P&L (Current Session)", f"${current_session_realized_pl:+.2f}")
+
+# New metrics row
+st.markdown("---")
+colA, colB, colC = st.columns(3)
+
+# Weekly Delta with arrow
+delta_arrow = "🔺" if weekly_delta >= 0 else "🔻"
+delta_color = "green" if weekly_delta >= 0 else "red"
+colA.markdown(f"**Weekly Delta (Realized + Unrealized)**  \n<span style='color:{delta_color}; font-size:28px;'>{delta_arrow} ${weekly_delta:+.2f}</span>", unsafe_allow_html=True)
+
+# Unrealized P&L for open positions
+unrealized_arrow = "🔺" if total_unrealized_pl >= 0 else "🔻"
+unrealized_color = "green" if total_unrealized_pl >= 0 else "red"
+colB.markdown(f"**Unrealized P&L (Open Positions)**  \n<span style='color:{unrealized_color}; font-size:28px;'>{unrealized_arrow} ${total_unrealized_pl:+.2f}</span>", unsafe_allow_html=True)
+
+# Goal Tracker
+progress = min(weekly_realized / TARGET_PROFIT, 1.0) if TARGET_PROFIT > 0 else 0
+remaining = max(TARGET_PROFIT - weekly_realized, 0)
+colC.markdown(f"**Weekly Goal Progress: ${weekly_realized:+.2f} / ${TARGET_PROFIT:.0f}**")
+colC.progress(progress)
+colC.caption(f"💰 Remaining to target: ${remaining:.2f}")
 
 st.markdown("---")
 
