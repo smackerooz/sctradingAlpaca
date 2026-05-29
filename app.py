@@ -7,7 +7,8 @@ Dynamic Dashboard – Works with any strategy defined in Supabase 'strategies' t
 - Strategy selection for manual liquidation
 - Charts inside expander
 - Strategy column in open positions
-- NEW: Weekly delta (realized + unrealized), Unrealized P&L, Goal tracker
+- Weekly delta (realized + unrealized), Unrealized P&L, Goal tracker
+- Arrows: ▲ green for positive, ▼ red for negative
 """
 
 import streamlit as st
@@ -515,18 +516,18 @@ col4.metric("Daily Realized P&L (Current Session)", f"${current_session_realized
 st.markdown("---")
 colA, colB, colC = st.columns(3)
 
-# Weekly Delta with arrow
-delta_arrow = "🔺" if weekly_delta >= 0 else "🔻"
+# Weekly Delta with arrow (using HTML ▲/▼ for proper color)
+delta_arrow = "▲" if weekly_delta >= 0 else "▼"
 delta_color = "green" if weekly_delta >= 0 else "red"
 colA.markdown(f"**Weekly Delta (Realized + Unrealized)**  \n<span style='color:{delta_color}; font-size:28px;'>{delta_arrow} ${weekly_delta:+.2f}</span>", unsafe_allow_html=True)
 
 # Unrealized P&L for open positions
-unrealized_arrow = "🔺" if total_unrealized_pl >= 0 else "🔻"
+unrealized_arrow = "▲" if total_unrealized_pl >= 0 else "▼"
 unrealized_color = "green" if total_unrealized_pl >= 0 else "red"
 colB.markdown(f"**Unrealized P&L (Open Positions)**  \n<span style='color:{unrealized_color}; font-size:28px;'>{unrealized_arrow} ${total_unrealized_pl:+.2f}</span>", unsafe_allow_html=True)
 
-# Goal Tracker
-progress = min(weekly_realized / TARGET_PROFIT, 1.0) if TARGET_PROFIT > 0 else 0
+# Goal Tracker (clamped progress)
+progress = max(0.0, min(weekly_realized / TARGET_PROFIT, 1.0)) if TARGET_PROFIT > 0 else 0.0
 remaining = max(TARGET_PROFIT - weekly_realized, 0)
 colC.markdown(f"**Weekly Goal Progress: ${weekly_realized:+.2f} / ${TARGET_PROFIT:.0f}**")
 colC.progress(progress)
@@ -681,7 +682,7 @@ with tab_backtest:
         st.dataframe(results)
 
 # ─────────────────────────────────────────────
-# TAB 4 — INDIVIDUAL LIQUIDATION (with PIN, persistent dropdown, no auto-refresh)
+# TAB 4 — INDIVIDUAL LIQUIDATION (with PIN, persistent dropdown)
 # ─────────────────────────────────────────────
 with tab_liq:
     st.write("## 🧹 Individual Position Liquidation")
