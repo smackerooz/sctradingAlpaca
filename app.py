@@ -646,7 +646,7 @@ with tab_backtest:
         st.dataframe(results)
 
 # ─────────────────────────────────────────────
-# TAB 4 — INDIVIDUAL LIQUIDATION (FIXED: uses form to prevent dropdown reset)
+# TAB 4 — INDIVIDUAL LIQUIDATION (instant feedback, no form)
 # ─────────────────────────────────────────────
 with tab_liq:
     st.write("## 🧹 Individual Position Liquidation")
@@ -680,162 +680,156 @@ with tab_liq:
         st.success("✅ Access granted – you can liquidate individual positions")
         st.info("ℹ️ **Order type:** Market order during regular hours (9:30 AM – 4:00 PM ET) – supports fractional shares. Limit order during extended hours (integer shares only).")
 
-        # Use a form to wrap all liquidation controls – this prevents reset on every interaction
-        with st.form("liquidation_form"):
-            try:
-                positions = trading_client.get_all_positions()
-                if not positions:
-                    st.info("No open positions to liquidate.")
-                    st.session_state.liq_selected_label = None
+        try:
+            positions = trading_client.get_all_positions()
+            if not positions:
+                st.info("No open positions to liquidate.")
+                st.session_state.liq_selected_label = None
+            else:
+                # Build dropdown options
+                position_options = {}
+                for p in positions:
+                    symbol = p.symbol
+                    qty = float(p.qty)
+                    current_price = float(p.current_price)
+                    market_value = float(p.market_value)
+                    unrealized_pl = float(p.unrealized_pl)
+                    label = f"{symbol} | Qty: {qty:.4f} | Mkt Val: ${market_value:.2f} | P&L: ${unrealized_pl:+.2f}"
+                    position_options[label] = {
+                        "symbol": symbol,
+                        "qty": qty,
+                        "current_price": current_price,
+                        "entry_price": float(p.avg_entry_price),
+                    }
+
+                option_labels = list(position_options.keys())
+
+                # Initialize or validate stored selection
+                if "liq_selected_label" not in st.session_state or st.session_state.liq_selected_label not in option_labels:
+                    st.session_state.liq_selected_label = option_labels[0] if option_labels else None
+
+                # Dropdown (no form – updates instantly)
+                selected_label = st.selectbox(
+                    "Select position to liquidate",
+                    option_labels,
+                    index=option_labels.index(st.session_state.liq_selected_label) if st.session_state.liq_selected_label in option_labels else 0,
+                    key="liq_select_instant"
+                )
+                # Update session state immediately and rerun to refresh details
+                if selected_label != st.session_state.liq_selected_label:
+                    st.session_state.liq_selected_label = selected_label
+                    st.rerun()
+
+                selected = position_options[selected_label]
+                symbol = selected["symbol"]
+                qty = selected["qty"]
+                current_price = selected["current_price"]
+                entry_price_from_position = selected["entry_price"]
+
+                # Display position details
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Symbol", symbol)
+                col2.metric("Quantity", f"{qty:.4f}")
+                col3.metric("Current Price", f"${current_price:.2f}")
+                col4.metric("Estimated Proceeds", f"${qty * current_price:.2f}")
+
+                # Strategy selection
+                available = supabase.table("strategies").select("name").execute()
+                strategy_options = [s["name"] for s in available.data] if available.data else ["ORB-R", "VWAP"]
+                selected_strategy = st.selectbox("Strategy that opened this position (for correct P&L attribution)", strategy_options, key="liq_strategy_instant")
+
+                # Market hours check
+                now_et = datetime.now(ET)
+                regular_start = now_et.replace(hour=9, minute=30, second=0)
+                regular_end = now_et.replace(hour=16, minute=0, second=0)
+                is_regular_hours = regular_start <= now_et <= regular_end
+
+                if is_regular_hours:
+                    st.info("🟢 **Regular market hours** – will use a **market order** (supports fractional shares).")
                 else:
-                    # Build dropdown options
-                    position_options = {}
-                    for p in positions:
-                        symbol = p.symbol
-                        qty = float(p.qty)
-                        current_price = float(p.current_price)
-                        market_value = float(p.market_value)
-                        unrealized_pl = float(p.unrealized_pl)
-                        label = f"{symbol} | Qty: {qty:.4f} | Mkt Val: ${market_value:.2f} | P&L: ${unrealized_pl:+.2f}"
-                        position_options[label] = {
+                    st.warning("🟡 **Extended hours** – will use a **limit order** (only whole shares). Any fractional remainder will stay in your account.")
+
+                confirm = st.checkbox("I confirm that I want to sell this position immediately.", key="liq_confirm_instant")
+
+                # Liquidation button (outside any form)
+                if st.button("🔥 LIQUIDATE THIS POSITION", use_container_width=True, type="primary", disabled=not confirm, key="liq_execute_instant"):
+                    try:
+                        sold_qty = qty
+                        if not is_regular_hours:
+                            whole_shares = int(qty)
+                            fractional_remainder = qty - whole_shares
+                            if fractional_remainder > 0:
+                                st.warning(f"⚠️ Extended hours only support whole shares. Will sell {whole_shares} shares. Remaining {fractional_remainder:.4f} shares will stay.")
+                            if whole_shares == 0:
+                                st.error("No whole shares to sell during extended hours.")
+                            else:
+                                limit_price = round(current_price * 0.99, 2)
+                                trading_client.submit_order(LimitOrderRequest(
+                                    symbol=symbol,
+                                    qty=whole_shares,
+                                    side=OrderSide.SELL,
+                                    limit_price=limit_price,
+                                    time_in_force=TimeInForce.DAY,
+                                    extended_hours=True
+                                ))
+                                sold_qty = whole_shares
+                                st.success(f"✅ Limit order placed to sell {whole_shares} shares of {symbol} at ${limit_price:.2f}.")
+                        else:
+                            trading_client.submit_order(MarketOrderRequest(
+                                symbol=symbol,
+                                qty=qty,
+                                side=OrderSide.SELL,
+                                time_in_force=TimeInForce.DAY,
+                            ))
+                            st.success(f"✅ Market order placed to sell {qty:.4f} shares of {symbol}.")
+
+                        # Calculate P&L
+                        entry_price = entry_price_from_position
+                        sell_price = current_price
+                        pl_usd = (sell_price - entry_price) * sold_qty
+                        pl_pct = (pl_usd / (entry_price * sold_qty)) * 100 if entry_price * sold_qty != 0 else 0
+                        pl_display = f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}"
+                        pl_pct_str = f"{pl_pct:+.2f}%"
+
+                        now_sgt = datetime.now(SGT)
+                        trade_record = {
+                            "date": now_sgt.date().isoformat(),
                             "symbol": symbol,
-                            "qty": qty,
-                            "current_price": current_price,
-                            "entry_price": float(p.avg_entry_price),
+                            "buy_price": entry_price,
+                            "sell_price": sell_price,
+                            "qty": round(sold_qty, 4),
+                            "pl_usd": pl_usd,
+                            "pl_display": pl_display,
+                            "pl_pct": pl_pct_str,
+                            "time_sgt": now_sgt.strftime("%H:%M:%S"),
+                            "reason": "Manual liquidation via dashboard",
+                            "strategy": selected_strategy,
                         }
 
-                    option_labels = list(position_options.keys())
-                    # Initialize or validate stored selection
-                    if "liq_selected_label" not in st.session_state:
-                        st.session_state.liq_selected_label = option_labels[0] if option_labels else None
-                    elif st.session_state.liq_selected_label not in option_labels:
-                        st.session_state.liq_selected_label = option_labels[0] if option_labels else None
+                        result = supabase.table("realized_trades").insert(trade_record).execute()
+                        if hasattr(result, 'error') and result.error:
+                            st.error(f"Supabase insert error: {result.error}")
+                        else:
+                            st.success("✅ Trade recorded in database.")
+                            st.session_state.realized_trades.insert(0, trade_record)
 
-                    # Selectbox within the form – changes will only be applied on form submission
-                    selected_label = st.selectbox(
-                        "Select position to liquidate",
-                        option_labels,
-                        index=option_labels.index(st.session_state.liq_selected_label) if st.session_state.liq_selected_label in option_labels else 0,
-                        key="liq_select_in_form"
-                    )
-                    # Update session state immediately (but form not submitted yet)
-                    if selected_label != st.session_state.liq_selected_label:
-                        st.session_state.liq_selected_label = selected_label
-
-                    selected = position_options[selected_label]
-                    symbol = selected["symbol"]
-                    qty = selected["qty"]
-                    current_price = selected["current_price"]
-                    entry_price_from_position = selected["entry_price"]
-
-                    # Display position details
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("Symbol", symbol)
-                    col2.metric("Quantity", f"{qty:.4f}")
-                    col3.metric("Current Price", f"${current_price:.2f}")
-                    col4.metric("Estimated Proceeds", f"${qty * current_price:.2f}")
-
-                    # Strategy selection
-                    available = supabase.table("strategies").select("name").execute()
-                    strategy_options = [s["name"] for s in available.data] if available.data else ["ORB-R", "VWAP"]
-                    selected_strategy = st.selectbox("Strategy that opened this position (for correct P&L attribution)", strategy_options, key="liq_strategy_form")
-
-                    # Market hours check
-                    now_et = datetime.now(ET)
-                    regular_start = now_et.replace(hour=9, minute=30, second=0)
-                    regular_end = now_et.replace(hour=16, minute=0, second=0)
-                    is_regular_hours = regular_start <= now_et <= regular_end
-
-                    if is_regular_hours:
-                        st.info("🟢 **Regular market hours** – will use a **market order** (supports fractional shares).")
-                    else:
-                        st.warning("🟡 **Extended hours** – will use a **limit order** (only whole shares). Any fractional remainder will stay in your account.")
-
-                    confirm = st.checkbox("I confirm that I want to sell this position immediately.", key="liq_confirm_form")
-
-                    # Submit button
-                    submitted = st.form_submit_button("🔥 LIQUIDATE THIS POSITION", type="primary", use_container_width=True)
-
-                    if submitted and confirm:
+                        # Remove from open_positions table
                         try:
-                            sold_qty = qty
-                            if not is_regular_hours:
-                                whole_shares = int(qty)
-                                fractional_remainder = qty - whole_shares
-                                if fractional_remainder > 0:
-                                    st.warning(f"⚠️ Extended hours only support whole shares. Will sell {whole_shares} shares. Remaining {fractional_remainder:.4f} shares will stay.")
-                                if whole_shares == 0:
-                                    st.error("No whole shares to sell during extended hours.")
-                                else:
-                                    limit_price = round(current_price * 0.99, 2)
-                                    trading_client.submit_order(LimitOrderRequest(
-                                        symbol=symbol,
-                                        qty=whole_shares,
-                                        side=OrderSide.SELL,
-                                        limit_price=limit_price,
-                                        time_in_force=TimeInForce.DAY,
-                                        extended_hours=True
-                                    ))
-                                    sold_qty = whole_shares
-                                    st.success(f"✅ Limit order placed to sell {whole_shares} shares of {symbol} at ${limit_price:.2f}.")
-                            else:
-                                trading_client.submit_order(MarketOrderRequest(
-                                    symbol=symbol,
-                                    qty=qty,
-                                    side=OrderSide.SELL,
-                                    time_in_force=TimeInForce.DAY,
-                                ))
-                                st.success(f"✅ Market order placed to sell {qty:.4f} shares of {symbol}.")
+                            supabase.table("open_positions").delete().eq("symbol", symbol).execute()
+                        except:
+                            pass
 
-                            # Calculate P&L
-                            entry_price = entry_price_from_position
-                            sell_price = current_price
-                            pl_usd = (sell_price - entry_price) * sold_qty
-                            pl_pct = (pl_usd / (entry_price * sold_qty)) * 100 if entry_price * sold_qty != 0 else 0
-                            pl_display = f"{'🟢' if pl_usd >= 0 else '🔴'} ${pl_usd:+.2f}"
-                            pl_pct_str = f"{pl_pct:+.2f}%"
+                        # Clear stored selection and refresh
+                        st.session_state.liq_selected_label = None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error during liquidation: {e}")
+                        st.exception(e)
 
-                            now_sgt = datetime.now(SGT)
-                            trade_record = {
-                                "date": now_sgt.date().isoformat(),
-                                "symbol": symbol,
-                                "buy_price": entry_price,
-                                "sell_price": sell_price,
-                                "qty": round(sold_qty, 4),
-                                "pl_usd": pl_usd,
-                                "pl_display": pl_display,
-                                "pl_pct": pl_pct_str,
-                                "time_sgt": now_sgt.strftime("%H:%M:%S"),
-                                "reason": "Manual liquidation via dashboard",
-                                "strategy": selected_strategy,
-                            }
+        except Exception as e:
+            st.error(f"Could not fetch positions: {e}")
+            st.exception(e)
 
-                            result = supabase.table("realized_trades").insert(trade_record).execute()
-                            if hasattr(result, 'error') and result.error:
-                                st.error(f"Supabase insert error: {result.error}")
-                            else:
-                                st.success("✅ Trade recorded in database.")
-                                st.session_state.realized_trades.insert(0, trade_record)
-
-                            # Remove from open_positions table
-                            try:
-                                supabase.table("open_positions").delete().eq("symbol", symbol).execute()
-                            except:
-                                pass
-
-                            # Clear stored selection and refresh
-                            st.session_state.liq_selected_label = None
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error during liquidation: {e}")
-                            st.exception(e)
-                    elif submitted and not confirm:
-                        st.error("Please confirm the liquidation by checking the box.")
-            except Exception as e:
-                st.error(f"Could not fetch positions: {e}")
-                st.exception(e)
-
-        # Lock button outside the form
         if st.button("🔒 Lock Individual Liquidation", use_container_width=True, key="liq_lock"):
             st.session_state.liq_individual_authorized = False
             st.session_state.liq_selected_label = None
