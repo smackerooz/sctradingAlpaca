@@ -356,7 +356,7 @@ if st.sidebar.button("🔄 Refresh Trades Data", use_container_width=True):
     st.session_state.realized_trades = load_realized_trades()
     st.rerun()
 
-# Admin panel to update baseline (if needed)
+# Admin panel to update baseline
 with st.sidebar.expander("⚙️ Admin: Set Start-of-Week Baseline"):
     if "baseline_authorized" not in st.session_state:
         st.session_state.baseline_authorized = False
@@ -464,7 +464,7 @@ with st.expander("🔧 Manual Strategy Override (admin)"):
 st.markdown("---")
 
 # ============================================
-# MAIN METRICS (4 columns)
+# MAIN METRICS
 # ============================================
 now_sgt = datetime.now(SGT)
 current_session_date = get_current_session_date(now_sgt)
@@ -481,7 +481,7 @@ col2.metric("Cash", f"${cash:,.2f}")
 col3.metric("Total Holdings", f"${total_holdings:,.2f}")
 col4.metric("Daily Realized P&L (Current Session)", f"${current_session_realized_pl:+.2f}")
 
-# New metrics row: only Unrealized P&L and Goal Tracker (weekly delta removed to avoid duplication)
+# New metrics row: Unrealized P&L and Goal Tracker
 st.markdown("---")
 colA, colB = st.columns(2)
 
@@ -646,7 +646,7 @@ with tab_backtest:
         st.dataframe(results)
 
 # ─────────────────────────────────────────────
-# TAB 4 — INDIVIDUAL LIQUIDATION (unchanged)
+# TAB 4 — INDIVIDUAL LIQUIDATION (FIXED: uses form to prevent dropdown reset)
 # ─────────────────────────────────────────────
 with tab_liq:
     st.write("## 🧹 Individual Position Liquidation")
@@ -680,71 +680,83 @@ with tab_liq:
         st.success("✅ Access granted – you can liquidate individual positions")
         st.info("ℹ️ **Order type:** Market order during regular hours (9:30 AM – 4:00 PM ET) – supports fractional shares. Limit order during extended hours (integer shares only).")
 
-        try:
-            positions = trading_client.get_all_positions()
-            if not positions:
-                st.info("No open positions to liquidate.")
-                st.session_state.liq_selected_label = None
-            else:
-                position_options = {}
-                for p in positions:
-                    symbol = p.symbol
-                    qty = float(p.qty)
-                    current_price = float(p.current_price)
-                    market_value = float(p.market_value)
-                    unrealized_pl = float(p.unrealized_pl)
-                    label = f"{symbol} | Qty: {qty:.4f} | Mkt Val: ${market_value:.2f} | P&L: ${unrealized_pl:+.2f}"
-                    position_options[label] = {
-                        "symbol": symbol,
-                        "qty": qty,
-                        "current_price": current_price,
-                        "entry_price": float(p.avg_entry_price),
-                    }
-
-                option_labels = list(position_options.keys())
-
-                if st.session_state.liq_selected_label not in option_labels:
-                    st.session_state.liq_selected_label = option_labels[0] if option_labels else None
-
-                selected_label = st.selectbox(
-                    "Select position to liquidate",
-                    option_labels,
-                    index=option_labels.index(st.session_state.liq_selected_label) if st.session_state.liq_selected_label in option_labels else 0,
-                    key="liq_select_widget"
-                )
-                if selected_label != st.session_state.liq_selected_label:
-                    st.session_state.liq_selected_label = selected_label
-
-                selected = position_options[selected_label]
-                symbol = selected["symbol"]
-                qty = selected["qty"]
-                current_price = selected["current_price"]
-                entry_price_from_position = selected["entry_price"]
-
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Symbol", symbol)
-                col2.metric("Quantity", f"{qty:.4f}")
-                col3.metric("Current Price", f"${current_price:.2f}")
-                col4.metric("Estimated Proceeds", f"${qty * current_price:.2f}")
-
-                available = supabase.table("strategies").select("name").execute()
-                strategy_options = [s["name"] for s in available.data] if available.data else ["ORB-R", "VWAP"]
-                selected_strategy = st.selectbox("Strategy that opened this position (for correct P&L attribution)", strategy_options, key="liq_strategy")
-
-                now_et = datetime.now(ET)
-                regular_start = now_et.replace(hour=9, minute=30, second=0)
-                regular_end = now_et.replace(hour=16, minute=0, second=0)
-                is_regular_hours = regular_start <= now_et <= regular_end
-
-                if is_regular_hours:
-                    st.info("🟢 **Regular market hours** – will use a **market order** (supports fractional shares).")
+        # Use a form to wrap all liquidation controls – this prevents reset on every interaction
+        with st.form("liquidation_form"):
+            try:
+                positions = trading_client.get_all_positions()
+                if not positions:
+                    st.info("No open positions to liquidate.")
+                    st.session_state.liq_selected_label = None
                 else:
-                    st.warning("🟡 **Extended hours** – will use a **limit order** (only whole shares). Any fractional remainder will stay in your account.")
+                    # Build dropdown options
+                    position_options = {}
+                    for p in positions:
+                        symbol = p.symbol
+                        qty = float(p.qty)
+                        current_price = float(p.current_price)
+                        market_value = float(p.market_value)
+                        unrealized_pl = float(p.unrealized_pl)
+                        label = f"{symbol} | Qty: {qty:.4f} | Mkt Val: ${market_value:.2f} | P&L: ${unrealized_pl:+.2f}"
+                        position_options[label] = {
+                            "symbol": symbol,
+                            "qty": qty,
+                            "current_price": current_price,
+                            "entry_price": float(p.avg_entry_price),
+                        }
 
-                confirm = st.checkbox("I confirm that I want to sell this position immediately.", key="liq_confirm")
-                col_liq, col_cancel = st.columns(2)
-                with col_liq:
-                    if st.button("🔥 LIQUIDATE THIS POSITION", use_container_width=True, type="primary", disabled=not confirm, key="liq_execute"):
+                    option_labels = list(position_options.keys())
+                    # Initialize or validate stored selection
+                    if "liq_selected_label" not in st.session_state:
+                        st.session_state.liq_selected_label = option_labels[0] if option_labels else None
+                    elif st.session_state.liq_selected_label not in option_labels:
+                        st.session_state.liq_selected_label = option_labels[0] if option_labels else None
+
+                    # Selectbox within the form – changes will only be applied on form submission
+                    selected_label = st.selectbox(
+                        "Select position to liquidate",
+                        option_labels,
+                        index=option_labels.index(st.session_state.liq_selected_label) if st.session_state.liq_selected_label in option_labels else 0,
+                        key="liq_select_in_form"
+                    )
+                    # Update session state immediately (but form not submitted yet)
+                    if selected_label != st.session_state.liq_selected_label:
+                        st.session_state.liq_selected_label = selected_label
+
+                    selected = position_options[selected_label]
+                    symbol = selected["symbol"]
+                    qty = selected["qty"]
+                    current_price = selected["current_price"]
+                    entry_price_from_position = selected["entry_price"]
+
+                    # Display position details
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("Symbol", symbol)
+                    col2.metric("Quantity", f"{qty:.4f}")
+                    col3.metric("Current Price", f"${current_price:.2f}")
+                    col4.metric("Estimated Proceeds", f"${qty * current_price:.2f}")
+
+                    # Strategy selection
+                    available = supabase.table("strategies").select("name").execute()
+                    strategy_options = [s["name"] for s in available.data] if available.data else ["ORB-R", "VWAP"]
+                    selected_strategy = st.selectbox("Strategy that opened this position (for correct P&L attribution)", strategy_options, key="liq_strategy_form")
+
+                    # Market hours check
+                    now_et = datetime.now(ET)
+                    regular_start = now_et.replace(hour=9, minute=30, second=0)
+                    regular_end = now_et.replace(hour=16, minute=0, second=0)
+                    is_regular_hours = regular_start <= now_et <= regular_end
+
+                    if is_regular_hours:
+                        st.info("🟢 **Regular market hours** – will use a **market order** (supports fractional shares).")
+                    else:
+                        st.warning("🟡 **Extended hours** – will use a **limit order** (only whole shares). Any fractional remainder will stay in your account.")
+
+                    confirm = st.checkbox("I confirm that I want to sell this position immediately.", key="liq_confirm_form")
+
+                    # Submit button
+                    submitted = st.form_submit_button("🔥 LIQUIDATE THIS POSITION", type="primary", use_container_width=True)
+
+                    if submitted and confirm:
                         try:
                             sold_qty = qty
                             if not is_regular_hours:
@@ -775,6 +787,7 @@ with tab_liq:
                                 ))
                                 st.success(f"✅ Market order placed to sell {qty:.4f} shares of {symbol}.")
 
+                            # Calculate P&L
                             entry_price = entry_price_from_position
                             sell_price = current_price
                             pl_usd = (sell_price - entry_price) * sold_qty
@@ -804,24 +817,25 @@ with tab_liq:
                                 st.success("✅ Trade recorded in database.")
                                 st.session_state.realized_trades.insert(0, trade_record)
 
+                            # Remove from open_positions table
                             try:
                                 supabase.table("open_positions").delete().eq("symbol", symbol).execute()
                             except:
                                 pass
 
+                            # Clear stored selection and refresh
                             st.session_state.liq_selected_label = None
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error during liquidation: {e}")
                             st.exception(e)
-                with col_cancel:
-                    if st.button("❌ Cancel", use_container_width=True, key="liq_cancel"):
-                        st.info("Liquidation cancelled.")
-                        st.rerun()
-        except Exception as e:
-            st.error(f"Could not fetch positions: {e}")
-            st.exception(e)
+                    elif submitted and not confirm:
+                        st.error("Please confirm the liquidation by checking the box.")
+            except Exception as e:
+                st.error(f"Could not fetch positions: {e}")
+                st.exception(e)
 
+        # Lock button outside the form
         if st.button("🔒 Lock Individual Liquidation", use_container_width=True, key="liq_lock"):
             st.session_state.liq_individual_authorized = False
             st.session_state.liq_selected_label = None
