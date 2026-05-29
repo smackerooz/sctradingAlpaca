@@ -7,8 +7,8 @@ Dynamic Dashboard – Works with any strategy defined in Supabase 'strategies' t
 - Strategy selection for manual liquidation
 - Charts inside expander
 - Strategy column in open positions
-- Weekly delta = current portfolio value - baseline (from weekly_baseline table)
-- Unrealized P&L and Goal tracker (realized only) remain separate
+- Goal tracker uses weekly delta (portfolio change from start-of-week baseline)
+- Sidebar shows start-of-week portfolio value (from weekly_baseline.baseline)
 """
 
 import streamlit as st
@@ -119,7 +119,7 @@ ET = pytz.timezone('US/Eastern')
 # ─────────────────────────────────────────────
 # CONSTANTS & WATCHLIST
 # ─────────────────────────────────────────────
-WEEKLY_PROFIT_TARGET = 200.0  # Goal tracker target
+WEEKLY_PROFIT_TARGET = 200.0  # Goal tracker target (based on total P&L)
 
 WATCHLIST = [
     "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM", "MSTR", "PANW",
@@ -236,12 +236,10 @@ def set_forced_strategy(strategy):
 def get_start_of_week_baseline():
     """Fetch the most recent baseline (portfolio value at start of week) from weekly_baseline table."""
     try:
-        # Order by date descending (assuming date column stores the week start date)
         response = supabase.table("weekly_baseline").select("baseline").order("date", desc=True).limit(1).execute()
         if response.data and "baseline" in response.data[0]:
             return float(response.data[0]["baseline"])
         else:
-            # Fallback: try ordering by updated_at
             response = supabase.table("weekly_baseline").select("baseline").order("updated_at", desc=True).limit(1).execute()
             if response.data and "baseline" in response.data[0]:
                 return float(response.data[0]["baseline"])
@@ -264,23 +262,6 @@ def get_total_unrealized_pl():
         return total_pl
     except:
         return 0.0
-
-def get_weekly_realized_pl():
-    trades = st.session_state.realized_trades
-    if not trades:
-        return 0.0
-    today = datetime.now(SGT).date()
-    start_of_week = today - timedelta(days=today.weekday())
-    end_of_week = start_of_week + timedelta(days=6)
-    total = 0.0
-    for t in trades:
-        trade_date = t.get("date")
-        if trade_date:
-            if isinstance(trade_date, str):
-                trade_date = datetime.strptime(trade_date, "%Y-%m-%d").date()
-            if start_of_week <= trade_date <= end_of_week:
-                total += t.get("pl_usd", 0.0)
-    return total
 
 def get_bars(symbol, days=1):
     end = datetime.now(ET)
@@ -348,7 +329,6 @@ try:
     daily_pl_alpaca = float(account.equity) - float(account.last_equity) if hasattr(account, 'last_equity') else 0.0
     total_holdings = get_total_holdings_value()
     total_unrealized_pl = get_total_unrealized_pl()
-    weekly_realized = get_weekly_realized_pl()
     
     # Get start-of-week baseline from weekly_baseline table
     start_of_week_baseline = get_start_of_week_baseline()
@@ -356,7 +336,7 @@ try:
     # Weekly delta = change in portfolio value from baseline
     weekly_delta = portfolio_value - start_of_week_baseline if start_of_week_baseline != 0.0 else 0.0
 except:
-    portfolio_value = cash = buying_power = daily_pl_alpaca = total_holdings = total_unrealized_pl = weekly_realized = start_of_week_baseline = weekly_delta = 0.0
+    portfolio_value = cash = buying_power = daily_pl_alpaca = total_holdings = total_unrealized_pl = start_of_week_baseline = weekly_delta = 0.0
 
 # ─────────────────────────────────────────────
 # SIDEBAR
@@ -376,7 +356,7 @@ if st.sidebar.button("🔄 Refresh Trades Data", use_container_width=True):
     st.session_state.realized_trades = load_realized_trades()
     st.rerun()
 
-# Optional: Admin panel to update baseline (if needed)
+# Admin panel to update baseline (if needed)
 with st.sidebar.expander("⚙️ Admin: Set Start-of-Week Baseline"):
     if "baseline_authorized" not in st.session_state:
         st.session_state.baseline_authorized = False
@@ -398,7 +378,6 @@ with st.sidebar.expander("⚙️ Admin: Set Start-of-Week Baseline"):
         new_baseline = st.number_input("Set new start-of-week portfolio value ($)", min_value=0.0, value=start_of_week_baseline, step=100.0, format="%.2f")
         if st.button("Update Baseline"):
             try:
-                # Insert new baseline record (assuming date = today's week start)
                 today = datetime.now(SGT).date()
                 start_of_week = today - timedelta(days=today.weekday())
                 supabase.table("weekly_baseline").insert({
@@ -485,7 +464,7 @@ with st.expander("🔧 Manual Strategy Override (admin)"):
 st.markdown("---")
 
 # ============================================
-# MAIN METRICS
+# MAIN METRICS (4 columns)
 # ============================================
 now_sgt = datetime.now(SGT)
 current_session_date = get_current_session_date(now_sgt)
@@ -502,26 +481,21 @@ col2.metric("Cash", f"${cash:,.2f}")
 col3.metric("Total Holdings", f"${total_holdings:,.2f}")
 col4.metric("Daily Realized P&L (Current Session)", f"${current_session_realized_pl:+.2f}")
 
-# New metrics row
+# New metrics row: only Unrealized P&L and Goal Tracker (weekly delta removed to avoid duplication)
 st.markdown("---")
-colA, colB, colC = st.columns(3)
-
-# Weekly Delta (using portfolio change from baseline)
-delta_arrow = "▲" if weekly_delta >= 0 else "▼"
-delta_color = "green" if weekly_delta >= 0 else "red"
-colA.markdown(f"**Weekly Delta (Portfolio Change)**  \n<span style='color:{delta_color}; font-size:28px;'>{delta_arrow} ${weekly_delta:+.2f}</span>", unsafe_allow_html=True)
+colA, colB = st.columns(2)
 
 # Unrealized P&L for open positions
 unrealized_arrow = "▲" if total_unrealized_pl >= 0 else "▼"
 unrealized_color = "green" if total_unrealized_pl >= 0 else "red"
-colB.markdown(f"**Unrealized P&L (Open Positions)**  \n<span style='color:{unrealized_color}; font-size:28px;'>{unrealized_arrow} ${total_unrealized_pl:+.2f}</span>", unsafe_allow_html=True)
+colA.markdown(f"**Unrealized P&L (Open Positions)**  \n<span style='color:{unrealized_color}; font-size:28px;'>{unrealized_arrow} ${total_unrealized_pl:+.2f}</span>", unsafe_allow_html=True)
 
-# Goal Tracker (using realized P&L only)
-progress = max(0.0, min(weekly_realized / WEEKLY_PROFIT_TARGET, 1.0)) if WEEKLY_PROFIT_TARGET > 0 else 0.0
-remaining = max(WEEKLY_PROFIT_TARGET - weekly_realized, 0)
-colC.markdown(f"**Weekly Goal Progress: ${weekly_realized:+.2f} / ${WEEKLY_PROFIT_TARGET:.0f}**")
-colC.progress(progress)
-colC.caption(f"💰 Remaining to target: ${remaining:.2f}")
+# Goal Tracker (using weekly delta – total portfolio change)
+progress = max(0.0, min(weekly_delta / WEEKLY_PROFIT_TARGET, 1.0)) if WEEKLY_PROFIT_TARGET > 0 else 0.0
+remaining = max(WEEKLY_PROFIT_TARGET - weekly_delta, 0)
+colB.markdown(f"**Weekly Goal Progress (Total P&L)**  \n<span style='font-size:28px;'>${weekly_delta:+.2f} / ${WEEKLY_PROFIT_TARGET:.0f}</span>", unsafe_allow_html=True)
+colB.progress(progress)
+colB.caption(f"💰 Remaining to target: ${remaining:.2f}")
 
 st.markdown("---")
 
@@ -536,7 +510,7 @@ tab_live, tab_signals, tab_backtest, tab_liq = st.tabs(
 # TAB 1 — LIVE TRADING (with session selector)
 # ─────────────────────────────────────────────
 with tab_live:
-    st.write(f"## 🎯 Weekly Goal: ${WEEKLY_PROFIT_TARGET:.0f} USD")
+    st.write(f"## 🎯 Weekly Goal: ${WEEKLY_PROFIT_TARGET:.0f} USD (Total P&L)")
     
     session_option = st.radio(
         "Select trading session to view:",
@@ -672,7 +646,7 @@ with tab_backtest:
         st.dataframe(results)
 
 # ─────────────────────────────────────────────
-# TAB 4 — INDIVIDUAL LIQUIDATION (unchanged, but uses persistent dropdown)
+# TAB 4 — INDIVIDUAL LIQUIDATION (unchanged)
 # ─────────────────────────────────────────────
 with tab_liq:
     st.write("## 🧹 Individual Position Liquidation")
@@ -858,11 +832,12 @@ with tab_liq:
 # ─────────────────────────────────────────────
 with st.expander("🔍 P&L Reconciliation Helper", expanded=False):
     st.markdown("""
-    **Weekly delta** = Current Portfolio Value − Start-of-Week Baseline (from `weekly_baseline.baseline`).  
-    **Goal tracker** shows realized P&L toward the weekly profit target of $200.  
-    **Unrealized P&L** is from open Alpaca positions.
+    **Weekly Goal** = Total P&L (realized + unrealized) toward the target of $200.  
+    - Weekly delta = Current Portfolio Value − Start-of-Week Baseline (from `weekly_baseline.baseline`).  
+    - Unrealized P&L is from open Alpaca positions.  
+    - Realized trades are shown per trading session.
     """)
 
 # ─────────────────────────────────────────────
-# NO AUTO-REFRESH
+# NO AUTO-REFRESH – user must click Refresh Trades Data button
 # ─────────────────────────────────────────────
