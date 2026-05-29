@@ -7,7 +7,7 @@ Dynamic Dashboard – Works with any strategy defined in Supabase 'strategies' t
 - Strategy selection for manual liquidation
 - Charts inside expander
 - Strategy column in open positions
-- Weekly delta computed directly from portfolio value change
+- Weekly delta = current portfolio value - baseline (from weekly_baseline table)
 - Unrealized P&L and Goal tracker (realized only) remain separate
 """
 
@@ -233,27 +233,21 @@ def set_forced_strategy(strategy):
     except Exception as e:
         st.error(f"Failed to save strategy: {e}")
 
-def get_start_of_week_value(portfolio_value):
-    """
-    Get or store the starting portfolio value for the current week.
-    Uses Supabase table 'weekly_baseline' with columns: week_start_date, start_value, updated_at.
-    """
-    today = datetime.now(SGT).date()
-    start_of_week = today - timedelta(days=today.weekday())
+def get_start_of_week_baseline():
+    """Fetch the most recent baseline (portfolio value at start of week) from weekly_baseline table."""
     try:
-        result = supabase.table("weekly_baseline").select("start_value").eq("week_start_date", start_of_week.isoformat()).execute()
-        if result.data:
-            return float(result.data[0]["start_value"])
+        # Order by date descending (assuming date column stores the week start date)
+        response = supabase.table("weekly_baseline").select("baseline").order("date", desc=True).limit(1).execute()
+        if response.data and "baseline" in response.data[0]:
+            return float(response.data[0]["baseline"])
         else:
-            supabase.table("weekly_baseline").insert({
-                "week_start_date": start_of_week.isoformat(),
-                "start_value": portfolio_value,
-                "updated_at": datetime.now(SGT).isoformat()
-            }).execute()
-            return portfolio_value
+            # Fallback: try ordering by updated_at
+            response = supabase.table("weekly_baseline").select("baseline").order("updated_at", desc=True).limit(1).execute()
+            if response.data and "baseline" in response.data[0]:
+                return float(response.data[0]["baseline"])
     except Exception as e:
-        st.error(f"Error managing start-of-week value: {e}")
-        return portfolio_value
+        st.error(f"Error reading weekly_baseline: {e}")
+    return 0.0
 
 def get_total_holdings_value():
     try:
@@ -356,13 +350,13 @@ try:
     total_unrealized_pl = get_total_unrealized_pl()
     weekly_realized = get_weekly_realized_pl()
     
-    # Get or create start-of-week value
-    start_of_week_value = get_start_of_week_value(portfolio_value)
+    # Get start-of-week baseline from weekly_baseline table
+    start_of_week_baseline = get_start_of_week_baseline()
     
-    # Weekly delta = change in portfolio value (consistent with sidebar)
-    weekly_delta = portfolio_value - start_of_week_value
+    # Weekly delta = change in portfolio value from baseline
+    weekly_delta = portfolio_value - start_of_week_baseline if start_of_week_baseline != 0.0 else 0.0
 except:
-    portfolio_value = cash = buying_power = daily_pl_alpaca = total_holdings = total_unrealized_pl = weekly_realized = start_of_week_value = weekly_delta = 0.0
+    portfolio_value = cash = buying_power = daily_pl_alpaca = total_holdings = total_unrealized_pl = weekly_realized = start_of_week_baseline = weekly_delta = 0.0
 
 # ─────────────────────────────────────────────
 # SIDEBAR
@@ -373,7 +367,7 @@ st.sidebar.metric("Portfolio Value", f"${portfolio_value:,.2f}")
 st.sidebar.metric("Cash", f"${cash:,.2f}")
 st.sidebar.metric("Buying Power", f"${buying_power:,.2f}")
 st.sidebar.metric("Today's P&L (Alpaca)", f"${daily_pl_alpaca:+.2f}")
-st.sidebar.metric("Start-of-Week Portfolio Value", f"${start_of_week_value:,.2f}")
+st.sidebar.metric("Start-of-Week Portfolio Value", f"${start_of_week_baseline:,.2f}")
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Market Open:** {'✅ Yes' if is_market_open() else '❌ No'}")
 
@@ -381,6 +375,44 @@ st.sidebar.markdown(f"**Market Open:** {'✅ Yes' if is_market_open() else '❌ 
 if st.sidebar.button("🔄 Refresh Trades Data", use_container_width=True):
     st.session_state.realized_trades = load_realized_trades()
     st.rerun()
+
+# Optional: Admin panel to update baseline (if needed)
+with st.sidebar.expander("⚙️ Admin: Set Start-of-Week Baseline"):
+    if "baseline_authorized" not in st.session_state:
+        st.session_state.baseline_authorized = False
+
+    if not st.session_state.baseline_authorized:
+        with st.form("baseline_pin_form"):
+            baseline_pin = st.text_input("Enter PIN to update baseline:", type="password")
+            if st.form_submit_button("Unlock"):
+                try:
+                    row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
+                    if row.data and row.data[0]["pin"] == baseline_pin:
+                        st.session_state.baseline_authorized = True
+                        st.rerun()
+                    else:
+                        st.error("Incorrect PIN")
+                except:
+                    st.error("PIN verification failed")
+    else:
+        new_baseline = st.number_input("Set new start-of-week portfolio value ($)", min_value=0.0, value=start_of_week_baseline, step=100.0, format="%.2f")
+        if st.button("Update Baseline"):
+            try:
+                # Insert new baseline record (assuming date = today's week start)
+                today = datetime.now(SGT).date()
+                start_of_week = today - timedelta(days=today.weekday())
+                supabase.table("weekly_baseline").insert({
+                    "baseline": new_baseline,
+                    "date": start_of_week.isoformat(),
+                    "updated_at": datetime.now(SGT).isoformat()
+                }).execute()
+                st.success(f"Baseline updated to ${new_baseline:,.2f}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to update baseline: {e}")
+        if st.button("Lock"):
+            st.session_state.baseline_authorized = False
+            st.rerun()
 
 # ─────────────────────────────────────────────
 # MAIN DASHBOARD
@@ -474,7 +506,7 @@ col4.metric("Daily Realized P&L (Current Session)", f"${current_session_realized
 st.markdown("---")
 colA, colB, colC = st.columns(3)
 
-# Weekly Delta (using portfolio change – always consistent)
+# Weekly Delta (using portfolio change from baseline)
 delta_arrow = "▲" if weekly_delta >= 0 else "▼"
 delta_color = "green" if weekly_delta >= 0 else "red"
 colA.markdown(f"**Weekly Delta (Portfolio Change)**  \n<span style='color:{delta_color}; font-size:28px;'>{delta_arrow} ${weekly_delta:+.2f}</span>", unsafe_allow_html=True)
@@ -826,15 +858,10 @@ with tab_liq:
 # ─────────────────────────────────────────────
 with st.expander("🔍 P&L Reconciliation Helper", expanded=False):
     st.markdown("""
-    **Why weekly delta (portfolio change) may differ from realized+unrealized?**
-    - Dividends, fees, or cash adjustments can cause a small discrepancy.
-    - The dashboard now uses portfolio change for consistency with Alpaca.
+    **Weekly delta** = Current Portfolio Value − Start-of-Week Baseline (from `weekly_baseline.baseline`).  
+    **Goal tracker** shows realized P&L toward the weekly profit target of $200.  
+    **Unrealized P&L** is from open Alpaca positions.
     """)
-    st.code("""
--- Check weekly realized P&L
-SELECT SUM(pl_usd) FROM realized_trades 
-WHERE date >= (SELECT week_start_date FROM weekly_baseline ORDER BY week_start_date DESC LIMIT 1);
-    """, language="sql")
 
 # ─────────────────────────────────────────────
 # NO AUTO-REFRESH
