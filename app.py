@@ -7,8 +7,8 @@ Dynamic Dashboard – Works with any strategy defined in Supabase 'strategies' t
 - Strategy selection for manual liquidation
 - Charts inside expander
 - Strategy column in open positions
-- Weekly delta (realized + unrealized), Unrealized P&L, Goal tracker
-- Arrows: ▲ green for positive, ▼ red for negative
+- Weekly delta computed directly from portfolio value change
+- Unrealized P&L and Goal tracker (realized only) remain separate
 """
 
 import streamlit as st
@@ -119,7 +119,7 @@ ET = pytz.timezone('US/Eastern')
 # ─────────────────────────────────────────────
 # CONSTANTS & WATCHLIST
 # ─────────────────────────────────────────────
-TARGET_PROFIT = 200.0
+WEEKLY_PROFIT_TARGET = 200.0  # Goal tracker target
 
 WATCHLIST = [
     "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM", "MSTR", "PANW",
@@ -233,29 +233,27 @@ def set_forced_strategy(strategy):
     except Exception as e:
         st.error(f"Failed to save strategy: {e}")
 
-def get_weekly_baseline():
+def get_start_of_week_value(portfolio_value):
+    """
+    Get or store the starting portfolio value for the current week.
+    Uses Supabase table 'weekly_baseline' with columns: week_start_date, start_value, updated_at.
+    """
+    today = datetime.now(SGT).date()
+    start_of_week = today - timedelta(days=today.weekday())
     try:
-        row = supabase.table("weekly_baseline").select("baseline").order("updated_at", desc=True).limit(1).execute()
-        if not row.data:
-            row = supabase.table("weekly_baseline").select("baseline").order("date", desc=True).limit(1).execute()
-        if row.data and "baseline" in row.data[0]:
-            return float(row.data[0]["baseline"])
+        result = supabase.table("weekly_baseline").select("start_value").eq("week_start_date", start_of_week.isoformat()).execute()
+        if result.data:
+            return float(result.data[0]["start_value"])
+        else:
+            supabase.table("weekly_baseline").insert({
+                "week_start_date": start_of_week.isoformat(),
+                "start_value": portfolio_value,
+                "updated_at": datetime.now(SGT).isoformat()
+            }).execute()
+            return portfolio_value
     except Exception as e:
-        st.error(f"Error reading weekly_baseline: {e}")
-    return 0.0
-
-def set_weekly_baseline(amount):
-    try:
-        today = datetime.now(SGT).date().isoformat()
-        now_iso = datetime.now(SGT).isoformat()
-        supabase.table("weekly_baseline").insert({
-            "baseline": amount,
-            "date": today,
-            "updated_at": now_iso
-        }).execute()
-        st.success(f"Weekly baseline set to ${amount:,.2f}")
-    except Exception as e:
-        st.error(f"Failed to save baseline: {e}")
+        st.error(f"Error managing start-of-week value: {e}")
+        return portfolio_value
 
 def get_total_holdings_value():
     try:
@@ -266,7 +264,6 @@ def get_total_holdings_value():
         return 0.0
 
 def get_total_unrealized_pl():
-    """Sum of unrealized P&L from all open positions."""
     try:
         positions = trading_client.get_all_positions()
         total_pl = sum(float(p.unrealized_pl) for p in positions)
@@ -275,12 +272,10 @@ def get_total_unrealized_pl():
         return 0.0
 
 def get_weekly_realized_pl():
-    """Sum of pl_usd for trades with date in the current week (Monday-Sunday)."""
     trades = st.session_state.realized_trades
     if not trades:
         return 0.0
     today = datetime.now(SGT).date()
-    # Find Monday of current week
     start_of_week = today - timedelta(days=today.weekday())
     end_of_week = start_of_week + timedelta(days=6)
     total = 0.0
@@ -292,12 +287,6 @@ def get_weekly_realized_pl():
             if start_of_week <= trade_date <= end_of_week:
                 total += t.get("pl_usd", 0.0)
     return total
-
-def get_weekly_delta():
-    """Realized + unrealized P&L for current week."""
-    realized = get_weekly_realized_pl()
-    unrealized = get_total_unrealized_pl()
-    return realized + unrealized, realized, unrealized
 
 def get_bars(symbol, days=1):
     end = datetime.now(ET)
@@ -345,7 +334,6 @@ def is_market_open():
     return clock.is_open
 
 def run_backtest(strategy, start_date, end_date):
-    # Placeholder – replace with your actual backtest logic
     return pd.DataFrame({"date": [start_date], "return": [0.05]})
 
 # ─────────────────────────────────────────────
@@ -356,7 +344,7 @@ if "initial_load_done" not in st.session_state:
     st.session_state.initial_load_done = True
 
 # ─────────────────────────────────────────────
-# FETCH LIVE ACCOUNT DATA (refreshed on each run)
+# FETCH LIVE ACCOUNT DATA
 # ─────────────────────────────────────────────
 try:
     account = trading_client.get_account()
@@ -365,11 +353,16 @@ try:
     buying_power = float(account.buying_power)
     daily_pl_alpaca = float(account.equity) - float(account.last_equity) if hasattr(account, 'last_equity') else 0.0
     total_holdings = get_total_holdings_value()
-    weekly_baseline = get_weekly_baseline()
     total_unrealized_pl = get_total_unrealized_pl()
-    weekly_delta, weekly_realized, _ = get_weekly_delta()
+    weekly_realized = get_weekly_realized_pl()
+    
+    # Get or create start-of-week value
+    start_of_week_value = get_start_of_week_value(portfolio_value)
+    
+    # Weekly delta = change in portfolio value (consistent with sidebar)
+    weekly_delta = portfolio_value - start_of_week_value
 except:
-    portfolio_value = cash = buying_power = daily_pl_alpaca = total_holdings = weekly_baseline = total_unrealized_pl = weekly_delta = weekly_realized = 0.0
+    portfolio_value = cash = buying_power = daily_pl_alpaca = total_holdings = total_unrealized_pl = weekly_realized = start_of_week_value = weekly_delta = 0.0
 
 # ─────────────────────────────────────────────
 # SIDEBAR
@@ -380,7 +373,7 @@ st.sidebar.metric("Portfolio Value", f"${portfolio_value:,.2f}")
 st.sidebar.metric("Cash", f"${cash:,.2f}")
 st.sidebar.metric("Buying Power", f"${buying_power:,.2f}")
 st.sidebar.metric("Today's P&L (Alpaca)", f"${daily_pl_alpaca:+.2f}")
-st.sidebar.metric("Weekly Baseline", f"${weekly_baseline:,.2f}")
+st.sidebar.metric("Start-of-Week Portfolio Value", f"${start_of_week_value:,.2f}")
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Market Open:** {'✅ Yes' if is_market_open() else '❌ No'}")
 
@@ -388,41 +381,6 @@ st.sidebar.markdown(f"**Market Open:** {'✅ Yes' if is_market_open() else '❌ 
 if st.sidebar.button("🔄 Refresh Trades Data", use_container_width=True):
     st.session_state.realized_trades = load_realized_trades()
     st.rerun()
-
-# Weekly Baseline Admin
-with st.sidebar.expander("📅 Weekly Baseline Settings (admin)"):
-    if "baseline_authorized" not in st.session_state:
-        st.session_state.baseline_authorized = False
-
-    if not st.session_state.baseline_authorized:
-        with st.form("baseline_pin_form"):
-            baseline_pin = st.text_input("Enter PIN to change baseline:", type="password")
-            if st.form_submit_button("Unlock"):
-                try:
-                    row = supabase.table("bot_config").select("pin").eq("id", 1).execute()
-                    if row.data and row.data[0]["pin"] == baseline_pin:
-                        st.session_state.baseline_authorized = True
-                        st.rerun()
-                    else:
-                        st.error("Incorrect PIN")
-                except:
-                    st.error("PIN verification failed")
-    else:
-        new_baseline = st.number_input("Set weekly baseline amount ($)", min_value=0.0, value=weekly_baseline, step=100.0, format="%.2f")
-        if st.button("Update Baseline"):
-            set_weekly_baseline(new_baseline)
-            st.rerun()
-        if st.button("Lock"):
-            st.session_state.baseline_authorized = False
-            st.rerun()
-
-# Optional debug
-if weekly_baseline == 0.0 and st.sidebar.checkbox("Show weekly_baseline debug info", value=False):
-    try:
-        raw = supabase.table("weekly_baseline").select("*").order("updated_at", desc=True).execute()
-        st.sidebar.write("Raw table (latest first):", raw.data)
-    except:
-        st.sidebar.error("Could not fetch table")
 
 # ─────────────────────────────────────────────
 # MAIN DASHBOARD
@@ -495,7 +453,7 @@ with st.expander("🔧 Manual Strategy Override (admin)"):
 st.markdown("---")
 
 # ============================================
-# MAIN METRICS (4 columns plus extra rows for new features)
+# MAIN METRICS
 # ============================================
 now_sgt = datetime.now(SGT)
 current_session_date = get_current_session_date(now_sgt)
@@ -516,20 +474,20 @@ col4.metric("Daily Realized P&L (Current Session)", f"${current_session_realized
 st.markdown("---")
 colA, colB, colC = st.columns(3)
 
-# Weekly Delta with arrow (using HTML ▲/▼ for proper color)
+# Weekly Delta (using portfolio change – always consistent)
 delta_arrow = "▲" if weekly_delta >= 0 else "▼"
 delta_color = "green" if weekly_delta >= 0 else "red"
-colA.markdown(f"**Weekly Delta (Realized + Unrealized)**  \n<span style='color:{delta_color}; font-size:28px;'>{delta_arrow} ${weekly_delta:+.2f}</span>", unsafe_allow_html=True)
+colA.markdown(f"**Weekly Delta (Portfolio Change)**  \n<span style='color:{delta_color}; font-size:28px;'>{delta_arrow} ${weekly_delta:+.2f}</span>", unsafe_allow_html=True)
 
 # Unrealized P&L for open positions
 unrealized_arrow = "▲" if total_unrealized_pl >= 0 else "▼"
 unrealized_color = "green" if total_unrealized_pl >= 0 else "red"
 colB.markdown(f"**Unrealized P&L (Open Positions)**  \n<span style='color:{unrealized_color}; font-size:28px;'>{unrealized_arrow} ${total_unrealized_pl:+.2f}</span>", unsafe_allow_html=True)
 
-# Goal Tracker (clamped progress)
-progress = max(0.0, min(weekly_realized / TARGET_PROFIT, 1.0)) if TARGET_PROFIT > 0 else 0.0
-remaining = max(TARGET_PROFIT - weekly_realized, 0)
-colC.markdown(f"**Weekly Goal Progress: ${weekly_realized:+.2f} / ${TARGET_PROFIT:.0f}**")
+# Goal Tracker (using realized P&L only)
+progress = max(0.0, min(weekly_realized / WEEKLY_PROFIT_TARGET, 1.0)) if WEEKLY_PROFIT_TARGET > 0 else 0.0
+remaining = max(WEEKLY_PROFIT_TARGET - weekly_realized, 0)
+colC.markdown(f"**Weekly Goal Progress: ${weekly_realized:+.2f} / ${WEEKLY_PROFIT_TARGET:.0f}**")
 colC.progress(progress)
 colC.caption(f"💰 Remaining to target: ${remaining:.2f}")
 
@@ -546,7 +504,7 @@ tab_live, tab_signals, tab_backtest, tab_liq = st.tabs(
 # TAB 1 — LIVE TRADING (with session selector)
 # ─────────────────────────────────────────────
 with tab_live:
-    st.write(f"## 🎯 Weekly Goal: ${TARGET_PROFIT:.0f} USD")
+    st.write(f"## 🎯 Weekly Goal: ${WEEKLY_PROFIT_TARGET:.0f} USD")
     
     session_option = st.radio(
         "Select trading session to view:",
@@ -571,7 +529,7 @@ with tab_live:
         else:
             st.dataframe(session_trades, use_container_width=True)
             
-            # Per‑strategy P&L (case‑insensitive)
+            # Per‑strategy P&L
             strategy_col = None
             for col in session_trades.columns:
                 if col.lower() == 'strategy':
@@ -682,7 +640,7 @@ with tab_backtest:
         st.dataframe(results)
 
 # ─────────────────────────────────────────────
-# TAB 4 — INDIVIDUAL LIQUIDATION (with PIN, persistent dropdown)
+# TAB 4 — INDIVIDUAL LIQUIDATION (unchanged, but uses persistent dropdown)
 # ─────────────────────────────────────────────
 with tab_liq:
     st.write("## 🧹 Individual Position Liquidation")
@@ -722,7 +680,6 @@ with tab_liq:
                 st.info("No open positions to liquidate.")
                 st.session_state.liq_selected_label = None
             else:
-                # Build dropdown options
                 position_options = {}
                 for p in positions:
                     symbol = p.symbol
@@ -740,18 +697,15 @@ with tab_liq:
 
                 option_labels = list(position_options.keys())
 
-                # Validate stored selection
                 if st.session_state.liq_selected_label not in option_labels:
                     st.session_state.liq_selected_label = option_labels[0] if option_labels else None
 
-                # Selectbox with stored value
                 selected_label = st.selectbox(
                     "Select position to liquidate",
                     option_labels,
                     index=option_labels.index(st.session_state.liq_selected_label) if st.session_state.liq_selected_label in option_labels else 0,
                     key="liq_select_widget"
                 )
-                # Update stored selection if changed
                 if selected_label != st.session_state.liq_selected_label:
                     st.session_state.liq_selected_label = selected_label
 
@@ -815,7 +769,6 @@ with tab_liq:
                                 ))
                                 st.success(f"✅ Market order placed to sell {qty:.4f} shares of {symbol}.")
 
-                            # Calculate P&L
                             entry_price = entry_price_from_position
                             sell_price = current_price
                             pl_usd = (sell_price - entry_price) * sold_qty
@@ -838,7 +791,6 @@ with tab_liq:
                                 "strategy": selected_strategy,
                             }
 
-                            # Insert into Supabase
                             result = supabase.table("realized_trades").insert(trade_record).execute()
                             if hasattr(result, 'error') and result.error:
                                 st.error(f"Supabase insert error: {result.error}")
@@ -846,13 +798,11 @@ with tab_liq:
                                 st.success("✅ Trade recorded in database.")
                                 st.session_state.realized_trades.insert(0, trade_record)
 
-                            # Remove from open_positions table
                             try:
                                 supabase.table("open_positions").delete().eq("symbol", symbol).execute()
                             except:
                                 pass
 
-                            # Clear stored selection and refresh
                             st.session_state.liq_selected_label = None
                             st.rerun()
                         except Exception as e:
@@ -872,33 +822,20 @@ with tab_liq:
             st.rerun()
 
 # ─────────────────────────────────────────────
-# P&L RECONCILIATION HELPER (optional)
+# P&L RECONCILIATION HELPER
 # ─────────────────────────────────────────────
 with st.expander("🔍 P&L Reconciliation Helper", expanded=False):
     st.markdown("""
-    **Why realized P&L may not match Alpaca daily change?**
-    - Alpaca's daily change includes **unrealized P&L** on open positions.
-    - Your dashboard’s realized P&L only includes **closed trades**.
-    - Trading session dates (9:30 PM SGT → 4:00 AM SGT) differ from calendar days.
-    
-    **SQL to verify trading session P&L:**
+    **Why weekly delta (portfolio change) may differ from realized+unrealized?**
+    - Dividends, fees, or cash adjustments can cause a small discrepancy.
+    - The dashboard now uses portfolio change for consistency with Alpaca.
     """)
     st.code("""
-WITH session_trades AS (
-    SELECT *,
-        CASE 
-            WHEN time_sgt >= '21:30:00' THEN date::DATE
-            WHEN time_sgt < '04:00:00' THEN (date::DATE - INTERVAL '1 day')::DATE
-            ELSE date::DATE
-        END AS session_start_date
-    FROM realized_trades
-)
-SELECT session_start_date, strategy, SUM(pl_usd) AS total_pl
-FROM session_trades
-GROUP BY session_start_date, strategy
-ORDER BY session_start_date DESC, strategy;
+-- Check weekly realized P&L
+SELECT SUM(pl_usd) FROM realized_trades 
+WHERE date >= (SELECT week_start_date FROM weekly_baseline ORDER BY week_start_date DESC LIMIT 1);
     """, language="sql")
 
 # ─────────────────────────────────────────────
-# NO AUTO-REFRESH – user must click Refresh Trades Data button
+# NO AUTO-REFRESH
 # ─────────────────────────────────────────────
