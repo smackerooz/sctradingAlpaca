@@ -30,6 +30,54 @@ import streamlit.components.v1 as components
 from supabase import create_client, Client
 
 # ─────────────────────────────────────────────
+# HTML TABLE HELPER — bypasses st.dataframe iframe rendering
+# ─────────────────────────────────────────────
+def render_html_table(df: pd.DataFrame, pl_col: str = "pl_usd") -> None:
+    """
+    Renders a DataFrame as a fully styled HTML table.
+    CSS can reach this unlike st.dataframe which renders inside an iframe.
+    Green/red colouring applied to pl_usd column automatically.
+    """
+    if df.empty:
+        st.info("No data.")
+        return
+
+    def _cell(val, col):
+        style = ""
+        if col == pl_col:
+            try:
+                v = float(str(val).replace("$","").replace("+","").replace(",",""))
+                style = "color:#4ade80;font-weight:600;" if v >= 0 else "color:#f87171;font-weight:600;"
+            except:
+                pass
+        elif col in ("pl_display", "pl_pct"):
+            s = str(val)
+            style = "color:#4ade80;font-weight:600;" if "🟢" in s or "+" in s else "color:#f87171;font-weight:600;"
+        return f'<td style="padding:8px 12px;border-bottom:1px solid #1e2330;white-space:nowrap;{style}">{val}</td>'
+
+    headers = "".join(
+        f'<th style="padding:8px 12px;border-bottom:2px solid #1e2330;color:#5a6478;'
+        f'font-size:10px;letter-spacing:0.1em;text-transform:uppercase;'
+        f'font-weight:500;text-align:left;white-space:nowrap;">{col}</th>'
+        for col in df.columns
+    )
+    rows_html = ""
+    for i, (_, row) in enumerate(df.iterrows()):
+        bg = "#0f1219" if i % 2 == 0 else "#0d0f14"
+        cells = "".join(_cell(row[col], col) for col in df.columns)
+        rows_html += f'<tr style="background:{bg};">{cells}</tr>'
+
+    table_html = f"""
+    <div style="overflow-x:auto;border:1px solid #1e2330;border-radius:6px;margin-bottom:8px;">
+        <table style="width:100%;border-collapse:collapse;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#c8cdd6;">
+            <thead><tr style="background:#131720;">{headers}</tr></thead>
+            <tbody>{rows_html}</tbody>
+        </table>
+    </div>"""
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────
 # PAGE CONFIG — must be first Streamlit call
 # ─────────────────────────────────────────────
 st.set_page_config(
@@ -765,7 +813,7 @@ with tab_live:
 
     if not sess_trades.empty:
         display_cols = [c for c in ["date","symbol","strategy","buy_price","sell_price","qty","pl_usd","pl_display","reason","time_sgt"] if c in sess_trades.columns]
-        st.dataframe(sess_trades[display_cols], use_container_width=True, hide_index=True)
+        render_html_table(sess_trades[display_cols], pl_col="pl_usd")
 
         # Per-strategy breakdown
         if "strategy" in sess_trades.columns:
@@ -778,7 +826,7 @@ with tab_live:
             ).reset_index()
             strat_summary["Total_PL"] = strat_summary["Total_PL"].apply(lambda x: f"${x:+.2f}")
             strat_summary["Avg_PL"]   = strat_summary["Avg_PL"].apply(lambda x: f"${x:+.2f}")
-            st.dataframe(strat_summary, use_container_width=True, hide_index=True)
+            render_html_table(strat_summary, pl_col="Total_PL")
     else:
         st.info("No trades for this session.")
 
