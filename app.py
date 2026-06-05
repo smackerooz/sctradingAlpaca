@@ -118,17 +118,41 @@ html, body, [class*="css"] {
     font-weight: 600;
 }
 
-/* ── Dataframe ── */
-[data-testid="stDataFrame"] { border: 1px solid #1e2330; border-radius: 6px; }
-.dvn-scroller { background: #0d0f14 !important; }
+/* ── Dataframe — force light background so text is visible ── */
+[data-testid="stDataFrame"] {
+    border: 1px solid #1e2330;
+    border-radius: 6px;
+}
+/* The inner glide-data-grid canvas renders its own colours — don't override */
+[data-testid="stDataFrame"] > div { background: #131720 !important; }
+/* Fallback for non-canvas cells */
+.dvn-scroller { background: #131720 !important; }
+[data-testid="stDataFrame"] iframe { background: #131720 !important; }
 
-/* ── Expander ── */
+/* ── Expander — ensure content area has visible background ── */
 [data-testid="stExpander"] {
     background: #0d0f14;
     border: 1px solid #1e2330;
     border-radius: 6px;
 }
-[data-testid="stExpander"] summary { color: #8899bb; font-family: 'IBM Plex Mono', monospace; font-size: 12px; }
+[data-testid="stExpander"] summary {
+    color: #8899bb;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+}
+/* Content inside expander — must not inherit #0a0c10 which hides text */
+[data-testid="stExpander"] > div > div {
+    background: #0d0f14 !important;
+    color: #c8cdd6 !important;
+}
+/* Tables inside expanders */
+[data-testid="stExpander"] [data-testid="stDataFrame"] > div {
+    background: #131720 !important;
+}
+[data-testid="stExpander"] [data-testid="stDataFrame"] iframe {
+    background: #131720 !important;
+    color-scheme: dark;
+}
 
 /* ── Select / Input ── */
 [data-baseweb="select"] > div { background: #0d0f14 !important; border-color: #1e2330 !important; }
@@ -535,6 +559,44 @@ with st.sidebar:
     st.metric("Buying Power", f"${buying_power:,.2f}")
     st.metric("Today P&L",    f"${daily_pl_alpaca:+.2f}",
               delta=f"{'▲' if daily_pl_alpaca >= 0 else '▼'} Alpaca")
+
+    # ── Weekly baseline comparison card ────────────────────────
+    st.markdown("---")
+    _wk_color = "#4ade80" if weekly_delta >= 0 else "#f87171"
+    _wk_arrow = "▲" if weekly_delta >= 0 else "▼"
+    _wk_pct   = (weekly_delta / baseline * 100) if baseline and baseline != 0 else 0
+    _wk_prog  = min(max(weekly_delta / WEEKLY_TARGET, 0), 1) * 100 if WEEKLY_TARGET > 0 else 0
+    st.markdown(
+        f"""
+        <div style="background:#0f1219;border:1px solid #1e2330;border-left:3px solid {_wk_color};
+            border-radius:6px;padding:12px 14px;font-family:'IBM Plex Mono',monospace;margin-bottom:4px;">
+            <div style="font-size:10px;letter-spacing:0.1em;color:#5a6478;
+                text-transform:uppercase;margin-bottom:8px;">📅 Weekly Progress</div>
+            <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:4px;">
+                <div>
+                    <div style="font-size:9px;color:#5a6478;margin-bottom:2px;">START OF WEEK</div>
+                    <div style="font-size:14px;font-weight:600;color:#8899bb;">${baseline:,.2f}</div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:9px;color:#5a6478;margin-bottom:2px;">NOW</div>
+                    <div style="font-size:14px;font-weight:600;color:#e2e8f0;">${portfolio_value:,.2f}</div>
+                </div>
+            </div>
+            <div style="font-size:15px;font-weight:700;color:{_wk_color};margin:6px 0 2px 0;">
+                {_wk_arrow} ${weekly_delta:+.2f}
+                <span style="font-size:11px;font-weight:400;">({_wk_pct:+.2f}%)</span>
+            </div>
+            <div style="font-size:9px;color:#5a6478;margin-bottom:4px;">
+                Target ${WEEKLY_TARGET:.0f} &nbsp;·&nbsp; {_wk_prog:.0f}% reached
+            </div>
+            <div style="background:#1e2330;border-radius:3px;height:4px;width:100%;">
+                <div style="height:4px;border-radius:3px;width:{_wk_prog:.1f}%;
+                    background:linear-gradient(90deg,#4ade80,#22d3ee);"></div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.markdown("---")
     st.markdown(f'<div class="sub mono">Market: {"🟢 OPEN" if market_open else "🔴 CLOSED"}</div>', unsafe_allow_html=True)
