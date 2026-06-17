@@ -1,13 +1,14 @@
 """
-Tradingbot_v3_Expanded.py — High-Performance ORB-R + VWAP Engine (50 Stocks)
+Tradingbot_v3_Final.py — High-Performance ORB-R + VWAP Engine (50 Stocks)
 ─────────────────────────────────────────────────────────────────────────
-CHANGES:
+OPTIMIZATIONS & UPDATES:
   1. Watchlist expanded to 50 institutional high-conviction names.
   2. High-volatility profile array expanded for specialized stop logic.
   3. Batch data pipelines dynamically map matrix data for the larger payload.
+  4. Patched syntax anomaly in candlestick processing algorithms.
 
 Run on Railway:
-    Start command: python Tradingbot_v3_Expanded.py
+    Start command: python Tradingbot_v3_Final.py
 """
 
 import os
@@ -245,7 +246,7 @@ def is_hammer(c: pd.Series) -> bool:
 def is_inverted_hammer(c: pd.Series) -> bool:
     body, total = abs(c["close"] - c["open"]), c["high"] - c["low"]
     uw = c["high"] - max(c["close"], c["open"])
-    return total > 0 customize and body > 0 and (uw >= 2 * body) and (body / total <= 0.35)
+    return total > 0 and body > 0 and (uw >= 2 * body) and (body / total <= 0.35)
 
 def is_bullish_engulfing(p: pd.Series, c: pd.Series) -> bool:
     return p["close"] < p["open"] and c["close"] > c["open"] and c["open"] <= p["close"] and c["close"] >= p["open"]
@@ -457,9 +458,9 @@ def run_orb_strategy(held: dict, batch_df: pd.DataFrame) -> float:
         if not check_reversal_candle(today_df, box_high, ORB_RETEST_TOL_PCT): continue
 
         confirm_candle = today_df.iloc[-1]
-        entry_price    = round(float(confirm_candle["close"]), 4)
-        stop_price     = round(min(round(float(confirm_candle["low"]) * 0.999, 4), entry_price - (entry_price * (0.01 if symbol in HIGH_VOL_STOCKS else 0.005))), 4)
-        risk           = entry_price - stop_price
+        entry_price = round(float(confirm_candle["close"]), 4)
+        stop_price = round(min(round(float(confirm_candle["low"]) * 0.999, 4), entry_price - (entry_price * (0.01 if symbol in HIGH_VOL_STOCKS else 0.005))), 4)
+        risk = entry_price - stop_price
         
         if risk <= 0 or risk / entry_price > 0.05: continue
 
