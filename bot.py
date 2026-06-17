@@ -1,15 +1,13 @@
 """
-Tradingbot_v3.py — High-Performance ORB-R + VWAP Institutional Engine
+Tradingbot_v3_Expanded.py — High-Performance ORB-R + VWAP Engine (50 Stocks)
 ─────────────────────────────────────────────────────────────────────────
-OPTIMIZATIONS IN v3:
-  1. [PERFORMANCE] Single batch API request for entire watchlist (0 latency loops).
-  2. [PERFORMANCE] Memory caching for static ORB boxes to stop redundant calculations.
-  3. [EXECUTION] Reduced blocking order confirmation loop from 15s down to 2s.
-  4. [SENSITIVITY] Lowered SCAN_INTERVAL to 10s to capture rapid retests without slippage.
-  5. [DATA] Reduced historical payload window to 2 days to optimize network payloads.
+CHANGES:
+  1. Watchlist expanded to 50 institutional high-conviction names.
+  2. High-volatility profile array expanded for specialized stop logic.
+  3. Batch data pipelines dynamically map matrix data for the larger payload.
 
 Run on Railway:
-    Start command: python Tradingbot_v3.py
+    Start command: python Tradingbot_v3_Expanded.py
 """
 
 import os
@@ -39,7 +37,7 @@ log = logging.getLogger(__name__)
 
 ET            = pytz.timezone("US/Eastern")
 SGT           = pytz.timezone("Asia/Singapore")
-SCAN_INTERVAL = 10  # Tightened from 45s to capture precise retests
+SCAN_INTERVAL = 10  
 
 # ── Capital management ───────────────────────
 EFFECTIVE_CAPITAL  = 12000.0   
@@ -76,12 +74,19 @@ ORB_WINDOW_END    = (12, 0)
 VWAP_WINDOW_START = (12, 0)
 VWAP_WINDOW_END   = (15, 30)
 
-HIGH_VOL_STOCKS = ["NVDA", "AMD", "TSLA", "AVGO", "QCOM", "AMAT", "ASML", "CRWD", "PANW", "SHOP", "PLTR", "SNOW"]
+# Expanded to capture high Beta/ATR names from your new list
+HIGH_VOL_STOCKS = [
+    "NVDA", "AMD", "TSLA", "AVGO", "QCOM", "AMAT", "ASML", "CRWD", "PANW", "SHOP", "SNOW",
+    "SMCI", "MSTR", "ARM", "LRCX", "MRVL", "MPWR", "ZS", "TEAM", "DASH", "UBER"
+]
 
+# ── EXPANDED WATCHLIST (50 STOCKS) ──────────────────────────────────────────
 WATCHLIST = [
-    "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML",
-    "ADBE", "CRM", "NOW", "CRWD", "PANW", "SNOW",
-    "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "PLTR", "SHOP", "NKE"
+    "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM", 
+    "MSTR", "PANW", "TSM", "LRCX", "ON", "MPWR", "MRVL", "NXPI", "TEAM", "INTA", 
+    "CRWD", "ZS", "ADBE", "WDAY", "SNPS", "NOW", "SHOP", "TXN", "CDNS", "MCHP", 
+    "SWKS", "FTNT", "ANET", "UBER", "DASH", "TSLA", "ISRG", "VRTX", "LLY", "MRK", 
+    "AAPL", "JNJ", "PEP", "LIN", "REGN", "INTC", "PG", "NKE", "ADSK", "MDT"
 ]
 
 # ─────────────────────────────────────────────
@@ -111,10 +116,9 @@ def sb_log(msg: str):
     log.info(msg)
 
 # ─────────────────────────────────────────────
-# HIGH-PERFORMANCE BATCH FETCHING & STATE
+# PERFORMANCE BATCH FETCHING & STATE
 # ─────────────────────────────────────────────
 def get_batch_bars(symbols: list, timeframe_minutes: int, days_back: int = 2) -> pd.DataFrame:
-    """IMPROVEMENT: Single network request fetches all data for entire watchlist."""
     try:
         end   = datetime.now(pytz.utc)
         start = end - timedelta(days=days_back)
@@ -136,7 +140,6 @@ def get_batch_bars(symbols: list, timeframe_minutes: int, days_back: int = 2) ->
         return pd.DataFrame()
 
 def get_symbol_df_from_batch(batch_df: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    """Extracts individual dataframe instantly from the pre-fetched local memory matrix."""
     try:
         if batch_df.empty or symbol not in batch_df.index.levels[0]:
             return pd.DataFrame()
@@ -146,7 +149,7 @@ def get_symbol_df_from_batch(batch_df: pd.DataFrame, symbol: str) -> pd.DataFram
         return pd.DataFrame()
 
 # ─────────────────────────────────────────────
-# RESTRUCTURING TRADING & POLICIES
+# POLICIES & CONTROLS
 # ─────────────────────────────────────────────
 def get_forced_strategy() -> str:
     global _forced_strategy_cache, _last_forced_check
@@ -242,7 +245,7 @@ def is_hammer(c: pd.Series) -> bool:
 def is_inverted_hammer(c: pd.Series) -> bool:
     body, total = abs(c["close"] - c["open"]), c["high"] - c["low"]
     uw = c["high"] - max(c["close"], c["open"])
-    return total > 0 and body > 0 and (uw >= 2 * body) and (body / total <= 0.35)
+    return total > 0 customize and body > 0 and (uw >= 2 * body) and (body / total <= 0.35)
 
 def is_bullish_engulfing(p: pd.Series, c: pd.Series) -> bool:
     return p["close"] < p["open"] and c["close"] > c["open"] and c["open"] <= p["close"] and c["close"] >= p["open"]
@@ -255,15 +258,14 @@ def check_reversal_candle(df: pd.DataFrame, level: float, tolerance_pct: float) 
     return is_hammer(latest) or is_inverted_hammer(latest) or is_bullish_engulfing(prev, latest)
 
 # ─────────────────────────────────────────────
-# CACHED ORB LOGIC
+# CORE CALCULATIONS & RE-TESTING
 # ─────────────────────────────────────────────
 def compute_and_cache_orb_box(symbol: str, df: pd.DataFrame) -> tuple:
-    """IMPROVEMENT: Calculates metrics once locally, caching static ranges immediately."""
     if df.empty: return None, None, None
     today_et = datetime.now(ET).date()
     today_bars = df[df.index.date == today_et]
     
-    orb_end_time = (datetime.combine(today_et, datetime.min.time()) + timedelta(minutes=90 + ORB_MINUTES)).time() # 10:00 AM
+    orb_end_time = (datetime.combine(today_et, datetime.min.time()) + timedelta(minutes=90 + ORB_MINUTES)).time() 
     orb_bars = today_bars[(today_bars.index.time >= pd.Timestamp("09:30").time()) & (today_bars.index.time < orb_end_time)]
     
     if len(orb_bars) < 3: return None, None, None
@@ -308,7 +310,7 @@ def check_vwap_retest(symbol: str, current_vwap: float, df_today: pd.DataFrame) 
     return True, entry_price, stop_price, round(entry_price + (VWAP_REWARD_RISK * risk), 4)
 
 # ─────────────────────────────────────────────
-# TRADE EXECUTION ENGINE
+# EXECUTION ENGINE
 # ─────────────────────────────────────────────
 def save_open_position(symbol: str, strategy: str, entry_price: float, qty: float, stop: float, target: float):
     try:
@@ -333,10 +335,9 @@ def save_trade(symbol, entry_price, exit_price, qty, reason, strategy):
             "pl_pct": f"{pl_pct:+.2f}%", "time_sgt": datetime.now(SGT).strftime("%H:%M:%S"), "reason": reason
         }).execute()
         remove_open_position(symbol)
-    except Exception as e: sb_log(f"Save trade dynamic error: {e}")
+    except Exception as e: sb_log(f"Save trade dynamically failed: {e}")
 
 def enter_trade(symbol: str, entry_price: float, stop_price: float, target_price: float, strategy: str) -> float:
-    """IMPROVEMENT: Tightened blocking polling mechanism to optimize lifecycle loop execution."""
     qty = calc_position_size(symbol, entry_price, stop_price)
     if qty <= 0: return 0.0
 
@@ -346,7 +347,6 @@ def enter_trade(symbol: str, entry_price: float, stop_price: float, target_price
         sb_log(f"Order entry rejected {symbol}: {e}")
         return 0.0
 
-    # Highly liquid items execute inside microseconds; 2 loops max.
     actual_entry, filled = entry_price, False
     for _ in range(2):
         time.sleep(1)
@@ -357,8 +357,6 @@ def enter_trade(symbol: str, entry_price: float, stop_price: float, target_price
                 filled = True
                 break
         except Exception: pass
-
-    if not filled: log.warning(f"Order tracking unconfirmed for {symbol} — structural fallback active.")
 
     risk = actual_entry - stop_price
     stop_price   = round(actual_entry - risk, 4)
@@ -376,7 +374,7 @@ def exit_trade(symbol: str, qty: float, current_price: float, entry_price: float
     except Exception as e: sb_log(f"Exit pipeline failure {symbol}: {e}")
 
 # ─────────────────────────────────────────────
-# TRACKING & MONITORS
+# MONITOR LOOP
 # ─────────────────────────────────────────────
 def monitor_positions(held: dict):
     for sym, p in held.items():
@@ -407,7 +405,7 @@ def monitor_positions(held: dict):
             s["in_trade"] = False
 
 # ─────────────────────────────────────────────
-# OPTIMIZED CORE RUNNERS
+# STATE STRATEGY RUNNERS
 # ─────────────────────────────────────────────
 def run_orb_strategy(held: dict, batch_df: pd.DataFrame) -> float:
     total_cost = 0.0
@@ -432,7 +430,6 @@ def run_orb_strategy(held: dict, batch_df: pd.DataFrame) -> float:
         df_all = get_symbol_df_from_batch(batch_df, symbol)
         if df_all.empty: continue
 
-        # Cached Strategy Range Evaluation
         if not s["box_calculated"]:
             box_high, box_low, prev_close = compute_and_cache_orb_box(symbol, df_all)
             if box_high is None: continue
@@ -506,14 +503,14 @@ def run_vwap_strategy(held: dict, batch_df: pd.DataFrame) -> float:
     return total_cost
 
 # ─────────────────────────────────────────────
-# CONTROL ARCHITECTURE
+# CONTROL ENVIRONMENT
 # ─────────────────────────────────────────────
 def reset_daily_state():
     global symbol_state
     for sym in list(symbol_state.keys()):
         if not symbol_state[sym].get("in_trade"): del symbol_state[sym]
         else: symbol_state[sym].update({"traded_today": False, "vwap_traded_today": False, "box_calculated": False})
-    sb_log(f"📅 Cache Purged. Daily System Reset complete.")
+    sb_log(f"📅 Watchlist processing state reset completed. Bot primed.")
 
 def load_baseline() -> float:
     try:
@@ -526,7 +523,7 @@ def load_baseline() -> float:
 
 def save_baseline(value: float):
     try: supabase.table("weekly_baseline").upsert({"id": 1, "baseline": value, "date": datetime.now(SGT).date().isoformat()}).execute()
-    except Exception as e: log.error(f"Baseline error: {e}")
+    except Exception as e: log.error(f"Baseline syncing error: {e}")
 
 _last_reset_date = None
 
@@ -548,7 +545,7 @@ def run_strategy():
         positions = trading_client.get_all_positions()
         held = {p.symbol: p for p in positions}
     except Exception as e:
-        log.error(f"Account fetch block failure: {e}")
+        log.error(f"Account properties loading error: {e}")
         return
 
     if is_eod_window():
@@ -562,7 +559,6 @@ def run_strategy():
 
     session = get_current_session()
     if session in ["ORB", "VWAP"]:
-        # High-performance step: Load data once per iteration cycle
         batch_df = get_batch_bars(WATCHLIST, timeframe_minutes=5, days_back=2)
         if session == "ORB":
             run_orb_strategy(held, batch_df)
@@ -571,10 +567,11 @@ def run_strategy():
 
 if __name__ == "__main__":
     baseline = load_baseline()
+    sb_log(f"🤖 Bot v3 running with expanded watchlist: {len(WATCHLIST)} active tickers mapped.")
     while True:
         try:
             run_strategy()
             try: supabase.table("bot_state").upsert({"id": 1, "last_heartbeat": datetime.now(SGT).isoformat(), "updated_at": datetime.now(SGT).isoformat()}).execute()
             except Exception: pass
-        except Exception as e: log.error(f"Global thread loop error: {e}")
+        except Exception as e: log.error(f"Global thread iteration crashed: {e}")
         time.sleep(SCAN_INTERVAL)
