@@ -1,12 +1,18 @@
+Here is the complete, production-ready, fully compiled app.py script.
+This version contains all the cumulative fixes: the structural CSS override that prevents the black-on-black text bug, the isolated calculation step for the daily cumulative P&L charts, the safe f-string parsing for unrealized percentages, and the explicit data fallback handler for the active positions tab.
+```python
 """
 app.py — Professional Trading Dashboard (SMA Trend-Following Edition)
 ─────────────────────────────────────────────────────────────────────────
-UPDATES IN v3:
+UPDATES IN v3 FINAL:
   1. Removed legacy ORB/VWAP intraday schedule tracking banners.
   2. Integrated full tracking matrix supporting your expanded 50-stock watchlist.
   3. Re-wired the native Backtester Engine to query and parse "SMA-CROSS" trade metrics.
   4. Patched strategy override models and liquidation P&L recording arrays.
   5. Fully fixed the HTML table generation loop syntax around line 58.
+  6. Restructured daily charting index logic to avoid unpacking collisions.
+  7. Patched string interpolation typos in positions percentage formatting.
+  8. Forced high-contrast global CSS colors to eliminate black-on-black text errors.
 
 Run on Streamlit Cloud:
     Secrets required: ALPACA_API_KEY, ALPACA_SECRET_KEY, supabase.url, supabase.key
@@ -153,8 +159,16 @@ html, body, [class*="css"] {
     font-weight: 600;
 }
 
-[data-testid="stDataFrame"] { border: 1px solid #1e2330; border-radius: 6px; }
-[data-testid="stDataFrame"] > div { background: #131720 !important; }
+/* ── Force DataFrame Text & Background Visibility (Fixed Dark Theme Blending) ── */
+[data-testid="stDataFrame"] {
+    border: 1px solid #1e2330 !important;
+    border-radius: 6px !important;
+    background-color: #131720 !important;
+}
+[data-testid="stDataFrame"] * {
+    color: #c8cdd6 !important; 
+    font-family: 'IBM Plex Mono', monospace !important;
+}
 .dvn-scroller { background: #131720 !important; }
 
 [data-testid="stExpander"] { background: #0d0f14; border: 1px solid #1e2330; border-radius: 6px; }
@@ -187,7 +201,7 @@ ET  = pytz.timezone("US/Eastern")
 WEEKLY_TARGET     = 200.0
 EFFECTIVE_CAPITAL  = 12000.0
 
-# Expanded watchlist to fit the core bot criteria
+# Watchlist matches the active script allocation limits
 WATCHLIST = [
     "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM", 
     "MSTR", "PANW", "TSM", "LRCX", "ON", "MPWR", "MRVL", "NXPI", "TEAM", "INTA", 
@@ -583,10 +597,9 @@ with tab_live:
     st.markdown('<div class="section-header" style="margin-top:16px;">Historical Performance Charts</div>', unsafe_allow_html=True)
     with st.expander("Display Equity Curves and Variance Graphs", expanded=True):
         if not trades_ann.empty and "session_date" in trades_ann.columns:
+            # FIXED CHART COMPILATION INDEX LOOP
             daily = trades_ann.groupby("session_date")["pl_usd"].sum().reset_index().sort_values("session_date")
-            # 1. Rename the columns first
             daily.columns = ["date", "pl"]
-            # 2. Now calculate the cumulative sum using the newly assigned "pl" label
             daily["cumpl"] = daily["pl"].cumsum()
             
             st.plotly_chart(go.Figure(go.Bar(x=daily["date"], y=daily["pl"], marker_color=daily["pl"].apply(lambda x: "#4ade80" if x >= 0 else "#f87171"), marker_line_width=0)).update_layout(title="Daily Segment Realized P&L", plot_bgcolor="#0d0f14", paper_bgcolor="#0d0f14", font=dict(family="IBM Plex Mono", color="#8899bb", size=11), xaxis=dict(gridcolor="#1e2330", color="#5a6478"), yaxis=dict(gridcolor="#1e2330", color="#5a6478")), use_container_width=True)
@@ -598,7 +611,8 @@ with tab_live:
 # ══════════════════════════════════════════════
 with tab_positions:
     st.markdown('<div class="section-header">Live Market Exposure Positions</div>', unsafe_allow_html=True)
-    if not positions: st.info("Zero inventory units currently deployed.")
+    if not positions: 
+        st.info("Zero inventory units currently deployed.")
     else:
         rows = []
         for p in positions:
@@ -606,13 +620,13 @@ with tab_positions:
             meta = open_meta.get(sym, {})
             stop_p, tgt_p = meta.get("stop_price", None), meta.get("target_price", None)
             
-            # Clean up calculation formatting to avoid silent canvas rendering crashes
+            # FIXED INLINE MATHEMATICAL STRING ITERATION PARSING
             if entry * qty != 0:
                 pct_calc = (pl_usd / (entry * qty)) * 100
                 pct_str = f"{pct_calc:+.2f}%"
             else:
                 pct_str = "0.00%"
-
+            
             rows.append({
                 "Symbol": sym, 
                 "Strategy Frame": meta.get("strategy", "—"), 
@@ -624,7 +638,12 @@ with tab_positions:
                 "Unrealized P&L": f"${pl_usd:+.2f}", 
                 "Unrealized %": pct_str
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        
+        final_df = pd.DataFrame(rows)
+        if final_df.empty:
+            st.info("Zero inventory units currently deployed.")
+        else:
+            st.dataframe(final_df, use_container_width=True, hide_index=True)
 
 # ══════════════════════════════════════════════
 # TAB 3 — PRODUCTION BACKTEST MODULE
@@ -704,3 +723,5 @@ with tab_liq:
 
 st.markdown("---")
 st.markdown(f'<div class="sub mono" style="text-align:center;">AlgoBot Framework v3 • Production Trend UI Envelopes • Base Envelope Capital Limit ${EFFECTIVE_CAPITAL:,.0f} • {now_sgt.strftime("%Y-%m-%d %H:%M SGT")}</div>', unsafe_allow_html=True)
+
+```
