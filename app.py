@@ -1,6 +1,3 @@
-Here is the complete, production-ready, fully compiled app.py script.
-This version contains all the cumulative fixes: the structural CSS override that prevents the black-on-black text bug, the isolated calculation step for the daily cumulative P&L charts, the safe f-string parsing for unrealized percentages, and the explicit data fallback handler for the active positions tab.
-```python
 """
 app.py — Professional Trading Dashboard (SMA Trend-Following Edition)
 ─────────────────────────────────────────────────────────────────────────
@@ -723,5 +720,3 @@ with tab_liq:
 
 st.markdown("---")
 st.markdown(f'<div class="sub mono" style="text-align:center;">AlgoBot Framework v3 • Production Trend UI Envelopes • Base Envelope Capital Limit ${EFFECTIVE_CAPITAL:,.0f} • {now_sgt.strftime("%Y-%m-%d %H:%M SGT")}</div>', unsafe_allow_html=True)
-
-```
