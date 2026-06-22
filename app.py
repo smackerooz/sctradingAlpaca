@@ -584,7 +584,10 @@ with tab_live:
     with st.expander("Display Equity Curves and Variance Graphs", expanded=True):
         if not trades_ann.empty and "session_date" in trades_ann.columns:
             daily = trades_ann.groupby("session_date")["pl_usd"].sum().reset_index().sort_values("session_date")
-            daily.columns, daily["cumpl"] = ["date", "pl"], daily["pl"].cumsum()
+            # 1. Rename the columns first
+            daily.columns = ["date", "pl"]
+            # 2. Now calculate the cumulative sum using the newly assigned "pl" label
+            daily["cumpl"] = daily["pl"].cumsum()
             
             st.plotly_chart(go.Figure(go.Bar(x=daily["date"], y=daily["pl"], marker_color=daily["pl"].apply(lambda x: "#4ade80" if x >= 0 else "#f87171"), marker_line_width=0)).update_layout(title="Daily Segment Realized P&L", plot_bgcolor="#0d0f14", paper_bgcolor="#0d0f14", font=dict(family="IBM Plex Mono", color="#8899bb", size=11), xaxis=dict(gridcolor="#1e2330", color="#5a6478"), yaxis=dict(gridcolor="#1e2330", color="#5a6478")), use_container_width=True)
             st.plotly_chart(go.Figure(go.Scatter(x=daily["date"], y=daily["cumpl"], mode="lines+markers", line=dict(color="#4ade80", width=2), fill="tozeroy", fillcolor="rgba(74,222,128,0.06)")).update_layout(title="Total Cumulative Strategy Yield Curve", plot_bgcolor="#0d0f14", paper_bgcolor="#0d0f14", font=dict(family="IBM Plex Mono", color="#8899bb", size=11), xaxis=dict(gridcolor="#1e2330", color="#5a6478"), yaxis=dict(gridcolor="#1e2330", color="#5a6478", tickprefix="$")), use_container_width=True)
