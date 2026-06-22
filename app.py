@@ -606,11 +606,23 @@ with tab_positions:
             meta = open_meta.get(sym, {})
             stop_p, tgt_p = meta.get("stop_price", None), meta.get("target_price", None)
             
+            # Clean up calculation formatting to avoid silent canvas rendering crashes
+            if entry * qty != 0:
+                pct_calc = (pl_usd / (entry * qty)) * 100
+                pct_str = f"{pct_calc:+.2f}%"
+            else:
+                pct_str = "0.00%"
+
             rows.append({
-                "Symbol": sym, "Strategy Frame": meta.get("strategy", "—"), "Execution Entry": f"${entry:.2f}",
-                "Current Price": f"${current:.2f}", "Stop Bound": f"${float(stop_p):.2f}" if stop_p else "—",
-                "Target Objective": f"${float(tgt_p):.2f}" if tgt_p else "—", "Quantity": round(qty, 4),
-                "Unrealized P&L": f"${pl_usd:+.2f}", "Unrealized %": f"{((pl_usd / (entry * qty)) * 100):+.2f}%" if entry * qty != 0 else "0.00%"
+                "Symbol": sym, 
+                "Strategy Frame": meta.get("strategy", "—"), 
+                "Execution Entry": f"${entry:.2f}",
+                "Current Price": f"${current:.2f}", 
+                "Stop Bound": f"${float(stop_p):.2f}" if stop_p else "—",
+                "Target Objective": f"${float(tgt_p):.2f}" if tgt_p else "—", 
+                "Quantity": round(qty, 4),
+                "Unrealized P&L": f"${pl_usd:+.2f}", 
+                "Unrealized %": pct_str
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
