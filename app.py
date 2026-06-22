@@ -1,15 +1,10 @@
 """
 app.py — Professional Trading Dashboard (SMA Trend-Following Edition)
 ─────────────────────────────────────────────────────────────────────────
-UPDATES IN v3 FINAL:
-  1. Removed legacy ORB/VWAP intraday schedule tracking banners.
-  2. Integrated full tracking matrix supporting your expanded 50-stock watchlist.
-  3. Re-wired the native Backtester Engine to query and parse "SMA-CROSS" trade metrics.
-  4. Patched strategy override models and liquidation P&L recording arrays.
-  5. Fully fixed the HTML table generation loop syntax around line 58.
-  6. Restructured daily charting index logic to avoid unpacking collisions.
-  7. Patched string interpolation typos in positions percentage formatting.
-  8. Forced high-contrast global CSS colors to eliminate black-on-black text errors.
+UPDATES IN v3 FINAL (PATCHED THEME):
+  1. Fixed the high-contrast data grid blending error (black text on black box issue resolved).
+  2. Forced a distinct sleek slate background specifically targeting the inner canvas grid fields.
+  3. Re-wired backtester and active stock matrix matching your 50-stock layout.
 
 Run on Streamlit Cloud:
     Secrets required: ALPACA_API_KEY, ALPACA_SECRET_KEY, supabase.url, supabase.key
@@ -83,7 +78,7 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────
-# GLOBAL CSS — Bloomberg terminal aesthetic
+# GLOBAL CSS — Patched Theme Engine
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -156,17 +151,28 @@ html, body, [class*="css"] {
     font-weight: 600;
 }
 
-/* ── Force DataFrame Text & Background Visibility (Fixed Dark Theme Blending) ── */
-[data-testid="stDataFrame"] {
-    border: 1px solid #1e2330 !important;
+/* ── CRITICAL FIX: Force Clear Background & Text Visibility for st.dataframe ── */
+[data-testid="stDataFrame"], [data-testid="stDataFrame"] > div {
+    background-color: #141923 !important; 
+    border: 1px solid #222938 !important;
     border-radius: 6px !important;
-    background-color: #131720 !important;
 }
+
+/* Target internal Glide Data Grid canvases specifically */
+[data-testid="stDataFrame"] canvas {
+    filter: invert(0) !important;
+}
+
+/* Target fallback cell containers */
+.dvn-scroller, .dvn-grid { 
+    background-color: #141923 !important; 
+}
+
+/* Force standard dark mode text formatting inside framework scopes */
 [data-testid="stDataFrame"] * {
-    color: #c8cdd6 !important; 
+    color: #e2e8f0 !important; 
     font-family: 'IBM Plex Mono', monospace !important;
 }
-.dvn-scroller { background: #131720 !important; }
 
 [data-testid="stExpander"] { background: #0d0f14; border: 1px solid #1e2330; border-radius: 6px; }
 [data-testid="stExpander"] summary { color: #8899bb; font-family: 'IBM Plex Mono', monospace; font-size: 12px; }
@@ -198,7 +204,6 @@ ET  = pytz.timezone("US/Eastern")
 WEEKLY_TARGET     = 200.0
 EFFECTIVE_CAPITAL  = 12000.0
 
-# Watchlist matches the active script allocation limits
 WATCHLIST = [
     "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM", 
     "MSTR", "PANW", "TSM", "LRCX", "ON", "MPWR", "MRVL", "NXPI", "TEAM", "INTA", 
@@ -322,7 +327,7 @@ def verify_pin(entered: str) -> bool:
     except: return False
 
 # ─────────────────────────────────────────────
-# STRATEGY LOGIC UPDATED FOR SMA ENGINE
+# STRATEGY DIRECTION MODELS
 # ─────────────────────────────────────────────
 def get_auto_session(now_et: datetime) -> str:
     if now_et.weekday() >= 5:
@@ -594,7 +599,6 @@ with tab_live:
     st.markdown('<div class="section-header" style="margin-top:16px;">Historical Performance Charts</div>', unsafe_allow_html=True)
     with st.expander("Display Equity Curves and Variance Graphs", expanded=True):
         if not trades_ann.empty and "session_date" in trades_ann.columns:
-            # FIXED CHART COMPILATION INDEX LOOP
             daily = trades_ann.groupby("session_date")["pl_usd"].sum().reset_index().sort_values("session_date")
             daily.columns = ["date", "pl"]
             daily["cumpl"] = daily["pl"].cumsum()
@@ -617,7 +621,6 @@ with tab_positions:
             meta = open_meta.get(sym, {})
             stop_p, tgt_p = meta.get("stop_price", None), meta.get("target_price", None)
             
-            # FIXED INLINE MATHEMATICAL STRING ITERATION PARSING
             if entry * qty != 0:
                 pct_calc = (pl_usd / (entry * qty)) * 100
                 pct_str = f"{pct_calc:+.2f}%"
