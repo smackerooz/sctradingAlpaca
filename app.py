@@ -480,16 +480,13 @@ with tab_watchlist:
         for p in positions:
             alpaca_prices[p.symbol] = float(p.current_price)
             
-    # Fallback to standard tracking arrays if pricing payload requires cache updates
     wl_rows = []
     for ticker in WATCHLIST:
         meta = STOCK_METADATA[ticker]
         
-        # Determine baseline or active asset price frames
         current_p = alpaca_prices.get(ticker, meta["fair"] * np.random.uniform(0.94, 1.05)) 
         fair_p = meta["fair"]
         
-        # 4. Valuation Logic Mapping
         if current_p > fair_p * 1.03:
             valuation = "🔴 Overvalued"
             recommendation = "Sell"
@@ -500,25 +497,38 @@ with tab_watchlist:
             valuation = "🟡 Fair Value"
             recommendation = "Hold"
             
-        # 5. Suggest entry boundaries at optimal market structural layout points
         suggested_entry = fair_p * 0.95
-        
-        # 7. Valuation upside delta percentages calculations
         upside_calc = ((fair_p - current_p) / current_p) * 100
-        upside_display = f"{upside_calc:+.2f}%" if upside_calc > 0 else "0.00% (At Cap)"
         
         wl_rows.append({
             "Ticker": ticker,
             "Company Name": meta["name"],
-            "Current Price": f"${current_p:.2f}",
+            "Current Price": current_p,       # Stored as float for math sorting
+            "Fair Price": fair_p,             # Stored as float
             "Valuation Status": valuation,
-            "Suggested Entry": f"${suggested_entry:.2f}",
-            "Potential Upside": upside_display,
+            "Suggested Entry": suggested_entry, # Stored as float
+            "Potential Upside (%)": round(max(0.0, upside_calc), 2), # Numeric for accurate sorting
             "Recommendation": recommendation,
             "Upcoming Earnings": meta["earn"] if meta["earn"] else "No Date set"
         })
         
     watchlist_df = pd.DataFrame(wl_rows)
     
-    # Render using pure st.table to prevent dark theme canvas clipping bugs
+    # ── NEW INTERACTIVE SORT CONTROLS ──
+    sc1, sc2 = st.columns([1, 2])
+    with sc1:
+        sort_col = st.selectbox("Sort Matrix By:", ["Ticker", "Potential Upside (%)", "Current Price", "Valuation Status"])
+    with sc2:
+        sort_order = st.radio("Order Direction:", ["Descending (Highest/Z-A)", "Ascending (Lowest/A-Z)"], horizontal=True)
+        
+    ascending_flag = (sort_order == "Ascending (Lowest/A-Z)")
+    watchlist_df = watchlist_df.sort_values(by=sort_col, ascending=ascending_flag)
+    
+    # Clean string currency symbols right before printing to the screen
+    watchlist_df["Current Price"] = watchlist_df["Current Price"].apply(lambda x: f"${x:.2f}")
+    watchlist_df["Fair Price"] = watchlist_df["Fair Price"].apply(lambda x: f"${x:.2f}")
+    watchlist_df["Suggested Entry"] = watchlist_df["Suggested Entry"].apply(lambda x: f"${x:.2f}")
+    watchlist_df["Potential Upside (%)"] = watchlist_df["Potential Upside (%)"].apply(lambda x: f"{x:+.2f}%" if x > 0 else "0.00% (At Cap)")
+    
+    # Render using the clean high-contrast table format
     st.table(watchlist_df)
