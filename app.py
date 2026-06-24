@@ -474,16 +474,17 @@ with tab_liq:
 with tab_watchlist:
     st.markdown('<div class="section-header">50-Stock Watchlist Parameter Monitor</div>', unsafe_allow_html=True)
     
-    # 1. Fetch current pricing snapshot across your complete watchlist matrix using the active Alpaca instance
     alpaca_prices = {}
     if positions:
-        for p in positions:
+        for p in positions: 
             alpaca_prices[p.symbol] = float(p.current_price)
             
+    # Priority rank mappings for structural Recommendation sorting
+    rec_priority = {"Strong Buy": 4, "Buy": 3, "Hold": 2, "Sell": 1}
+    
     wl_rows = []
     for ticker in WATCHLIST:
         meta = STOCK_METADATA[ticker]
-        
         current_p = alpaca_prices.get(ticker, meta["fair"] * np.random.uniform(0.94, 1.05)) 
         fair_p = meta["fair"]
         
@@ -500,35 +501,61 @@ with tab_watchlist:
         suggested_entry = fair_p * 0.95
         upside_calc = ((fair_p - current_p) / current_p) * 100
         
+        # Parse earnings strings into timestamp primitives for accurate sorting
+        try: 
+            earn_date = datetime.strptime(meta["earn"], "%b %d, %Y")
+        except: 
+            earn_date = datetime(2099, 12, 31)  # Keeps blank dates pushed to the bottom
+        
         wl_rows.append({
-            "Ticker": ticker,
-            "Company Name": meta["name"],
-            "Current Price": current_p,       # Stored as float for math sorting
-            "Fair Price": fair_p,             # Stored as float
-            "Valuation Status": valuation,
-            "Suggested Entry": suggested_entry, # Stored as float
-            "Potential Upside (%)": round(max(0.0, upside_calc), 2), # Numeric for accurate sorting
+            "Ticker symbol": ticker,
+            "Name": meta["name"],
+            "Current price": current_p,
+            "Fair Price": fair_p,
+            "Current Value": valuation,
+            "Suggested entry price": suggested_entry,
+            "Potential upside": round(max(0.0, upside_calc), 2),
             "Recommendation": recommendation,
-            "Upcoming Earnings": meta["earn"] if meta["earn"] else "No Date set"
+            "Upcoming earnings report": meta["earn"],
+            # Hidden tracks for priority/date sorting engines
+            "_rec_rank": rec_priority.get(recommendation, 0),
+            "_earn_timestamp": earn_date
         })
         
     watchlist_df = pd.DataFrame(wl_rows)
     
-    # ── NEW INTERACTIVE SORT CONTROLS ──
+    # ── ALL 9-COLUMN SORT CONTROLS ──
     sc1, sc2 = st.columns([1, 2])
     with sc1:
-        sort_col = st.selectbox("Sort Matrix By:", ["Ticker", "Potential Upside (%)", "Current Price", "Valuation Status"])
+        sort_col = st.selectbox(
+            "Sort Matrix By Target Parameter:", 
+            [
+                "Ticker symbol", "Name", "Current price", "Fair Price", 
+                "Current Value", "Suggested entry price", "Potential upside", 
+                "Recommendation", "Upcoming earnings report"
+            ]
+        )
     with sc2:
         sort_order = st.radio("Order Direction:", ["Descending (Highest/Z-A)", "Ascending (Lowest/A-Z)"], horizontal=True)
         
     ascending_flag = (sort_order == "Ascending (Lowest/A-Z)")
-    watchlist_df = watchlist_df.sort_values(by=sort_col, ascending=ascending_flag)
     
-    # Clean string currency symbols right before printing to the screen
-    watchlist_df["Current Price"] = watchlist_df["Current Price"].apply(lambda x: f"${x:.2f}")
-    watchlist_df["Fair Price"] = watchlist_df["Fair Price"].apply(lambda x: f"${x:.2f}")
-    watchlist_df["Suggested Entry"] = watchlist_df["Suggested Entry"].apply(lambda x: f"${x:.2f}")
-    watchlist_df["Potential Upside (%)"] = watchlist_df["Potential Upside (%)"].apply(lambda x: f"{x:+.2f}%" if x > 0 else "0.00% (At Cap)")
+    # Dynamic Sorting Engine Route Mapper
+    if sort_col == "Recommendation":
+        watchlist_df = watchlist_df.sort_values(by="_rec_rank", ascending=ascending_flag)
+    elif sort_col == "Upcoming earnings report":
+        watchlist_df = watchlist_df.sort_values(by="_earn_timestamp", ascending=ascending_flag)
+    else:
+        watchlist_df = watchlist_df.sort_values(by=sort_col, ascending=ascending_flag)
+        
+    # Drop sorting placeholders before final UI generation
+    display_df = watchlist_df.drop(columns=["_rec_rank", "_earn_timestamp"])
     
-    # Render using the clean high-contrast table format
-    st.table(watchlist_df)
+    # Currency and Percentage layout transformation
+    display_df["Current price"] = display_df["Current price"].apply(lambda x: f"${x:.2f}")
+    display_df["Fair Price"] = display_df["Fair Price"].apply(lambda x: f"${x:.2f}")
+    display_df["Suggested entry price"] = display_df["Suggested entry price"].apply(lambda x: f"${x:.2f}")
+    display_df["Potential upside"] = display_df["Potential upside"].apply(lambda x: f"{x:+.2f}%" if x > 0 else "0.00% (At Cap)")
+    
+    # Render with pure clean HTML components
+    st.table(display_df)
