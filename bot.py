@@ -1,12 +1,13 @@
 """
 Tradingbot_v4_SMA_RVOL.py — Professional Daily SMA Trend-Following Bot with RVOL Gatekeeper
 ─────────────────────────────────────────────────────────────────────────────
-VERSION 4.2 PRODUCTION UPDATES:
-  1. Fixed Alpaca SDK ImportError by separating data and trading requests.
-  2. Integrated 10-Day Relative Volume (RVOL) filter into the Buy Execution Loop.
-  3. Prevents low-volume false breakouts by requiring institutional volume backing (RVOL >= 1.3x).
-  4. Uses Alpaca Free IEX feed natively for ultra-fast multi-symbol batched scans.
-  5. Automatically synchronizes portfolio constraints (Max 8 concurrent active holdings).
+VERSION 4.3 PRODUCTION UPDATES:
+  1. Fixed Supabase serialization crash by cleaning NumPy types (np.float64) before saving.
+  2. Fixed Alpaca SDK ImportError by separating data and trading requests.
+  3. Integrated 10-Day Relative Volume (RVOL) filter into the Buy Execution Loop.
+  4. Prevents low-volume false breakouts by requiring institutional volume backing (RVOL >= 1.3x).
+  5. Uses Alpaca Free IEX feed natively for ultra-fast multi-symbol batched scans.
+  6. Automatically synchronizes portfolio constraints (Max 8 concurrent active holdings).
 
 Execution Infrastructure: Recommended to deploy 24/7 via Railway or AWS EC2.
 """
@@ -19,10 +20,10 @@ import pandas as pd
 import numpy as np
 import pytz
 
-# ── CORRECTED ALPACA SDK IMPORT MODULES ──
+# ── ALPACA SDK IMPORT MODULES ──
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
-from alpaca.data.requests import StockBarsRequest  # Fixed import separation
+from alpaca.data.requests import StockBarsRequest  
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.timeframe import TimeFrame
 from supabase import create_client, Client
@@ -138,6 +139,15 @@ def run_execution_cycle():
         active_holdings = {p.symbol: p for p in positions}
         logger.info(f"Active Inventory: {len(active_holdings)} / {MAX_CORES_BUDGET} targets currently occupied.")
         
+        # ── TRACK AND UPDATE PEAK PRICES SAFELY ──
+        # Placeholder dictionary simulating active trailing tracker memory
+        peak_prices = {} 
+        for symbol, pos in active_holdings.items():
+            # Dynamically seed peak prices memory with current market prints
+            metrics = process_market_indicators(symbol)
+            if metrics:
+                peak_prices[symbol] = metrics["current_price"]
+        
         # ── PHASE 1: EVALUATE EXITS & TECHNICAL DEGRADATION ──
         for symbol in list(active_holdings.keys()):
             metrics = process_market_indicators(symbol)
@@ -166,50 +176,60 @@ def run_execution_cycle():
         # ── PHASE 2: EVALUATE ENTRYS WITH INSTITUTIONAL RVOL GATEKEEPER ──
         if len(trading_client.get_all_positions()) >= MAX_CORES_BUDGET:
             logger.info("Portfolio capacity fully loaded at max configuration footprint. Skipping entry scan.")
-            return
-            
-        for symbol in WATCHLIST:
-            if symbol in active_holdings:
-                continue # Skip stocks we already own
+        else:
+            for symbol in WATCHLIST:
+                if symbol in active_holdings:
+                    continue # Skip stocks we already own
+                    
+                metrics = process_market_indicators(symbol)
+                if not metrics:
+                    continue
+                    
+                price = metrics["current_price"]
+                sma20 = metrics["sma20"]
+                sma50 = metrics["sma50"]
+                rvol = metrics["rvol"]
                 
-            metrics = process_market_indicators(symbol)
-            if not metrics:
-                continue
-                
-            price = metrics["current_price"]
-            sma20 = metrics["sma20"]
-            sma50 = metrics["sma50"]
-            rvol = metrics["rvol"]
-            
-            # ── STRUCTURAL BUY GATEWAY UNLOCKED BY VOLUME ──
-            if (price > sma20 > sma50) and (rvol >= RVOL_THRESHOLD):
-                # Verify capacity boundary conditions one final check right before sending order
-                if len(trading_client.get_all_positions()) >= MAX_CORES_BUDGET:
-                    break
+                # ── STRUCTURAL BUY GATEWAY UNLOCKED BY VOLUME ──
+                if (price > sma20 > sma50) and (rvol >= RVOL_THRESHOLD):
+                    # Verify capacity boundary conditions one final check right before sending order
+                    if len(trading_client.get_all_positions()) >= MAX_CORES_BUDGET:
+                        break
+                        
+                    logger.info(f"🔥 INSTITUTIONAL ACCUMULATION TRIGGER DETECTED: Ticker={symbol}, RVOL={rvol:.2f}x (Threshold={RVOL_THRESHOLD}x)")
+                    try:
+                        # Risk parameter: 1/8th allocation envelope per core position
+                        cash_available = float(trading_client.get_account().cash)
+                        target_allocation = min(cash_available / (MAX_CORES_BUDGET - len(trading_client.get_all_positions())), cash_available * 0.12)
+                        shares_to_buy = int(target_allocation // price)
+                        
+                        if shares_to_buy > 0:
+                            order = trading_client.submit_order(order_data=MarketOrderRequest(
+                                symbol=symbol,
+                                qty=shares_to_buy,
+                                side=OrderSide.BUY,
+                                time_in_force=TimeInForce.GTC
+                            ))
+                            logger.info(f"Entry order executed successfully via Alpaca API: {order.id} | Qty: {shares_to_buy}")
+                    except Exception as entry_ex:
+                        logger.error(f"Failed submitting purchase ticket for target {symbol}: {entry_ex}")
                     
-                logger.info(f"🔥 INSTITUTIONAL ACCUMULATION TRIGGER DETECTED: Ticker={symbol}, RVOL={rvol:.2f}x (Threshold={RVOL_THRESHOLD}x)")
-                try:
-                    # Risk parameter: 1/8th allocation envelope per core position
-                    cash_available = float(trading_client.get_account().cash)
-                    target_allocation = min(cash_available / (MAX_CORES_BUDGET - len(trading_client.get_all_positions())), cash_available * 0.12)
-                    shares_to_buy = int(target_allocation // price)
-                    
-                    if shares_to_buy > 0:
-                        order = trading_client.submit_order(order_data=MarketOrderRequest(
-                            symbol=symbol,
-                            qty=shares_to_buy,
-                            side=OrderSide.BUY,
-                            time_in_force=TimeInForce.GTC
-                        ))
-                        logger.info(f"Entry order executed successfully via Alpaca API: {order.id} | Qty: {shares_to_buy}")
-                except Exception as entry_ex:
-                    logger.error(f"Failed submitting purchase ticket for target {symbol}: {entry_ex}")
-                    
-        # Update heartbeats inside Supabase engine
+        # ── PHASE 3: DATABASE SYNCHRONIZATION WITH NUMPY CAST CLEANING ──
         try:
-            supabase.table("bot_state").update({"last_heartbeat": datetime.utcnow().isoformat()}).eq("id", 1).execute()
+            # Explicitly force casting of every float inside memory dictionary to Native Python Types
+            clean_peaks = {str(ticker): float(val) for ticker, val in peak_prices.items()}
+            
+            hb_response = supabase.table("bot_state").update({
+                "peak_prices": str(clean_peaks),
+                "last_heartbeat": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat()
+            }).eq("id", 1).execute()
+            
+            logger.info(f"❤️ Heartbeat and state records securely transmitted. Rows synchronized: {len(hb_response.data)}")
+            if len(hb_response.data) == 0:
+                logger.warning("⚠️ Warning: Post payload accepted but zero database keys matched target id=1.")
         except Exception as heartbeat_err:
-            logger.error(f"Heartbeat system synchronization error: {heartbeat_err}")
+            logger.error(f"❌ CRITICAL HEARTBEAT FAILURE: {heartbeat_err}")
             
     except Exception as cycle_ex:
         logger.error(f"Global execution iteration sequence error: {cycle_ex}")
