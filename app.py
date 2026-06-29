@@ -519,36 +519,150 @@ with tab_liq:
     st.caption("Strategic administration override panels. (Not yet implemented.)")
 
 # ══════════════════════════════════════════════
-# TAB 5 — WATCHLIST INTELLIGENCE MATRIX (Simplified Click-to-Sort)
+# TAB 5 — WATCHLIST INTELLIGENCE MATRIX (Click-to-Sort)
 # ══════════════════════════════════════════════
 with tab_watchlist:
     st.markdown('<div class="section-header">📈 Live Watchlist Network (With Institutional RVOL Tracking)</div>', unsafe_allow_html=True)
 
-    # ... [same fetch_live_web_fundamentals and data building code as above] ...
+    @st.cache_data(ttl=21600)  # Caches web results for 6 hours to prevent server rate blocks
+    def fetch_live_web_fundamentals(ticker_list):
+        import yfinance as yf
+        web_data = {}
 
-    # ── CLICK-TO-SORT USING EXPANDER HACK ──
-    # Initialize session state
+        for ticker in ticker_list:
+            try:
+                tick_obj = yf.Ticker(ticker)
+                info = tick_obj.info if tick_obj.info else {}
+
+                current_p = float(info.get("currentPrice", info.get("previousClose", 0.0)) or 0.0)
+
+                # Only use a REAL analyst target if one exists.
+                raw_target = info.get("targetMedianPrice", info.get("targetMeanPrice"))
+                has_target = raw_target is not None
+                fair_p = float(raw_target) if has_target else None
+
+                live_vol = float(info.get("volume", info.get("regularMarketVolume", 1.0)) or 1.0)
+                avg_vol = float(info.get("averageVolume", info.get("averageDailyVolume10Day", 1.0)) or 1.0)
+
+                rvol_calc = live_vol / avg_vol if avg_vol > 0 else 1.0
+                if rvol_calc >= 2.5:
+                    volume_status = f"🚨 Extreme Vol ({rvol_calc:.1f}x)"
+                elif rvol_calc >= 1.5:
+                    volume_status = f"🔥 High Vol ({rvol_calc:.1f}x)"
+                else:
+                    volume_status = f"⚪ Normal ({rvol_calc:.1f}x)"
+
+                calendar = tick_obj.calendar
+                earn_str = "No Date Set"
+                if calendar is not None and "Earnings Date" in calendar:
+                    dates = calendar["Earnings Date"]
+                    if dates and len(dates) > 0:
+                        earn_str = dates[0].strftime("%b %d, %Y")
+
+                web_data[ticker] = {
+                    "name": info.get("longName", f"{ticker} Corp."),
+                    "current_price": current_p,
+                    "fair_price": fair_p,
+                    "has_target": has_target,
+                    "earnings_date": earn_str,
+                    "volume_status": volume_status,
+                    "rvol_raw": rvol_calc,
+                }
+            except Exception:
+                web_data[ticker] = {
+                    "name": f"{ticker} Corp.", "current_price": 0.0, "fair_price": None,
+                    "has_target": False, "earnings_date": "No Date Set",
+                    "volume_status": "⚪ Normal (1.0x)", "rvol_raw": 1.0,
+                }
+        return web_data
+
+    with st.spinner("Synchronizing watchlist data from Yahoo Finance..."):
+        live_market_snapshot = fetch_live_web_fundamentals(WATCHLIST)
+
+    rec_priority = {"Strong Buy": 4, "Buy": 3, "Hold": 2, "Sell": 1, "No Data": 0}
+    wl_rows = []
+
+    for ticker in WATCHLIST:
+        snap = live_market_snapshot.get(ticker, {
+            "name": f"{ticker}", "current_price": 0.0, "fair_price": None,
+            "has_target": False, "earnings_date": "No Date Set",
+            "volume_status": "⚪ Normal (1.0x)", "rvol_raw": 1.0,
+        })
+
+        current_p = snap["current_price"]
+        fair_p = snap["fair_price"]
+        has_target = snap["has_target"]
+        earn_display = snap["earnings_date"]
+
+        if not has_target or fair_p is None or current_p <= 0:
+            valuation = "⚫ No Target Data"
+            recommendation = "No Data"
+            suggested_entry = None
+            upside_calc = None
+        elif current_p > fair_p * 1.03:
+            valuation = "🔴 Overvalued"
+            recommendation = "Sell"
+            suggested_entry = fair_p * 0.95
+            upside_calc = ((fair_p - current_p) / current_p) * 100
+        elif current_p < fair_p * 0.97:
+            valuation = "🟢 Undervalued"
+            recommendation = "Strong Buy" if current_p < fair_p * 0.92 else "Buy"
+            suggested_entry = fair_p * 0.95
+            upside_calc = ((fair_p - current_p) / current_p) * 100
+        else:
+            valuation = "🟡 Fair Value"
+            recommendation = "Hold"
+            suggested_entry = fair_p * 0.95
+            upside_calc = ((fair_p - current_p) / current_p) * 100
+
+        try:
+            earn_date = datetime.strptime(earn_display, "%b %d, %Y")
+        except Exception:
+            earn_date = datetime(2099, 12, 31)
+
+        wl_rows.append({
+            "Ticker symbol": ticker,
+            "Name": snap["name"],
+            "Current price": current_p,
+            "Fair Value (Target)": fair_p,
+            "Current Value": valuation,
+            "Suggested entry price": suggested_entry,
+            "Potential upside": round(upside_calc, 2) if upside_calc is not None else None,
+            "Recommendation": recommendation,
+            "Trading Volume Status": snap["volume_status"],
+            "Any earnings report next?": earn_display,
+            "_rec_rank": rec_priority.get(recommendation, 0),
+            "_earn_timestamp": earn_date,
+            "_rvol_raw": snap["rvol_raw"],
+        })
+
+    # ── CREATE THE DATAFRAME HERE ──
+    watchlist_df = pd.DataFrame(wl_rows)
+
+    # ── CLICK-TO-SORT LOGIC ──
+    # Initialize session state for sorting
     if "watchlist_sort_col" not in st.session_state:
         st.session_state.watchlist_sort_col = "Potential upside"
     if "watchlist_sort_ascending" not in st.session_state:
-        st.session_state.watchlist_sort_ascending = False
+        st.session_state.watchlist_sort_ascending = False  # Default descending
 
     # Get display columns (excluding hidden tracking columns)
     display_columns = [col for col in watchlist_df.columns if not col.startswith("_")]
 
-    # Create clickable header row using columns
-    header_cols = st.columns(len(display_columns))
+    # ── CREATE CLICKABLE HEADER ROW ──
+    st.markdown("### Click on any column header to sort")
+    
+    # Create sort buttons in a row
+    cols = st.columns(len(display_columns))
     for idx, col_name in enumerate(display_columns):
         is_active = st.session_state.watchlist_sort_col == col_name
-        arrow = "🔽" if is_active and st.session_state.watchlist_sort_ascending else "🔼" if is_active and not st.session_state.watchlist_sort_ascending else "↕"
-        color = "#4ade80" if is_active else "#8899bb"
+        arrow = " 🔽" if is_active and st.session_state.watchlist_sort_ascending else " 🔼" if is_active and not st.session_state.watchlist_sort_ascending else " ↕"
         
-        # Use a button styled as a header
-        if header_cols[idx].button(
-            f"{col_name} {arrow}", 
-            key=f"hdr_{idx}",
-            use_container_width=True,
-            help=f"Click to sort by {col_name}"
+        # Use a button for each column header
+        if cols[idx].button(
+            f"{col_name}{arrow}", 
+            key=f"sort_{idx}_{col_name.replace(' ', '_')}",
+            use_container_width=True
         ):
             if st.session_state.watchlist_sort_col == col_name:
                 st.session_state.watchlist_sort_ascending = not st.session_state.watchlist_sort_ascending
@@ -575,7 +689,7 @@ with tab_watchlist:
     else:
         watchlist_df = watchlist_df.sort_values(by=sort_col, ascending=ascending_flag)
 
-    # Remove tracking columns for display
+    # ── PREPARE DISPLAY DATAFRAME ──
     display_df = watchlist_df.drop(columns=["_rec_rank", "_earn_timestamp", "_rvol_raw"])
 
     # Format columns for display
