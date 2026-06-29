@@ -416,17 +416,63 @@ if heartbeat_str:
     except: pass
 
 # ─────────────────────────────────────────────
-# SIDEBAR
+# SIDEBAR WITH THREE DYNAMIC STATUS MODES
 # ─────────────────────────────────────────────
+import datetime
+import pytz
+
 with st.sidebar:
     st.markdown('<div class="section-header">⚡ SMA SWING BOT</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="status-card" style="border-left:3px solid {"#4ade80" if bot_alive else "#f87171"}; color:{"#4ade80" if bot_alive else "#f87171"};">● {"ACTIVE" if bot_alive else "OFFLINE"}</div>', unsafe_allow_html=True)
+    
+    # ── 1. EVALUATE BOT RESPONSE AND MARKET STATES ──
+    try:
+        state_query = supabase.table("bot_state").select("last_heartbeat").eq("id", 1).execute()
+        last_hb_str = state_query.data[0]["last_heartbeat"]
+        last_heartbeat = datetime.datetime.fromisoformat(last_hb_str.replace("Z", "+00:00"))
+        utc_now = datetime.datetime.now(datetime.timezone.utc)
+        
+        # Checking if the process has updated Supabase within the last 10 minutes
+        bot_is_responding = (utc_now - last_heartbeat).total_seconds() < 600
+    except Exception:
+        bot_is_responding = False
+
+    # Check true Eastern Time for US Core Trading Hours (9:30 AM - 4:00 PM)
+    ET = pytz.timezone("US/Eastern")
+    now_et = datetime.datetime.now(ET)
+    
+    market_is_open = (
+        now_et.weekday() < 5 and 
+        ((now_et.hour == 9 and now_et.minute >= 30) or (10 <= now_et.hour < 16))
+    )
+
+    # ── 2. DETERMINE STYLES AND LABELS ──
+    if not bot_is_responding:
+        status_label = "Bot is OFF"
+        status_color = "#f87171"  # Soft Coral Red
+    elif bot_is_responding and not market_is_open:
+        status_label = "Bot is ON but market is closed"
+        status_color = "#fbbf24"  # Amber Yellow
+    else:
+        status_label = "Bot is ON and market is opened"
+        status_color = "#4ade80"  # Bright Emerald Green
+
+    # ── 3. RENDER THE DYNAMIC HTML CARD ──
+    st.markdown(
+        f'<div class="status-card" style="border-left:3px solid {status_color}; color:{status_color}; font-weight:bold;">'
+        f'● {status_label}'
+        f'</div>', 
+        unsafe_allow_html=True
+    )
+    
+    # ── 4. FINANCIAL METRIC ARRAYS ──
     st.metric("Portfolio Value", f"${portfolio_value:,.2f}")
     st.metric("Cash Balance", f"${cash:,.2f}")
     st.metric("Buying Power", f"${buying_power:,.2f}")
     st.metric("Intraday Open P&L", f"${daily_pl_alpaca:+.2f}")
+    
     if st.button("🔄 Reload Matrices", use_container_width=True):
-        st.cache_data.clear(); st.rerun()
+        st.cache_data.clear()
+        st.rerun()
 
 # ─────────────────────────────────────────────
 # LAYOUT RENDERING
