@@ -8,6 +8,8 @@ VERSION 4.3 PRODUCTION UPDATES:
   4. Prevents low-volume false breakouts by requiring institutional volume backing (RVOL >= 1.3x).
   5. Uses Alpaca Free IEX feed natively for ultra-fast multi-symbol batched scans.
   6. Automatically synchronizes portfolio constraints (Max 8 concurrent active holdings).
+  7. Fixed heartbeat JSON serialization - uses proper json.dumps() instead of str().
+  8. Added robust error handling for empty peak_prices and missing database records.
 
 Execution Infrastructure: Recommended to deploy 24/7 via Railway or AWS EC2.
 """
@@ -15,6 +17,7 @@ Execution Infrastructure: Recommended to deploy 24/7 via Railway or AWS EC2.
 import os
 import time
 import logging
+import json  # ✅ ADDED: For proper JSON serialization
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
@@ -66,6 +69,27 @@ try:
 except Exception as e:
     logger.critical(f"Client initialisation vector failure: {e}")
     raise
+
+# ─────────────────────────────────────────────
+# DATABASE INITIALIZATION CHECK
+# ─────────────────────────────────────────────
+def ensure_bot_state_record():
+    """Ensure bot_state has a record with id=1"""
+    try:
+        check = supabase.table("bot_state").select("id").eq("id", 1).execute()
+        if not check.data:
+            logger.warning("⚠️ bot_state id=1 not found. Creating initial record...")
+            supabase.table("bot_state").insert({
+                "id": 1,
+                "peak_prices": "{}",
+                "last_heartbeat": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat()
+            }).execute()
+            logger.info("✅ Created initial bot_state record")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to ensure bot_state record: {e}")
+        return False
 
 # ─────────────────────────────────────────────
 # TECHNICAL ANALYSIS CALCULATORS
@@ -130,6 +154,11 @@ def run_execution_cycle():
     logger.info("Initializing automated scan iteration across 50-stock index portfolio...")
     
     try:
+        # ── INITIALIZATION CHECK ──
+        if not ensure_bot_state_record():
+            logger.error("❌ Cannot proceed - bot_state record missing")
+            return
+        
         account = trading_client.get_account()
         if account.trading_blocked:
             logger.warning("Account status flag locked. Halting order entry.")
@@ -139,14 +168,14 @@ def run_execution_cycle():
         active_holdings = {p.symbol: p for p in positions}
         logger.info(f"Active Inventory: {len(active_holdings)} / {MAX_CORES_BUDGET} targets currently occupied.")
         
-        # ── TRACK AND UPDATE PEAK PRICES SAFELY ──
-        # Placeholder dictionary simulating active trailing tracker memory
-        peak_prices = {} 
-        for symbol, pos in active_holdings.items():
-            # Dynamically seed peak prices memory with current market prints
+        # ── POPULATE PEAK PRICES FOR ALL SYMBOLS ──
+        # ✅ FIXED: Populate for ALL watchlist symbols, not just positions
+        peak_prices = {}
+        for symbol in WATCHLIST:
             metrics = process_market_indicators(symbol)
             if metrics:
                 peak_prices[symbol] = metrics["current_price"]
+        logger.info(f"📊 Loaded peak prices for {len(peak_prices)} symbols")
         
         # ── PHASE 1: EVALUATE EXITS & TECHNICAL DEGRADATION ──
         for symbol in list(active_holdings.keys()):
@@ -214,31 +243,85 @@ def run_execution_cycle():
                     except Exception as entry_ex:
                         logger.error(f"Failed submitting purchase ticket for target {symbol}: {entry_ex}")
                     
-        # ── PHASE 3: DATABASE SYNCHRONIZATION WITH NUMPY CAST CLEANING ──
+        # ── PHASE 3: DATABASE SYNCHRONIZATION WITH PROPER JSON SERIALIZATION ──
+        # ✅ FIXED: Uses json.dumps() instead of str() to avoid np.float64 issues
         try:
-            # Explicitly force casting of every float inside memory dictionary to Native Python Types
+            # Convert NumPy types to Python native types
             clean_peaks = {str(ticker): float(val) for ticker, val in peak_prices.items()}
             
-            hb_response = supabase.table("bot_state").update({
-                "peak_prices": str(clean_peaks),
+            # Serialize to proper JSON (not Python string representation)
+            clean_peaks_json = json.dumps(clean_peaks)
+            
+            # Prepare update data
+            update_data = {
+                "peak_prices": clean_peaks_json,  # ✅ Proper JSON string
                 "last_heartbeat": datetime.utcnow().isoformat(),
                 "updated_at": datetime.utcnow().isoformat()
-            }).eq("id", 1).execute()
+            }
             
-            logger.info(f"❤️ Heartbeat and state records securely transmitted. Rows synchronized: {len(hb_response.data)}")
-            if len(hb_response.data) == 0:
-                logger.warning("⚠️ Warning: Post payload accepted but zero database keys matched target id=1.")
+            # Execute update
+            hb_response = supabase.table("bot_state").update(update_data).eq("id", 1).execute()
+            
+            if hb_response.data:
+                logger.info(f"❤️ Heartbeat successfully synced with proper JSON format")
+                logger.info(f"📊 Synced {len(clean_peaks)} peak prices")
+                # Log a sample for verification
+                if clean_peaks:
+                    sample = list(clean_peaks.items())[:3]
+                    logger.info(f"📈 Sample peak prices: {sample}")
+            else:
+                logger.warning("⚠️ Update completed but no records returned (id=1 may not exist)")
+                
         except Exception as heartbeat_err:
             logger.error(f"❌ CRITICAL HEARTBEAT FAILURE: {heartbeat_err}")
+            if 'update_data' in locals():
+                logger.error(f"📦 Data attempted: {update_data}")
+            # Try to save to logs table as fallback
+            try:
+                supabase.table("bot_logs").insert({
+                    "message": f"Heartbeat failure: {str(heartbeat_err)}",
+                    "severity": "error",
+                    "timestamp": datetime.utcnow().isoformat()
+                }).execute()
+            except:
+                pass
             
     except Exception as cycle_ex:
         logger.error(f"Global execution iteration sequence error: {cycle_ex}")
+        # Try to log the error to Supabase
+        try:
+            supabase.table("bot_logs").insert({
+                "message": f"Execution cycle error: {str(cycle_ex)}",
+                "severity": "error",
+                "timestamp": datetime.utcnow().isoformat()
+            }).execute()
+        except:
+            pass
 
 # ─────────────────────────────────────────────
 # DAEMON SYSTEM KERNEL ENTRY POINT
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     logger.info("⚡ System Kernel Engaged. Continuous Daily SMA/RVOL Automation Core Online.")
+    
+    # Initialize database record on startup
+    if not ensure_bot_state_record():
+        logger.error("❌ Failed to initialize database. Exiting.")
+        exit(1)
+    
+    # Run a quick test heartbeat on startup
+    try:
+        test_peaks = {"TEST": 100.0}
+        test_json = json.dumps(test_peaks)
+        supabase.table("bot_state").update({
+            "peak_prices": test_json,
+            "last_heartbeat": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
+        }).eq("id", 1).execute()
+        logger.info("✅ Initial heartbeat test successful")
+    except Exception as e:
+        logger.error(f"❌ Initial heartbeat test failed: {e}")
+    
     while True:
         now = datetime.now(ET)
         # Scan blocks execution logic runs every 5 minutes during active market framework hours
