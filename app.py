@@ -472,10 +472,9 @@ with tab_liq:
 # NEW TAB 5 — WATCHLIST INTELLIGENCE MATRIX
 # ══════════════════════════════════════════════
 with tab_watchlist:
-    st.markdown('<div class="section-header">📈 Live 50-Stock Watchlist Network (Powered by Yahoo Finance)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">📈 Live 50-Stock Watchlist Network (With Institutional RVOL Tracking)</div>', unsafe_allow_html=True)
     
-    # Accelerated high-performance batch downloader layer utilizing memory caches
-    @st.cache_data(ttl=21600)  # Caches web results for 6 hours to prevent server rate bans
+    @st.cache_data(ttl=21600)  # Caches web results for 6 hours to prevent server rate blocks
     def fetch_live_web_fundamentals(ticker_list):
         import yfinance as yf
         web_data = {}
@@ -490,12 +489,20 @@ with tab_watchlist:
                     info = tick_obj.info if tick_obj.info else {}
                     
                     # Gather live closing print or fallback to yesterday's institutional wrap
-                    if group_by_ticker_supported := True:
-                        try: current_p = float(prices_df[ticker]['Close'].iloc[-1])
-                        except: current_p = float(info.get("currentPrice", info.get("previousClose", 100.0)))
-                    
-                    # Capture Wall Street consensus median targets to serve as our Fair Value base
+                    current_p = float(info.get("currentPrice", info.get("previousClose", 100.0)))
                     fair_p = float(info.get("targetMedianPrice", info.get("targetMeanPrice", current_p * 1.05)))
+                    
+                    # ── DYNAMIC VOLUME MATRIX PROCESSING ──
+                    live_vol = float(info.get("volume", info.get("regularMarketVolume", 1.0)))
+                    avg_vol = float(info.get("averageVolume", info.get("averageDailyVolume10Day", 1.0)))
+                    
+                    rvol_calc = live_vol / avg_vol if avg_vol > 0 else 1.0
+                    if rvol_calc >= 2.5:
+                        volume_status = f"🚨 Extreme Vol ({rvol_calc:.1f}x)"
+                    elif rvol_calc >= 1.5:
+                        volume_status = f"🔥 High Vol ({rvol_calc:.1f}x)"
+                    else:
+                        volume_status = f"⚪ Normal ({rvol_calc:.1f}x)"
                     
                     # Parse dynamic upcoming corporate earnings calendars from live data tables
                     calendar = tick_obj.calendar
@@ -509,33 +516,31 @@ with tab_watchlist:
                         "name": info.get("longName", f"{ticker} Corp."),
                         "current_price": current_p,
                         "fair_price": fair_p,
-                        "earnings_date": earn_str
+                        "earnings_date": earn_str,
+                        "volume_status": volume_status,
+                        "rvol_raw": rvol_calc
                     }
                 except:
-                    # Robust safe-fail values if an individual ticker api point drops
-                    web_data[ticker] = {"name": f"{ticker} Corp.", "current_price": 100.0, "fair_price": 105.0, "earnings_date": "No Date Set"}
+                    web_data[ticker] = {"name": f"{ticker} Corp.", "current_price": 100.0, "fair_price": 105.0, "earnings_date": "No Date Set", "volume_status": "⚪ Normal (1.0x)", "rvol_raw": 1.0}
         except:
-            # Complete system level safety defaults if global web interface times out
             for ticker in ticker_list:
-                web_data[ticker] = {"name": f"{ticker} Corp.", "current_price": 100.0, "fair_price": 105.0, "earnings_date": "No Date Set"}
+                web_data[ticker] = {"name": f"{ticker} Corp.", "current_price": 100.0, "fair_price": 105.0, "earnings_date": "No Date Set", "volume_status": "⚪ Normal (1.0x)", "rvol_raw": 1.0}
         return web_data
 
     # Execute the live data query pipeline
     with st.spinner("Synchronizing full-market matrices from Yahoo Finance web nodes..."):
         live_market_snapshot = fetch_live_web_fundamentals(WATCHLIST)
         
-    # Map raw dictionary values back to structural sorting priority tables
     rec_priority = {"Strong Buy": 4, "Buy": 3, "Hold": 2, "Sell": 1}
     wl_rows = []
     
     for ticker in WATCHLIST:
-        snap = live_market_snapshot.get(ticker, {"name": f"{ticker}", "current_price": 100.0, "fair_price": 105.0, "earnings_date": "No Date Set"})
+        snap = live_market_snapshot.get(ticker, {"name": f"{ticker}", "current_price": 100.0, "fair_price": 105.0, "earnings_date": "No Date Set", "volume_status": "⚪ Normal (1.0x)", "rvol_raw": 1.0})
         
         current_p = snap["current_price"]
         fair_p = snap["fair_price"]
         earn_display = snap["earnings_date"]
         
-        # Algorithmic calculation mapping vectors
         if current_p > fair_p * 1.03:
             valuation = "🔴 Overvalued"
             recommendation = "Sell"
@@ -561,14 +566,17 @@ with tab_watchlist:
             "Suggested entry price": suggested_entry,
             "Potential upside": round(max(0.0, upside_calc), 2),
             "Recommendation": recommendation,
+            "Trading Volume Status": snap["volume_status"],
             "Any earnings report next?": earn_display,
+            # Hidden tracks for sorting algorithms
             "_rec_rank": rec_priority.get(recommendation, 0),
-            "_earn_timestamp": earn_date
+            "_earn_timestamp": earn_date,
+            "_rvol_raw": snap["rvol_raw"]
         })
         
     watchlist_df = pd.DataFrame(wl_rows)
     
-    # ── COMPLETE 9-COLUMN INTERACTIVE SORT CONTROLS ──
+    # ── COMPLETE 10-COLUMN INTERACTIVE SORT CONTROLS ──
     sc1, sc2 = st.columns([1, 2])
     with sc1:
         sort_col = st.selectbox(
@@ -576,31 +584,32 @@ with tab_watchlist:
             [
                 "Ticker symbol", "Name", "Current price", "Fair Value (Target)", 
                 "Current Value", "Suggested entry price", "Potential upside", 
-                "Recommendation", "Any earnings report next?"
+                "Recommendation", "Trading Volume Status", "Any earnings report next?"
             ],
-            index=6 # Defaults dashboard layout sorting to look directly at highest potential upsides
+            index=6 # Defaults sorting to Potential Upside
         )
     with sc2:
         sort_order = st.radio("Order Direction Matrix:", ["Descending (Highest/Z-A)", "Ascending (Lowest/A-Z)"], horizontal=True)
         
     ascending_flag = (sort_order == "Ascending (Lowest/A-Z)")
     
-    # Sort Engine Redirection Matrix
+    # Advanced Multi-Route Sort Redirect Engine
     if sort_col == "Recommendation":
         watchlist_df = watchlist_df.sort_values(by="_rec_rank", ascending=ascending_flag)
     elif sort_col == "Any earnings report next?":
         watchlist_df = watchlist_df.sort_values(by="_earn_timestamp", ascending=ascending_flag)
+    elif sort_col == "Trading Volume Status":
+        watchlist_df = watchlist_df.sort_values(by="_rvol_raw", ascending=ascending_flag)
     else:
         watchlist_df = watchlist_df.sort_values(by=sort_col, ascending=ascending_flag)
         
     # Drop sorting handles prior to visual table production
-    display_df = watchlist_df.drop(columns=["_rec_rank", "_earn_timestamp"])
+    display_df = watchlist_df.drop(columns=["_rec_rank", "_earn_timestamp", "_rvol_raw"])
     
-    # Apply terminal layouts and string currency format tags safely post-sorting
+    # Format layout strings post-sorting
     display_df["Current price"] = display_df["Current price"].apply(lambda x: f"${x:.2f}")
     display_df["Fair Value (Target)"] = display_df["Fair Value (Target)"].apply(lambda x: f"${x:.2f}")
     display_df["Suggested entry price"] = display_df["Suggested entry price"].apply(lambda x: f"${x:.2f}")
     display_df["Potential upside"] = display_df["Potential upside"].apply(lambda x: f"{x:+.2f}%" if x > 0 else "0.00% (At Target)")
     
-    # Render pure HTML high-contrast rows
     st.table(display_df)
