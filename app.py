@@ -1,16 +1,35 @@
 """
 app.py — Professional Trading Dashboard (SMA Trend-Following Edition)
 ─────────────────────────────────────────────────────────────────────────
-UPDATES IN v3.1 PRODUCTION:
+UPDATES IN v3.2 PATCHED:
   1. Fixed high-contrast canvas data grid rendering error (black text on black bug resolved).
   2. Replaced st.dataframe with st.table globally to force high-contrast text inheritance.
-  3. Integrated Tab 5: "📈 Watchlist Matrix" detailing evaluation metrics for all 50 stocks.
-  4. Mapped automatic value, potential upside, and real-time Q2 2026 earnings calendars.
+  3. Integrated Tab 5: "📈 Watchlist Matrix" detailing evaluation metrics for all stocks.
+  4. Mapped automatic value, potential upside, and real-time earnings calendars.
+
+  BUGFIXES (v3.2):
+  - Removed duplicate `import datetime` / `import pytz` inside the sidebar block, which was
+    shadowing the top-level `datetime` class import with the module and crashing any code
+    below it that called datetime(...) or datetime.strptime(...) as a constructor.
+  - Removed reference to an undefined `log` object in load_trades(); now uses st-safe logging.
+  - Fixed the watchlist fallback fair-value formula, which previously always produced a
+    "Buy"/"Strong Buy" recommendation whenever no real analyst target was available
+    (fair_p = current_p * 1.05 mathematically guarantees current_p < fair_p * 0.97).
+    Now shows "No Target Data" instead of fabricating a signal.
+  - Removed unused STOCK_METADATA "fair"/"earn" placeholder fields that were never read
+    (the watchlist tab computes its own live fair value / earnings date from yfinance).
+  - Removed MSTR from the watchlist — excluded elsewhere in this project's Shariah-compliance
+    screen due to cryptocurrency balance-sheet exposure; kept out here for consistency.
+  - Removed the unused batch `yf.download(...)` call in fetch_live_web_fundamentals
+    (its result, prices_df, was never used — per-ticker .info() calls already do the work).
+  - Consolidated the duplicate "is the bot alive" heartbeat checks (previously computed twice,
+    once unused, with two different staleness thresholds) into a single shared function.
 
 Run on Streamlit Cloud:
     Secrets required: ALPACA_API_KEY, ALPACA_SECRET_KEY, supabase.url, supabase.key
 """
 
+import logging
 import streamlit as st
 import pytz
 import time
@@ -25,6 +44,9 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 import streamlit.components.v1 as components
 from supabase import create_client, Client
 
+log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.WARNING)
+
 # ─────────────────────────────────────────────
 # HTML TABLE HELPER
 # ─────────────────────────────────────────────
@@ -37,7 +59,7 @@ def render_html_table(df: pd.DataFrame, pl_col: str = "pl_usd") -> None:
         style = ""
         if col == pl_col:
             try:
-                v = float(str(val).replace("$","").replace("+","").replace(",",""))
+                v = float(str(val).replace("$", "").replace("+", "").replace(",", ""))
                 style = "color:#4ade80;font-weight:600;" if v >= 0 else "color:#f87171;font-weight:600;"
             except:
                 pass
@@ -195,66 +217,32 @@ hr { border-color: #1e2330; margin: 1rem 0; }
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# CONSTANTS & METADATA DICTIONARY FOR THE 50 STOCKS
+# CONSTANTS & WATCHLIST
 # ─────────────────────────────────────────────
+# NOTE: previously this was a dict keyed by ticker with "fair" / "earn" placeholder
+# values that were never actually read anywhere in the file (the Watchlist tab computes
+# its own live fair-value estimate and earnings date from yfinance). Simplified to a
+# plain ticker list to remove dead, misleading data.
+#
+# MSTR removed: excluded elsewhere in this project's Shariah-compliance screen due to
+# cryptocurrency balance-sheet exposure. Keep this list in sync with the bot's watchlist.
+WATCHLIST = [
+    "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM",
+    "PANW", "TSM", "LRCX", "ON", "MPWR", "MRVL", "NXPI", "TEAM", "INTA", "CRWD",
+    "ZS", "ADBE", "WDAY", "SNPS", "NOW", "SHOP", "TXN", "CDNS", "MCHP", "SWKS",
+    "FTNT", "ANET", "UBER", "DASH", "TSLA", "ISRG", "VRTX", "LLY", "MRK", "AAPL",
+    "JNJ", "PEP", "LIN", "REGN", "INTC", "PG", "NKE", "ADSK", "MDT",
+]
+
 SGT = pytz.timezone("Asia/Singapore")
 ET  = pytz.timezone("US/Eastern")
-WEEKLY_TARGET     = 200.0
+WEEKLY_TARGET      = 200.0
 EFFECTIVE_CAPITAL  = 12000.0
 
-STOCK_METADATA = {
-    "NVDA": {"name": "NVIDIA Corporation", "fair": 125.00, "earn": "Aug 26, 2026"},
-    "AMD": {"name": "Advanced Micro Devices", "fair": 160.00, "earn": "Jul 28, 2026"},
-    "AVGO": {"name": "Broadcom Inc.", "fair": 170.00, "earn": "Sep 03, 2026"},
-    "QCOM": {"name": "QUALCOMM Incorporated", "fair": 185.00, "earn": "Jul 29, 2026"},
-    "AMAT": {"name": "Applied Materials, Inc.", "fair": 210.00, "earn": "Aug 13, 2026"},
-    "ASML": {"name": "ASML Holding N.V.", "fair": 920.00, "earn": "Jul 15, 2026"},
-    "MU": {"name": "Micron Technology, Inc.", "fair": 130.00, "earn": "Sep 24, 2026"},
-    "KLAC": {"name": "KLA Corporation", "fair": 780.00, "earn": "Jul 23, 2026"},
-    "SMCI": {"name": "Super Micro Computer", "fair": 450.00, "earn": "Aug 06, 2026"},
-    "ARM": {"name": "ARM Holdings plc", "fair": 140.00, "earn": "Jul 29, 2026"},
-    "MSTR": {"name": "MicroStrategy Inc.", "fair": 1500.00, "earn": "Aug 04, 2026"},
-    "PANW": {"name": "Palo Alto Networks", "fair": 320.00, "earn": "Aug 18, 2026"},
-    "TSM": {"name": "Taiwan Semiconductor", "fair": 165.00, "earn": "Jul 16, 2026"},
-    "LRCX": {"name": "Lam Research Corp.", "fair": 950.00, "earn": "Jul 22, 2026"},
-    "ON": {"name": "ON Semiconductor", "fair": 75.00, "earn": "Jul 27, 2026"},
-    "MPWR": {"name": "Monolithic Power Systems", "fair": 800.00, "earn": "Jul 23, 2026"},
-    "MRVL": {"name": "Marvell Technology", "fair": 70.00, "earn": "Aug 27, 2026"},
-    "NXPI": {"name": "NXP Semiconductors N.V.", "fair": 260.00, "earn": "Jul 21, 2026"},
-    "TEAM": {"name": "Atlassian Corporation", "fair": 180.00, "earn": "Aug 06, 2026"},
-    "INTA": {"name": "Intapp, Inc.", "fair": 45.00, "earn": "Aug 11, 2026"},
-    "CRWD": {"name": "CrowdStrike Holdings", "fair": 340.00, "earn": "Sep 02, 2026"},
-    "ZS": {"name": "Zscaler, Inc.", "fair": 190.00, "earn": "Sep 08, 2026"},
-    "ADBE": {"name": "Adobe Inc.", "fair": 500.00, "earn": "Sep 17, 2026"},
-    "WDAY": {"name": "Workday, Inc.", "fair": 240.00, "earn": "Aug 20, 2026"},
-    "SNPS": {"name": "Synopsys, Inc.", "fair": 580.00, "earn": "Aug 19, 2026"},
-    "NOW": {"name": "ServiceNow, Inc.", "fair": 790.00, "earn": "Jul 22, 2026"},
-    "SHOP": {"name": "Shopify Inc.", "fair": 75.00, "earn": "Aug 05, 2026"},
-    "TXN": {"name": "Texas Instruments Inc.", "fair": 190.00, "earn": "Jul 21, 2026"},
-    "CDNS": {"name": "Cadence Design Systems", "fair": 300.00, "earn": "Jul 20, 2026"},
-    "MCHP": {"name": "Microchip Technology", "fair": 90.00, "earn": "Aug 04, 2026"},
-    "SWKS": {"name": "Skyworks Solutions", "fair": 105.00, "earn": "Aug 03, 2026"},
-    "FTNT": {"name": "Fortinet, Inc.", "fair": 65.00, "earn": "Aug 05, 2026"},
-    "ANET": {"name": "Arista Networks, Inc.", "fair": 310.00, "earn": "Jul 30, 2026"},
-    "UBER": {"name": "Uber Technologies", "fair": 70.00, "earn": "Aug 04, 2026"},
-    "DASH": {"name": "DoorDash, Inc.", "fair": 120.00, "earn": "Aug 05, 2026"},
-    "TSLA": {"name": "Tesla, Inc.", "fair": 180.00, "earn": "Jul 22, 2026"},
-    "ISRG": {"name": "Intuitive Surgical", "fair": 420.00, "earn": "Jul 16, 2026"},
-    "VRTX": {"name": "Vertex Pharmaceuticals", "fair": 460.00, "earn": "Jul 29, 2026"},
-    "LLY": {"name": "Eli Lilly & Company", "fair": 800.00, "earn": "Aug 06, 2026"},
-    "MRK": {"name": "Merck & Co., Inc.", "fair": 125.00, "earn": "Jul 30, 2026"},
-    "AAPL": {"name": "Apple Inc.", "fair": 190.00, "earn": "Jul 30, 2026"},
-    "JNJ": {"name": "Johnson & Johnson", "fair": 155.00, "earn": "Jul 15, 2026"},
-    "PEP": {"name": "PepsiCo, Inc.", "fair": 170.00, "earn": "Jul 09, 2026"},
-    "LIN": {"name": "Linde plc", "fair": 440.00, "earn": "Jul 24, 2026"},
-    "REGN": {"name": "Regeneron Pharma.", "fair": 980.00, "earn": "Aug 04, 2026"},
-    "INTC": {"name": "Intel Corporation", "fair": 35.00, "earn": "Jul 23, 2026"},
-    "PG": {"name": "Procter & Gamble Co.", "fair": 165.00, "earn": "Jul 24, 2026"},
-    "NKE": {"name": "Nike, Inc.", "fair": 95.00, "earn": "Jun 25, 2026"},
-    "ADSK": {"name": "Autodesk, Inc.", "fair": 240.00, "earn": "Aug 25, 2026"},
-    "MDT": {"name": "Medtronic plc", "fair": 85.00, "earn": "Aug 18, 2026"}
-}
-WATCHLIST = list(STOCK_METADATA.keys())
+# How stale (seconds) the bot heartbeat can be before we consider it "not responding".
+# Previously this threshold was defined twice (120s and 600s) in two different places,
+# with the 120s check result going unused. Single source of truth now.
+HEARTBEAT_STALE_SECONDS = 180
 
 # ─────────────────────────────────────────────
 # CLIENT INITIALIZATION
@@ -291,7 +279,8 @@ def load_trades() -> pd.DataFrame:
             df["pl_usd"] = pd.to_numeric(df.get("pl_usd", 0), errors="coerce").fillna(0)
             df["date"]   = pd.to_datetime(df["date"]).dt.date
             return df
-    except Exception as e: log.warning(f"Trade sync failure: {e}")
+    except Exception as e:
+        log.warning(f"Trade sync failure: {e}")
     return pd.DataFrame()
 
 @st.cache_data(ttl=10)
@@ -308,76 +297,110 @@ def load_open_positions_meta() -> dict:
     try:
         r = supabase.table("open_positions").select("*").execute()
         return {row["symbol"]: row for row in r.data} if r.data else {}
-    except: return {}
+    except:
+        return {}
 
 @st.cache_data(ttl=30)
 def load_weekly_baseline() -> float:
     try:
         r = supabase.table("weekly_baseline").select("baseline").order("date", desc=True).limit(1).execute()
-        if r.data: return float(r.data[0]["baseline"])
-    except: pass
+        if r.data:
+            return float(r.data[0]["baseline"])
+    except:
+        pass
     return 0.0
 
 @st.cache_data(ttl=10)
 def load_bot_heartbeat():
+    """Returns the raw ISO heartbeat timestamp string from Supabase, or None."""
     try:
         r = supabase.table("bot_state").select("last_heartbeat").eq("id", 1).execute()
-        if r.data: return r.data[0]["last_heartbeat"]
-    except: pass
+        if r.data:
+            return r.data[0]["last_heartbeat"]
+    except:
+        pass
     return None
+
+def is_bot_alive(heartbeat_str: str, now_sgt: datetime, stale_after: int = HEARTBEAT_STALE_SECONDS) -> bool:
+    """Single source of truth for bot liveness — replaces the two duplicate,
+    inconsistently-thresholded checks that used to exist (one in the main
+    script body, one in the sidebar)."""
+    if not heartbeat_str:
+        return False
+    try:
+        ts = heartbeat_str.replace("Z", "+00:00")
+        last_heartbeat = datetime.fromisoformat(ts)
+        if last_heartbeat.tzinfo is None:
+            last_heartbeat = last_heartbeat.replace(tzinfo=pytz.utc)
+        last_heartbeat_sgt = last_heartbeat.astimezone(SGT)
+        return (now_sgt - last_heartbeat_sgt).total_seconds() < stale_after
+    except Exception:
+        return False
 
 def load_forced_strategy() -> str:
     try:
         r = supabase.table("bot_config").select("forced_strategy").eq("id", 1).execute()
         return r.data[0]["forced_strategy"] if r.data else "AUTO"
-    except: return "AUTO"
+    except:
+        return "AUTO"
 
 def set_forced_strategy(val: str):
-    try: supabase.table("bot_config").update({"forced_strategy": val}).eq("id", 1).execute()
-    except Exception as e: st.error(f"Strategy allocation push failed: {e}")
+    try:
+        supabase.table("bot_config").update({"forced_strategy": val}).eq("id", 1).execute()
+    except Exception as e:
+        st.error(f"Strategy allocation push failed: {e}")
 
 def verify_pin(entered: str) -> bool:
     try:
         r = supabase.table("bot_config").select("pin").eq("id", 1).execute()
         return bool(r.data) and r.data[0]["pin"] == entered
-    except: return False
+    except:
+        return False
 
 def get_auto_session(now_et: datetime) -> str:
-    if now_et.weekday() >= 5: return "CLOSED"
+    if now_et.weekday() >= 5:
+        return "CLOSED"
     h, m = now_et.hour, now_et.minute
     return "SMA-CROSS" if ((h == 9 and m >= 30) or h >= 10) and h < 16 else "CLOSED"
 
 def get_effective_session(forced: str, now_et: datetime) -> tuple:
     auto = get_auto_session(now_et)
-    if forced == "AUTO" or forced not in ["SMA-CROSS", "CLOSED"]: return auto, "AUTO"
+    if forced == "AUTO" or forced not in ["SMA-CROSS", "CLOSED"]:
+        return auto, "AUTO"
     return forced, "MANUAL"
 
 def time_to_next_switch(now_et: datetime) -> str:
-    if now_et.weekday() >= 5: return "Weekend"
-    if now_et.hour >= 16: return "Market Closed"
+    if now_et.weekday() >= 5:
+        return "Weekend"
+    if now_et.hour >= 16:
+        return "Market Closed"
     delta = now_et.replace(hour=16, minute=0, second=0, microsecond=0) - now_et
     total_s = int(delta.total_seconds())
     return f"{total_s // 3600:02d}h {(total_s % 3600) // 60:02d}m to EOD"
 
 def annotate_sessions(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or "time_sgt" not in df.columns: return df
+    if df.empty or "time_sgt" not in df.columns:
+        return df
     df = df.copy()
     def _get_date(r):
         try:
             t = datetime.strptime(r["time_sgt"], "%H:%M:%S").time()
             d = pd.to_datetime(r["date"]).date()
             return d if t >= datetime.strptime("21:30", "%H:%M").time() else d - timedelta(days=1)
-        except: return pd.to_datetime(r["date"]).date()
+        except:
+            return pd.to_datetime(r["date"]).date()
     df["session_date"] = df.apply(_get_date, axis=1)
     return df
 
 def run_backtest(strategy: str, df: pd.DataFrame, start_date, end_date) -> dict:
-    if df.empty: return None
+    if df.empty:
+        return None
     mask = (df["date"] >= start_date) & (df["date"] <= end_date)
     if "strategy" in df.columns and strategy != "ALL":
         mask &= df["strategy"].str.upper().str.contains(strategy.upper(), na=False)
     filt = df[mask].copy().sort_values("date")
-    if filt.empty: return {"trades": pd.DataFrame(), "summary": {}}
+    if filt.empty:
+        return {"trades": pd.DataFrame(), "summary": {}}
     filt["cumulative_pl"] = filt["pl_usd"].cumsum()
     wins, losses = filt[filt["pl_usd"] > 0], filt[filt["pl_usd"] <= 0]
     wr = len(wins) / len(filt) * 100 if len(filt) > 0 else 0
@@ -410,66 +433,40 @@ total_mv   = sum(float(p.market_value) for p in positions)
 total_unrl = sum(float(p.unrealized_pl) for p in positions)
 eff_session, mode = get_effective_session(forced_strategy, now_et)
 switch_in         = time_to_next_switch(now_et)
-bot_alive = False
-if heartbeat_str:
-    try: bot_alive = (now_sgt - datetime.fromisoformat(heartbeat_str).replace(tzinfo=pytz.utc).astimezone(SGT)).total_seconds() < 120
-    except: pass
+
+# Single, consolidated bot-liveness check (see is_bot_alive() above).
+bot_alive = is_bot_alive(heartbeat_str, now_sgt)
+market_is_open = get_auto_session(now_et) != "CLOSED"
 
 # ─────────────────────────────────────────────
-# SIDEBAR WITH THREE DYNAMIC STATUS MODES
+# SIDEBAR
 # ─────────────────────────────────────────────
-import datetime
-import pytz
-
 with st.sidebar:
     st.markdown('<div class="section-header">⚡ SMA SWING BOT</div>', unsafe_allow_html=True)
-    
-    # ── 1. EVALUATE BOT RESPONSE AND MARKET STATES ──
-    try:
-        state_query = supabase.table("bot_state").select("last_heartbeat").eq("id", 1).execute()
-        last_hb_str = state_query.data[0]["last_heartbeat"]
-        last_heartbeat = datetime.datetime.fromisoformat(last_hb_str.replace("Z", "+00:00"))
-        utc_now = datetime.datetime.now(datetime.timezone.utc)
-        
-        # Checking if the process has updated Supabase within the last 10 minutes
-        bot_is_responding = (utc_now - last_heartbeat).total_seconds() < 600
-    except Exception:
-        bot_is_responding = False
 
-    # Check true Eastern Time for US Core Trading Hours (9:30 AM - 4:00 PM)
-    ET = pytz.timezone("US/Eastern")
-    now_et = datetime.datetime.now(ET)
-    
-    market_is_open = (
-        now_et.weekday() < 5 and 
-        ((now_et.hour == 9 and now_et.minute >= 30) or (10 <= now_et.hour < 16))
-    )
-
-    # ── 2. DETERMINE STYLES AND LABELS ──
-    if not bot_is_responding:
+    # ── Status label/colour derived from the single consolidated check above ──
+    if not bot_alive:
         status_label = "Bot is OFF"
         status_color = "#f87171"  # Soft Coral Red
-    elif bot_is_responding and not market_is_open:
+    elif bot_alive and not market_is_open:
         status_label = "Bot is ON but market is closed"
         status_color = "#fbbf24"  # Amber Yellow
     else:
         status_label = "Bot is ON and market is opened"
         status_color = "#4ade80"  # Bright Emerald Green
 
-    # ── 3. RENDER THE DYNAMIC HTML CARD ──
     st.markdown(
         f'<div class="status-card" style="border-left:3px solid {status_color}; color:{status_color}; font-weight:bold;">'
         f'● {status_label}'
-        f'</div>', 
+        f'</div>',
         unsafe_allow_html=True
     )
-    
-    # ── 4. FINANCIAL METRIC ARRAYS ──
+
     st.metric("Portfolio Value", f"${portfolio_value:,.2f}")
     st.metric("Cash Balance", f"${cash:,.2f}")
     st.metric("Buying Power", f"${buying_power:,.2f}")
     st.metric("Intraday Open P&L", f"${daily_pl_alpaca:+.2f}")
-    
+
     if st.button("🔄 Reload Matrices", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
@@ -477,7 +474,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 # LAYOUT RENDERING
 # ─────────────────────────────────────────────
-st.markdown('<h1 style="font-family:\'IBM Plex Mono\',monospace;font-size:24px;font-weight:600;color:#e2e8f0;">⚡ ALGOBOT DASHBOARD v3.1</h1>', unsafe_allow_html=True)
+st.markdown('<h1 style="font-family:\'IBM Plex Mono\',monospace;font-size:24px;font-weight:600;color:#e2e8f0;">⚡ ALGOBOT DASHBOARD v3.2</h1>', unsafe_allow_html=True)
 st.markdown("---")
 
 m1, m2, m3, m4 = st.columns(4)
@@ -492,15 +489,18 @@ tab_live, tab_positions, tab_backtest, tab_liq, tab_watchlist = st.tabs([
 ])
 
 # ══════════════════════════════════════════════
-# TAB 1, 2, 3, 4 (PRESERVED FUNCTIONAL BACKENDS)
+# TAB 1, 2 — FUNCTIONAL
+# TAB 3, 4 — STILL PLACEHOLDERS (not yet implemented — see TODOs)
 # ══════════════════════════════════════════════
 with tab_live:
     st.caption("Transactions performance curve history modules.")
-    if not trades_df.empty: render_html_table(trades_df.head(10))
+    if not trades_df.empty:
+        render_html_table(trades_df.head(10))
 
 with tab_positions:
     st.markdown('<div class="section-header">Live Market Exposure Positions</div>', unsafe_allow_html=True)
-    if not positions: st.info("Zero active inventory units currently deployed.")
+    if not positions:
+        st.info("Zero active inventory units currently deployed.")
     else:
         p_rows = []
         for p in positions:
@@ -509,100 +509,121 @@ with tab_positions:
         st.table(pd.DataFrame(p_rows))
 
 with tab_backtest:
-    st.caption("Strategy matrix calculation backtester module.")
+    # TODO: not yet implemented. The earlier bot.py dashboard had a working
+    # backtest engine (run_backtest() above is wired up but unused here) — port it in.
+    st.caption("Strategy matrix calculation backtester module. (Not yet implemented.)")
 
 with tab_liq:
-    st.caption("Strategic administration override panels.")
+    # TODO: not yet implemented. Needs manual liquidation controls (PIN-gated via
+    # verify_pin(), which is already defined above but unused).
+    st.caption("Strategic administration override panels. (Not yet implemented.)")
 
 # ══════════════════════════════════════════════
-# NEW TAB 5 — WATCHLIST INTELLIGENCE MATRIX
+# TAB 5 — WATCHLIST INTELLIGENCE MATRIX
 # ══════════════════════════════════════════════
 with tab_watchlist:
-    st.markdown('<div class="section-header">📈 Live 50-Stock Watchlist Network (With Institutional RVOL Tracking)</div>', unsafe_allow_html=True)
-    
+    st.markdown('<div class="section-header">📈 Live Watchlist Network (With Institutional RVOL Tracking)</div>', unsafe_allow_html=True)
+
     @st.cache_data(ttl=21600)  # Caches web results for 6 hours to prevent server rate blocks
     def fetch_live_web_fundamentals(ticker_list):
         import yfinance as yf
         web_data = {}
-        
-        try:
-            # 1. Execute a fast combined market print call to obtain real consolidated prices
-            prices_df = yf.download(ticker_list, period="1d", group_by="ticker", progress=False)
-            
-            for ticker in ticker_list:
-                try:
-                    tick_obj = yf.Ticker(ticker)
-                    info = tick_obj.info if tick_obj.info else {}
-                    
-                    # Gather live closing print or fallback to yesterday's institutional wrap
-                    current_p = float(info.get("currentPrice", info.get("previousClose", 100.0)))
-                    fair_p = float(info.get("targetMedianPrice", info.get("targetMeanPrice", current_p * 1.05)))
-                    
-                    # ── DYNAMIC VOLUME MATRIX PROCESSING ──
-                    live_vol = float(info.get("volume", info.get("regularMarketVolume", 1.0)))
-                    avg_vol = float(info.get("averageVolume", info.get("averageDailyVolume10Day", 1.0)))
-                    
-                    rvol_calc = live_vol / avg_vol if avg_vol > 0 else 1.0
-                    if rvol_calc >= 2.5:
-                        volume_status = f"🚨 Extreme Vol ({rvol_calc:.1f}x)"
-                    elif rvol_calc >= 1.5:
-                        volume_status = f"🔥 High Vol ({rvol_calc:.1f}x)"
-                    else:
-                        volume_status = f"⚪ Normal ({rvol_calc:.1f}x)"
-                    
-                    # Parse dynamic upcoming corporate earnings calendars from live data tables
-                    calendar = tick_obj.calendar
-                    earn_str = "No Date Set"
-                    if calendar is not None and 'Earnings Date' in calendar:
-                        dates = calendar['Earnings Date']
-                        if dates and len(dates) > 0:
-                            earn_str = dates[0].strftime("%b %d, %Y")
-                            
-                    web_data[ticker] = {
-                        "name": info.get("longName", f"{ticker} Corp."),
-                        "current_price": current_p,
-                        "fair_price": fair_p,
-                        "earnings_date": earn_str,
-                        "volume_status": volume_status,
-                        "rvol_raw": rvol_calc
-                    }
-                except:
-                    web_data[ticker] = {"name": f"{ticker} Corp.", "current_price": 100.0, "fair_price": 105.0, "earnings_date": "No Date Set", "volume_status": "⚪ Normal (1.0x)", "rvol_raw": 1.0}
-        except:
-            for ticker in ticker_list:
-                web_data[ticker] = {"name": f"{ticker} Corp.", "current_price": 100.0, "fair_price": 105.0, "earnings_date": "No Date Set", "volume_status": "⚪ Normal (1.0x)", "rvol_raw": 1.0}
+
+        for ticker in ticker_list:
+            try:
+                tick_obj = yf.Ticker(ticker)
+                info = tick_obj.info if tick_obj.info else {}
+
+                current_p = float(info.get("currentPrice", info.get("previousClose", 0.0)) or 0.0)
+
+                # Only use a REAL analyst target if one exists. Previously this fell back to
+                # current_p * 1.05 when no target was available, which mathematically
+                # guarantees current_p < fair_p * 0.97 every time — i.e. it always produced
+                # a fake "Undervalued / Buy" signal instead of reflecting real analyst data.
+                raw_target = info.get("targetMedianPrice", info.get("targetMeanPrice"))
+                has_target = raw_target is not None
+                fair_p = float(raw_target) if has_target else None
+
+                live_vol = float(info.get("volume", info.get("regularMarketVolume", 1.0)) or 1.0)
+                avg_vol = float(info.get("averageVolume", info.get("averageDailyVolume10Day", 1.0)) or 1.0)
+
+                rvol_calc = live_vol / avg_vol if avg_vol > 0 else 1.0
+                if rvol_calc >= 2.5:
+                    volume_status = f"🚨 Extreme Vol ({rvol_calc:.1f}x)"
+                elif rvol_calc >= 1.5:
+                    volume_status = f"🔥 High Vol ({rvol_calc:.1f}x)"
+                else:
+                    volume_status = f"⚪ Normal ({rvol_calc:.1f}x)"
+
+                calendar = tick_obj.calendar
+                earn_str = "No Date Set"
+                if calendar is not None and "Earnings Date" in calendar:
+                    dates = calendar["Earnings Date"]
+                    if dates and len(dates) > 0:
+                        earn_str = dates[0].strftime("%b %d, %Y")
+
+                web_data[ticker] = {
+                    "name": info.get("longName", f"{ticker} Corp."),
+                    "current_price": current_p,
+                    "fair_price": fair_p,          # may be None — handled downstream
+                    "has_target": has_target,
+                    "earnings_date": earn_str,
+                    "volume_status": volume_status,
+                    "rvol_raw": rvol_calc,
+                }
+            except Exception:
+                web_data[ticker] = {
+                    "name": f"{ticker} Corp.", "current_price": 0.0, "fair_price": None,
+                    "has_target": False, "earnings_date": "No Date Set",
+                    "volume_status": "⚪ Normal (1.0x)", "rvol_raw": 1.0,
+                }
         return web_data
 
-    # Execute the live data query pipeline
-    with st.spinner("Synchronizing full-market matrices from Yahoo Finance web nodes..."):
+    with st.spinner("Synchronizing watchlist data from Yahoo Finance..."):
         live_market_snapshot = fetch_live_web_fundamentals(WATCHLIST)
-        
-    rec_priority = {"Strong Buy": 4, "Buy": 3, "Hold": 2, "Sell": 1}
+
+    rec_priority = {"Strong Buy": 4, "Buy": 3, "Hold": 2, "Sell": 1, "No Data": 0}
     wl_rows = []
-    
+
     for ticker in WATCHLIST:
-        snap = live_market_snapshot.get(ticker, {"name": f"{ticker}", "current_price": 100.0, "fair_price": 105.0, "earnings_date": "No Date Set", "volume_status": "⚪ Normal (1.0x)", "rvol_raw": 1.0})
-        
+        snap = live_market_snapshot.get(ticker, {
+            "name": f"{ticker}", "current_price": 0.0, "fair_price": None,
+            "has_target": False, "earnings_date": "No Date Set",
+            "volume_status": "⚪ Normal (1.0x)", "rvol_raw": 1.0,
+        })
+
         current_p = snap["current_price"]
         fair_p = snap["fair_price"]
+        has_target = snap["has_target"]
         earn_display = snap["earnings_date"]
-        
-        if current_p > fair_p * 1.03:
+
+        if not has_target or fair_p is None or current_p <= 0:
+            # No real analyst target available — don't fabricate a recommendation.
+            valuation = "⚫ No Target Data"
+            recommendation = "No Data"
+            suggested_entry = None
+            upside_calc = None
+        elif current_p > fair_p * 1.03:
             valuation = "🔴 Overvalued"
             recommendation = "Sell"
+            suggested_entry = fair_p * 0.95
+            upside_calc = ((fair_p - current_p) / current_p) * 100
         elif current_p < fair_p * 0.97:
             valuation = "🟢 Undervalued"
             recommendation = "Strong Buy" if current_p < fair_p * 0.92 else "Buy"
+            suggested_entry = fair_p * 0.95
+            upside_calc = ((fair_p - current_p) / current_p) * 100
         else:
             valuation = "🟡 Fair Value"
             recommendation = "Hold"
-            
-        suggested_entry = fair_p * 0.95
-        upside_calc = ((fair_p - current_p) / current_p) * 100
-        
-        try: earn_date = datetime.strptime(earn_display, "%b %d, %Y")
-        except: import datetime as dt_backup; earn_date = dt_backup.datetime(2099, 12, 31)
-            
+            suggested_entry = fair_p * 0.95
+            upside_calc = ((fair_p - current_p) / current_p) * 100
+
+        try:
+            earn_date = datetime.strptime(earn_display, "%b %d, %Y")
+        except Exception:
+            earn_date = datetime(2099, 12, 31)
+
         wl_rows.append({
             "Ticker symbol": ticker,
             "Name": snap["name"],
@@ -610,52 +631,53 @@ with tab_watchlist:
             "Fair Value (Target)": fair_p,
             "Current Value": valuation,
             "Suggested entry price": suggested_entry,
-            "Potential upside": round(max(0.0, upside_calc), 2),
+            "Potential upside": round(upside_calc, 2) if upside_calc is not None else None,
             "Recommendation": recommendation,
             "Trading Volume Status": snap["volume_status"],
             "Any earnings report next?": earn_display,
             # Hidden tracks for sorting algorithms
             "_rec_rank": rec_priority.get(recommendation, 0),
             "_earn_timestamp": earn_date,
-            "_rvol_raw": snap["rvol_raw"]
+            "_rvol_raw": snap["rvol_raw"],
         })
-        
+
     watchlist_df = pd.DataFrame(wl_rows)
-    
-    # ── COMPLETE 10-COLUMN INTERACTIVE SORT CONTROLS ──
+
     sc1, sc2 = st.columns([1, 2])
     with sc1:
         sort_col = st.selectbox(
-            "Sort Matrix By Target Parameter:", 
+            "Sort Matrix By Target Parameter:",
             [
-                "Ticker symbol", "Name", "Current price", "Fair Value (Target)", 
-                "Current Value", "Suggested entry price", "Potential upside", 
+                "Ticker symbol", "Name", "Current price", "Fair Value (Target)",
+                "Current Value", "Suggested entry price", "Potential upside",
                 "Recommendation", "Trading Volume Status", "Any earnings report next?"
             ],
-            index=6 # Defaults sorting to Potential Upside
+            index=6  # Defaults sorting to Potential Upside
         )
     with sc2:
         sort_order = st.radio("Order Direction Matrix:", ["Descending (Highest/Z-A)", "Ascending (Lowest/A-Z)"], horizontal=True)
-        
+
     ascending_flag = (sort_order == "Ascending (Lowest/A-Z)")
-    
-    # Advanced Multi-Route Sort Redirect Engine
+
     if sort_col == "Recommendation":
         watchlist_df = watchlist_df.sort_values(by="_rec_rank", ascending=ascending_flag)
     elif sort_col == "Any earnings report next?":
         watchlist_df = watchlist_df.sort_values(by="_earn_timestamp", ascending=ascending_flag)
     elif sort_col == "Trading Volume Status":
         watchlist_df = watchlist_df.sort_values(by="_rvol_raw", ascending=ascending_flag)
+    elif sort_col == "Potential upside":
+        # NaNs (No Data rows) sort to the bottom regardless of direction
+        watchlist_df = watchlist_df.sort_values(by=sort_col, ascending=ascending_flag, na_position="last")
     else:
         watchlist_df = watchlist_df.sort_values(by=sort_col, ascending=ascending_flag)
-        
-    # Drop sorting handles prior to visual table production
+
     display_df = watchlist_df.drop(columns=["_rec_rank", "_earn_timestamp", "_rvol_raw"])
-    
-    # Format layout strings post-sorting
-    display_df["Current price"] = display_df["Current price"].apply(lambda x: f"${x:.2f}")
-    display_df["Fair Value (Target)"] = display_df["Fair Value (Target)"].apply(lambda x: f"${x:.2f}")
-    display_df["Suggested entry price"] = display_df["Suggested entry price"].apply(lambda x: f"${x:.2f}")
-    display_df["Potential upside"] = display_df["Potential upside"].apply(lambda x: f"{x:+.2f}%" if x > 0 else "0.00% (At Target)")
-    
+
+    display_df["Current price"] = display_df["Current price"].apply(lambda x: f"${x:.2f}" if x else "N/A")
+    display_df["Fair Value (Target)"] = display_df["Fair Value (Target)"].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+    display_df["Suggested entry price"] = display_df["Suggested entry price"].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+    display_df["Potential upside"] = display_df["Potential upside"].apply(
+        lambda x: "N/A" if pd.isna(x) else (f"{x:+.2f}%" if x > 0 else "0.00% (At Target)")
+    )
+
     st.table(display_df)
