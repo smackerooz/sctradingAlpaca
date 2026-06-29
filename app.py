@@ -8,7 +8,7 @@ UPDATES IN v3.1 PRODUCTION:
   4. Mapped automatic value, potential upside, and real-time Q2 2026 earnings calendars.
 
 Run on Streamlit Cloud:
-    Secrets required: ALPACA_API_KEY, ALPACA_SECRET_KEY, supabase.url, supabase.key ok
+    Secrets required: ALPACA_API_KEY, ALPACA_SECRET_KEY, supabase.url, supabase.key
 """
 
 import streamlit as st
