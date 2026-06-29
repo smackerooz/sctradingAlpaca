@@ -601,7 +601,7 @@ with tab_watchlist:
         upside_calc = ((fair_p - current_p) / current_p) * 100
         
         try: earn_date = datetime.strptime(earn_display, "%b %d, %Y")
-        except: earn_date = datetime(2099, 12, 31)
+        except: import datetime as dt_backup; earn_date = dt_backup.datetime(2099, 12, 31)
             
         wl_rows.append({
             "Ticker symbol": ticker,
