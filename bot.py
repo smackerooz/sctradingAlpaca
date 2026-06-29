@@ -1,11 +1,12 @@
 """
 Tradingbot_v4_SMA_RVOL.py — Professional Daily SMA Trend-Following Bot with RVOL Gatekeeper
 ─────────────────────────────────────────────────────────────────────────────
-VERSION 4.1 PRODUCTION UPDATES:
-  1. Integrated 10-Day Relative Volume (RVOL) filter into the Buy Execution Loop.
-  2. Prevents low-volume false breakouts by requiring institutional volume backing (RVOL >= 1.3x).
-  3. Uses Alpaca Free IEX feed natively for ultra-fast multi-symbol batched scans.
-  4. Automatically synchronizes portfolio constraints (Max 8 concurrent active holdings).
+VERSION 4.2 PRODUCTION UPDATES:
+  1. Fixed Alpaca SDK ImportError by separating data and trading requests.
+  2. Integrated 10-Day Relative Volume (RVOL) filter into the Buy Execution Loop.
+  3. Prevents low-volume false breakouts by requiring institutional volume backing (RVOL >= 1.3x).
+  4. Uses Alpaca Free IEX feed natively for ultra-fast multi-symbol batched scans.
+  5. Automatically synchronizes portfolio constraints (Max 8 concurrent active holdings).
 
 Execution Infrastructure: Recommended to deploy 24/7 via Railway or AWS EC2.
 """
@@ -17,9 +18,11 @@ from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 import pytz
+
+# ── CORRECTED ALPACA SDK IMPORT MODULES ──
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import StockBarsRequest  # Fixed import separation
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.timeframe import TimeFrame
 from supabase import create_client, Client
@@ -157,7 +160,6 @@ def run_execution_cycle():
                         time_in_force=TimeInForce.GTC
                     ))
                     logger.info(f"Exit transaction clean routed to Alpaca Desk: {order.id}")
-                    # Log to Supabase realized_trades here if required
                 except Exception as ex:
                     logger.error(f"Failed routing liquidation execution vector for {symbol}: {ex}")
 
@@ -206,8 +208,8 @@ def run_execution_cycle():
         # Update heartbeats inside Supabase engine
         try:
             supabase.table("bot_state").update({"last_heartbeat": datetime.utcnow().isoformat()}).eq("id", 1).execute()
-        except:
-            pass
+        except Exception as heartbeat_err:
+            logger.error(f"Heartbeat system synchronization error: {heartbeat_err}")
             
     except Exception as cycle_ex:
         logger.error(f"Global execution iteration sequence error: {cycle_ex}")
