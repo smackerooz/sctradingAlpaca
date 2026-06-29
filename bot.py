@@ -18,7 +18,8 @@ import pandas as pd
 import numpy as np
 import pytz
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, StockBarsRequest
+from alpaca.trading.requests import MarketOrderRequest
+from alpaca.data.requests import StockBarsRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.timeframe import TimeFrame
 from supabase import create_client, Client
