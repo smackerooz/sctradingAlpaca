@@ -244,26 +244,21 @@ def run_execution_cycle():
                         logger.error(f"Failed submitting purchase ticket for target {symbol}: {entry_ex}")
                     
         # ── PHASE 3: DATABASE SYNCHRONIZATION WITH PROPER JSON SERIALIZATION ──
-        # ✅ FIXED: Uses json.dumps() instead of str() to avoid np.float64 issues
-        # ✅ FIXED: Proper timestamp format for different column types
         try:
             # Convert NumPy types to Python native types
             clean_peaks = {str(ticker): float(val) for ticker, val in peak_prices.items()}
             
-            # Serialize to proper JSON (not Python string representation)
+            # Serialize to proper JSON
             clean_peaks_json = json.dumps(clean_peaks)
             
             # Get current UTC time
-            from datetime import datetime
             now_utc = datetime.utcnow()
             
-            # Prepare update data with correct formats
-            # - For timestamptz columns (with timezone): use ISO format + timezone
-            # - For timestamp columns (without timezone): use format: "YYYY-MM-DD HH:MM:SS"
+            # Prepare update data
             update_data = {
-                "peak_prices": clean_peaks_json,  # JSON string
-                "last_heartbeat": now_utc.isoformat() + "+00",  # timestamptz format
-                "updated_at": now_utc.strftime("%Y-%m-%d %H:%M:%S")  # timestamp format
+                "peak_prices": clean_peaks_json,
+                "last_heartbeat": now_utc.isoformat() + "+00",
+                "updated_at": now_utc.strftime("%Y-%m-%d %H:%M:%S")
             }
             
             # Execute update
@@ -272,14 +267,11 @@ def run_execution_cycle():
             if hb_response.data:
                 logger.info(f"❤️ Heartbeat successfully synced with proper JSON format")
                 logger.info(f"📊 Synced {len(clean_peaks)} peak prices")
-                logger.info(f"🕐 Heartbeat time: {now_utc.isoformat()}")
-                # Log a sample for verification
                 if clean_peaks:
                     sample = list(clean_peaks.items())[:3]
                     logger.info(f"📈 Sample peak prices: {sample}")
             else:
-                logger.warning("⚠️ Update completed but no records returned (id=1 may not exist)")
-                # Try to insert if update failed
+                logger.warning("⚠️ Update completed but no records returned")
                 try:
                     insert_data = {
                         "id": 1,
@@ -294,9 +286,6 @@ def run_execution_cycle():
                 
         except Exception as heartbeat_err:
             logger.error(f"❌ CRITICAL HEARTBEAT FAILURE: {heartbeat_err}")
-            if 'update_data' in locals():
-                logger.error(f"📦 Data attempted: {update_data}")
-            # Try to save to logs table as fallback
             try:
                 supabase.table("bot_logs").insert({
                     "message": f"Heartbeat failure: {str(heartbeat_err)}",
@@ -310,6 +299,8 @@ def run_execution_cycle():
 # DAEMON SYSTEM KERNEL ENTRY POINT
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
+    # ... rest of your code ...
+
     logger.info("⚡ System Kernel Engaged. Continuous Daily SMA/RVOL Automation Core Online.")
     
     # Initialize database record on startup
