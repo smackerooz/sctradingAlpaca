@@ -282,6 +282,22 @@ def run_execution_cycle():
     except Exception as e:
         logger.error(f"❌ CRITICAL EXECUTION CYCLE FAILURE: {e}")
 
+# ─────────────────────────────────────────────
+# TEST SUPABASE CONNECTION
+# ─────────────────────────────────────────────
+def test_supabase_connection():
+    """Test if Supabase is reachable"""
+    logger.info("Testing Supabase connection...")
+    try:
+        # Simple test query
+        test_response = supabase.table("bot_state").select("id").limit(1).execute()
+        logger.info("✅ Supabase connection successful!")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Supabase connection failed: {e}")
+        logger.error(f"   SUPABASE_URL: {SUPABASE_URL}")
+        logger.error(f"   SUPABASE_KEY exists: {bool(SUPABASE_KEY and SUPABASE_KEY != 'YOUR_SUPABASE_KEY')}")
+        return False
 
 # ─────────────────────────────────────────────
 # DAEMON SYSTEM KERNEL ENTRY POINT
@@ -290,7 +306,12 @@ if __name__ == "__main__":
     # ... rest of your code ...
 
     logger.info("⚡ System Kernel Engaged. Continuous Daily SMA/RVOL Automation Core Online.")
-    
+  
+    # TEST CONNECTION FIRST
+    if not test_supabase_connection():
+        logger.error("❌ Cannot connect to Supabase. Check environment variables and network.")
+        exit(1)
+  
     # Initialize database record on startup
     if not ensure_bot_state_record():
         logger.error("❌ Failed to initialize database. Exiting.")
