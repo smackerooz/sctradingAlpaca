@@ -169,7 +169,6 @@ def run_execution_cycle():
         logger.info(f"Active Inventory: {len(active_holdings)} / {MAX_CORES_BUDGET} targets currently occupied.")
         
         # ── POPULATE PEAK PRICES FOR ALL SYMBOLS ──
-        # ✅ FIXED: Populate for ALL watchlist symbols, not just positions
         peak_prices = {}
         for symbol in WATCHLIST:
             metrics = process_market_indicators(symbol)
@@ -177,7 +176,7 @@ def run_execution_cycle():
                 peak_prices[symbol] = metrics["current_price"]
         logger.info(f"📊 Loaded peak prices for {len(peak_prices)} symbols")
         
-        # ── PHASE 1: EVALUATE EXITS & TECHNICAL DEGRADATION ──
+        # ── PHASE 1: EVALUATE EXITS ──
         for symbol in list(active_holdings.keys()):
             metrics = process_market_indicators(symbol)
             if not metrics:
@@ -187,10 +186,8 @@ def run_execution_cycle():
             sma20 = metrics["sma20"]
             sma50 = metrics["sma50"]
             
-            # Rule 1: Perfect Bearish Alignment Check (Price < SMA20 < SMA50)
-            # Rule 2: Multi-Day Moving Average Violation Check (Price < SMA50)
             if (price < sma20 < sma50) or (price < sma50):
-                logger.info(f"🚨 EXIT TRIGGER BLOCK MET FOR {symbol}: Price={price:.2f}, SMA20={sma20:.2f}, SMA50={sma50:.2f}")
+                logger.info(f"🚨 EXIT TRIGGER for {symbol}: Price={price:.2f}, SMA20={sma20:.2f}, SMA50={sma50:.2f}")
                 try:
                     order = trading_client.submit_order(order_data=MarketOrderRequest(
                         symbol=symbol,
@@ -198,17 +195,17 @@ def run_execution_cycle():
                         side=OrderSide.SELL,
                         time_in_force=TimeInForce.GTC
                     ))
-                    logger.info(f"Exit transaction clean routed to Alpaca Desk: {order.id}")
+                    logger.info(f"Exit order executed: {order.id}")
                 except Exception as ex:
-                    logger.error(f"Failed routing liquidation execution vector for {symbol}: {ex}")
+                    logger.error(f"Failed routing exit for {symbol}: {ex}")
 
-        # ── PHASE 2: EVALUATE ENTRYS WITH INSTITUTIONAL RVOL GATEKEEPER ──
+        # ── PHASE 2: EVALUATE ENTRIES WITH RVOL GATEKEEPER ──
         if len(trading_client.get_all_positions()) >= MAX_CORES_BUDGET:
-            logger.info("Portfolio capacity fully loaded at max configuration footprint. Skipping entry scan.")
+            logger.info("Portfolio at max capacity. Skipping entry scan.")
         else:
             for symbol in WATCHLIST:
                 if symbol in active_holdings:
-                    continue # Skip stocks we already own
+                    continue
                     
                 metrics = process_market_indicators(symbol)
                 if not metrics:
@@ -219,15 +216,12 @@ def run_execution_cycle():
                 sma50 = metrics["sma50"]
                 rvol = metrics["rvol"]
                 
-                # ── STRUCTURAL BUY GATEWAY UNLOCKED BY VOLUME ──
                 if (price > sma20 > sma50) and (rvol >= RVOL_THRESHOLD):
-                    # Verify capacity boundary conditions one final check right before sending order
                     if len(trading_client.get_all_positions()) >= MAX_CORES_BUDGET:
                         break
                         
-                    logger.info(f"🔥 INSTITUTIONAL ACCUMULATION TRIGGER DETECTED: Ticker={symbol}, RVOL={rvol:.2f}x (Threshold={RVOL_THRESHOLD}x)")
+                    logger.info(f"🔥 BUY TRIGGER: {symbol}, RVOL={rvol:.2f}x")
                     try:
-                        # Risk parameter: 1/8th allocation envelope per core position
                         cash_available = float(trading_client.get_account().cash)
                         target_allocation = min(cash_available / (MAX_CORES_BUDGET - len(trading_client.get_all_positions())), cash_available * 0.12)
                         shares_to_buy = int(target_allocation // price)
@@ -239,37 +233,27 @@ def run_execution_cycle():
                                 side=OrderSide.BUY,
                                 time_in_force=TimeInForce.GTC
                             ))
-                            logger.info(f"Entry order executed successfully via Alpaca API: {order.id} | Qty: {shares_to_buy}")
+                            logger.info(f"Entry order executed: {order.id} | Qty: {shares_to_buy}")
                     except Exception as entry_ex:
-                        logger.error(f"Failed submitting purchase ticket for target {symbol}: {entry_ex}")
-                    
-        # ── PHASE 3: DATABASE SYNCHRONIZATION WITH PROPER JSON SERIALIZATION ──
+                        logger.error(f"Failed submitting buy order for {symbol}: {entry_ex}")
+        
+        # ── PHASE 3: DATABASE SYNCHRONIZATION ──
         try:
-            # Convert NumPy types to Python native types
             clean_peaks = {str(ticker): float(val) for ticker, val in peak_prices.items()}
-            
-            # Serialize to proper JSON
             clean_peaks_json = json.dumps(clean_peaks)
-            
-            # Get current UTC time
             now_utc = datetime.utcnow()
             
-            # Prepare update data
             update_data = {
                 "peak_prices": clean_peaks_json,
                 "last_heartbeat": now_utc.isoformat() + "+00",
                 "updated_at": now_utc.strftime("%Y-%m-%d %H:%M:%S")
             }
             
-            # Execute update
             hb_response = supabase.table("bot_state").update(update_data).eq("id", 1).execute()
             
             if hb_response.data:
-                logger.info(f"❤️ Heartbeat successfully synced with proper JSON format")
-                logger.info(f"📊 Synced {len(clean_peaks)} peak prices")
-                if clean_peaks:
-                    sample = list(clean_peaks.items())[:3]
-                    logger.info(f"📈 Sample peak prices: {sample}")
+                logger.info(f"❤️ Heartbeat synced successfully")
+                logger.info(f"📊 Peak prices synced: {len(clean_peaks)}")
             else:
                 logger.warning("⚠️ Update completed but no records returned")
                 try:
@@ -280,12 +264,12 @@ def run_execution_cycle():
                         "updated_at": now_utc.strftime("%Y-%m-%d %H:%M:%S")
                     }
                     supabase.table("bot_state").insert(insert_data).execute()
-                    logger.info("✅ Created new bot_state record with id=1")
+                    logger.info("✅ Created new bot_state record")
                 except Exception as insert_err:
-                    logger.error(f"❌ Failed to create bot_state record: {insert_err}")
+                    logger.error(f"❌ Failed to create record: {insert_err}")
                 
         except Exception as heartbeat_err:
-            logger.error(f"❌ CRITICAL HEARTBEAT FAILURE: {heartbeat_err}")
+            logger.error(f"❌ HEARTBEAT FAILURE: {heartbeat_err}")
             try:
                 supabase.table("bot_logs").insert({
                     "message": f"Heartbeat failure: {str(heartbeat_err)}",
@@ -294,6 +278,10 @@ def run_execution_cycle():
                 }).execute()
             except:
                 pass
+    
+    except Exception as e:
+        logger.error(f"❌ CRITICAL EXECUTION CYCLE FAILURE: {e}")
+
 
 # ─────────────────────────────────────────────
 # DAEMON SYSTEM KERNEL ENTRY POINT
