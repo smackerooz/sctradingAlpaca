@@ -1,5 +1,5 @@
 """
-Backfill historical trades from Alpaca to Supabase
+Backfill historical trades from Alpaca to Supabase.
 Run this once to populate open_positions and realized_trades tables
 """
 
