@@ -10,6 +10,7 @@ VERSION 4.3 PRODUCTION UPDATES:
   6. Automatically synchronizes portfolio constraints (Max 8 concurrent active holdings).
   7. Fixed heartbeat JSON serialization - uses proper json.dumps() instead of str().
   8. Added robust error handling for empty peak_prices and missing database records.
+  9. Integrated with existing Supabase tables: open_positions and realized_trades.
 
 Execution Infrastructure: Recommended to deploy 24/7 via Railway or AWS EC2.
 """
@@ -17,7 +18,7 @@ Execution Infrastructure: Recommended to deploy 24/7 via Railway or AWS EC2.
 import os
 import time
 import logging
-import json  # ✅ ADDED: For proper JSON serialization
+import json
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
@@ -106,7 +107,7 @@ def process_market_indicators(symbol: str):
     """
     try:
         end_date = datetime.now(ET)
-        start_date = end_date - timedelta(days=90) # Buffer to guarantee 50 trading days
+        start_date = end_date - timedelta(days=90)
         
         request_params = StockBarsRequest(
             symbol_or_symbols=symbol,
@@ -131,7 +132,7 @@ def process_market_indicators(symbol: str):
         
         # ── RVOL COMPONENT ENGINE ──
         current_volume = volumes[-1]
-        historical_volumes = volumes[-11:-1] # Past 10 complete trading days excluding today
+        historical_volumes = volumes[-11:-1]
         avg_10day_vol = sum(historical_volumes) / 10 if historical_volumes else 1.0
         rvol = current_volume / avg_10day_vol if avg_10day_vol > 0 else 1.0
         
@@ -146,6 +147,92 @@ def process_market_indicators(symbol: str):
     except Exception as e:
         logger.error(f"Failed processing technical array for {symbol}: {e}")
         return None
+
+# ─────────────────────────────────────────────
+# POSITION & TRADE LOGGING TO EXISTING TABLES
+# ─────────────────────────────────────────────
+
+def log_open_position(symbol: str, entry_price: float, qty: int, strategy: str = "SMA_RVOL"):
+    """Log new open position to open_positions table"""
+    try:
+        position_data = {
+            "symbol": symbol,
+            "strategy": strategy,
+            "entry_price": entry_price,
+            "qtc": qty,
+            "updated_at": datetime.utcnow().isoformat()
+        }
+        
+        response = supabase.table("open_positions").insert(position_data).execute()
+        logger.info(f"✅ Open position logged: {symbol} @ \${entry_price:.2f} x {qty}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to log open position: {e}")
+        return False
+
+def close_position(symbol: str, exit_price: float, reason: str = "SMA_Crossover"):
+    """Remove position from open_positions and record in realized_trades"""
+    try:
+        # Get the position from open_positions
+        position_response = supabase.table("open_positions").select("*").eq("symbol", symbol).execute()
+        
+        if not position_response.data:
+            logger.warning(f"⚠️ Position not found in open_positions: {symbol}")
+            return False
+        
+        position = position_response.data
+        entry_price = float(position["entry_price"])
+        qty = float(position["qtc"])
+        
+        # Calculate P&L
+        pl_usd = (exit_price - entry_price) * qty
+        pl_pct = ((exit_price - entry_price) / entry_price) * 100
+        
+        # Format for display
+        pl_display = f"\${pl_usd:.2f}"
+        pc_pct = f"{pl_pct:.2f}%"
+        
+        # Get current time in SGT
+        now_sgt = datetime.now(SGT)
+        time_sgt_str = now_sgt.strftime("%Y-%m-%d %H:%M:%S")
+        date_str = now_sgt.strftime("%Y-%m-%d")
+        
+        # Log to realized_trades
+        trade_data = {
+            "date": date_str,
+            "symbol": symbol,
+            "buy_price": str(entry_price),
+            "sell_price": str(exit_price),
+            "qty": qty,
+            "pl_usd": pl_usd,
+            "pl_display": pl_display,
+            "pc_pct": pc_pct,
+            "time_sgt": time_sgt_str,
+            "reason": reason,
+            "strategy": "SMA_RVOL",
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        supabase.table("realized_trades").insert(trade_data).execute()
+        logger.info(f"✅ Realized trade logged: {symbol} | Entry: \${entry_price:.2f} | Exit: \${exit_price:.2f} | P&L: {pl_display} ({pc_pct})")
+        
+        # Remove from open_positions
+        supabase.table("open_positions").delete().eq("symbol", symbol).execute()
+        logger.info(f"✅ Position closed: {symbol}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to close position: {e}")
+        return False
+
+def is_position_open(symbol: str) -> bool:
+    """Check if position exists in open_positions table"""
+    try:
+        response = supabase.table("open_positions").select("symbol").eq("symbol", symbol).execute()
+        return len(response.data) > 0
+    except Exception as e:
+        logger.error(f"❌ Failed to check open position: {e}")
+        return False
 
 # ─────────────────────────────────────────────
 # CORE EXECUTION LOOP MATRIX
@@ -196,6 +283,10 @@ def run_execution_cycle():
                         time_in_force=TimeInForce.GTC
                     ))
                     logger.info(f"Exit order executed: {order.id}")
+                    
+                    # ✅ LOG TO SUPABASE
+                    close_position(symbol, price, reason="SMA_Crossover_Exit")
+                    
                 except Exception as ex:
                     logger.error(f"Failed routing exit for {symbol}: {ex}")
 
@@ -205,6 +296,10 @@ def run_execution_cycle():
         else:
             for symbol in WATCHLIST:
                 if symbol in active_holdings:
+                    continue
+                
+                # ✅ Also check if already in open_positions table
+                if is_position_open(symbol):
                     continue
                     
                 metrics = process_market_indicators(symbol)
@@ -234,6 +329,10 @@ def run_execution_cycle():
                                 time_in_force=TimeInForce.GTC
                             ))
                             logger.info(f"Entry order executed: {order.id} | Qty: {shares_to_buy}")
+                            
+                            # ✅ LOG TO SUPABASE
+                            log_open_position(symbol, price, shares_to_buy, strategy="SMA_RVOL")
+                            
                     except Exception as entry_ex:
                         logger.error(f"Failed submitting buy order for {symbol}: {entry_ex}")
         
@@ -289,7 +388,6 @@ def test_supabase_connection():
     """Test if Supabase is reachable"""
     logger.info("Testing Supabase connection...")
     try:
-        # Simple test query
         test_response = supabase.table("bot_state").select("id").limit(1).execute()
         logger.info("✅ Supabase connection successful!")
         return True
@@ -303,15 +401,13 @@ def test_supabase_connection():
 # DAEMON SYSTEM KERNEL ENTRY POINT
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    # ... rest of your code ...
-
     logger.info("⚡ System Kernel Engaged. Continuous Daily SMA/RVOL Automation Core Online.")
-  
+    
     # TEST CONNECTION FIRST
     if not test_supabase_connection():
         logger.error("❌ Cannot connect to Supabase. Check environment variables and network.")
         exit(1)
-  
+    
     # Initialize database record on startup
     if not ensure_bot_state_record():
         logger.error("❌ Failed to initialize database. Exiting.")
@@ -335,7 +431,7 @@ if __name__ == "__main__":
         # Scan blocks execution logic runs every 5 minutes during active market framework hours
         if now.weekday() < 5 and (9 <= now.hour <= 16):
             run_execution_cycle()
-            time.sleep(300) # Sleep for 5 minutes
+            time.sleep(300)  # Sleep for 5 minutes
         else:
             logger.info("Market framework outside operational baseline standard hours. Sleep mode active.")
-            time.sleep(1800) # Sleep for 30 minutes during off-market intervals
+            time.sleep(1800)  # Sleep for 30 minutes during off-market intervals
