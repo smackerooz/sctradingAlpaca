@@ -91,6 +91,22 @@ def ensure_bot_state_record():
         logger.error(f"❌ Failed to ensure bot_state record: {e}")
         return False
 
+def update_heartbeat_only():
+    """
+    Touch last_heartbeat WITHOUT running a full scan cycle. Used during
+    off-market-hours sleep so the dashboard's is_bot_alive() staleness check
+    doesn't falsely report the bot as OFF just because it's correctly idle
+    (the market being closed is not the same as the process being dead).
+    """
+    try:
+        now_utc = datetime.utcnow()
+        supabase.table("bot_state").update({
+            "last_heartbeat": now_utc.isoformat() + "+00",
+            "updated_at": now_utc.strftime("%Y-%m-%d %H:%M:%S")
+        }).eq("id", 1).execute()
+    except Exception as e:
+        logger.error(f"❌ Off-hours heartbeat update failed: {e}")
+
 # ─────────────────────────────────────────────
 # TECHNICAL ANALYSIS
 # ─────────────────────────────────────────────
@@ -462,4 +478,5 @@ if __name__ == "__main__":
             time.sleep(300)  # Sleep for 5 minutes
         else:
             logger.info("Market framework outside operational baseline standard hours. Sleep mode active.")
-            time.sleep(1800)  # Sleep for 30 minutes during off-market intervals
+            update_heartbeat_only()  # keep the dashboard's liveness check accurate while idle
+            time.sleep(120)  # shorter sleep so heartbeat stays fresh (dashboard staleness threshold is 180s)
