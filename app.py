@@ -1,11 +1,15 @@
 """
 app.py — Professional Trading Dashboard (SMA Trend-Following Edition)
 ─────────────────────────────────────────────────────────────────────────
-UPDATES IN v3.2 PATCHED:
+UPDATES IN v3.3 PATCHED:
   1. Fixed high-contrast canvas data grid rendering error (black text on black bug resolved).
   2. Replaced st.dataframe with st.table globally to force high-contrast text inheritance.
   3. Integrated Tab 5: "📈 Watchlist Matrix" detailing evaluation metrics for all stocks.
   4. Mapped automatic value, potential upside, and real-time earnings calendars.
+  5. NEW: WATCHLIST, MAX_CORES_BUDGET, ET, and SGT now imported from strategy_config.py —
+     shared with bot.py and the backtest script, so they can't drift out of sync (this is
+     also where MSTR was excluded for Shariah compliance — crypto balance-sheet exposure).
+     strategy_config.py must live in the same repo/directory as this file.
 
   BUGFIXES (v3.2):
   - Removed duplicate `import datetime` / `import pytz` inside the sidebar block, which was
@@ -27,6 +31,7 @@ UPDATES IN v3.2 PATCHED:
 
 Run on Streamlit Cloud:
     Secrets required: ALPACA_API_KEY, ALPACA_SECRET_KEY, supabase.url, supabase.key
+    Repo must also contain strategy_config.py alongside this file.
 """
 
 import logging
@@ -43,6 +48,9 @@ from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 import streamlit.components.v1 as components
 from supabase import create_client, Client
+
+# ── SHARED STRATEGY CONFIG (single source of truth — see strategy_config.py) ──
+from strategy_config import WATCHLIST, MAX_CORES_BUDGET, ET, SGT
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.WARNING)
@@ -217,25 +225,11 @@ hr { border-color: #1e2330; margin: 1rem 0; }
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# CONSTANTS & WATCHLIST
+# CONSTANTS
 # ─────────────────────────────────────────────
-# NOTE: previously this was a dict keyed by ticker with "fair" / "earn" placeholder
-# values that were never actually read anywhere in the file (the Watchlist tab computes
-# its own live fair-value estimate and earnings date from yfinance). Simplified to a
-# plain ticker list to remove dead, misleading data.
-#
-# MSTR removed: excluded elsewhere in this project's Shariah-compliance screen due to
-# cryptocurrency balance-sheet exposure. Keep this list in sync with the bot's watchlist.
-WATCHLIST = [
-    "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM",
-    "PANW", "TSM", "LRCX", "ON", "MPWR", "MRVL", "NXPI", "TEAM", "INTA", "CRWD",
-    "ZS", "ADBE", "WDAY", "SNPS", "NOW", "SHOP", "TXN", "CDNS", "MCHP", "SWKS",
-    "FTNT", "ANET", "UBER", "DASH", "TSLA", "ISRG", "VRTX", "LLY", "MRK", "AAPL",
-    "JNJ", "PEP", "LIN", "REGN", "INTC", "PG", "NKE", "ADSK", "MDT",
-]
-
-SGT = pytz.timezone("Asia/Singapore")
-ET  = pytz.timezone("US/Eastern")
+# NOTE: WATCHLIST, MAX_CORES_BUDGET, ET, and SGT now come from strategy_config.py
+# (imported above) instead of being defined here — this is the single source of
+# truth shared with bot.py and the backtest script.
 WEEKLY_TARGET      = 200.0
 EFFECTIVE_CAPITAL  = 12000.0
 
@@ -474,14 +468,14 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 # LAYOUT RENDERING
 # ─────────────────────────────────────────────
-st.markdown('<h1 style="font-family:\'IBM Plex Mono\',monospace;font-size:24px;font-weight:600;color:#e2e8f0;">⚡ ALGOBOT DASHBOARD v3.2</h1>', unsafe_allow_html=True)
+st.markdown('<h1 style="font-family:\'IBM Plex Mono\',monospace;font-size:24px;font-weight:600;color:#e2e8f0;">⚡ ALGOBOT DASHBOARD v3.3</h1>', unsafe_allow_html=True)
 st.markdown("---")
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Net Liquidity", f"${portfolio_value:,.2f}")
 m2.metric("Total Exposure", f"${total_mv:,.2f}")
 m3.metric("Unrealized Delta", f"${total_unrl:+.2f}")
-m4.metric("Active Assets Deployed", f"{len(positions)} / 8")
+m4.metric("Active Assets Deployed", f"{len(positions)} / {MAX_CORES_BUDGET}")
 st.markdown("---")
 
 tab_live, tab_positions, tab_backtest, tab_liq, tab_watchlist = st.tabs([
@@ -651,16 +645,16 @@ with tab_watchlist:
 
     # ── CREATE CLICKABLE HEADER ROW ──
     st.markdown("### Click on any column header to sort")
-    
+
     # Create sort buttons in a row
     cols = st.columns(len(display_columns))
     for idx, col_name in enumerate(display_columns):
         is_active = st.session_state.watchlist_sort_col == col_name
         arrow = " 🔽" if is_active and st.session_state.watchlist_sort_ascending else " 🔼" if is_active and not st.session_state.watchlist_sort_ascending else " ↕"
-        
+
         # Use a button for each column header
         if cols[idx].button(
-            f"{col_name}{arrow}", 
+            f"{col_name}{arrow}",
             key=f"sort_{idx}_{col_name.replace(' ', '_')}",
             use_container_width=True
         ):
