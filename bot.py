@@ -1,12 +1,12 @@
 """
-Tradingbot_v4_SMA_RVOL.py — Professional Daily SMA Trend-Following Bot with RVOL Gatekeeper
+bot.py — Professional Daily SMA Trend-Following Bot with RVOL Gatekeeper
 ─────────────────────────────────────────────────────────────────────────────
-VERSION 4.4 PRODUCTION UPDATES (fixes applied):
+VERSION 4.5 PRODUCTION UPDATES (fixes applied):
   1. Fixed Supabase serialization crash by cleaning NumPy types (np.float64) before saving.
-  2. FIXED (again, for real this time): market data now goes through a dedicated
-     StockHistoricalDataClient instead of calling get_stock_bars() on the TradingClient,
-     which doesn't have that method. This was the reason no trades were ever executed —
-     every call to process_market_indicators() was silently failing and returning None.
+  2. FIXED: market data now goes through a dedicated StockHistoricalDataClient instead of
+     calling get_stock_bars() on the TradingClient, which doesn't have that method. This
+     was why no trades were ever executed — every call to process_market_indicators() was
+     silently failing and returning None.
   3. Integrated 10-Day Relative Volume (RVOL) filter into the Buy Execution Loop.
   4. Prevents low-volume false breakouts by requiring institutional volume backing (RVOL >= 1.3x).
   5. Uses Alpaca Free IEX feed natively for ultra-fast multi-symbol batched scans.
@@ -17,6 +17,13 @@ VERSION 4.4 PRODUCTION UPDATES (fixes applied):
   10. FIXED: close_position() was indexing position_response.data (a list) with a string
       key, which throws a TypeError the moment any exit actually fires. Now correctly
       reads position_response.data[0].
+  11. NEW: Shariah compliance gate — a position can never be sold on the same ET calendar
+      day it was bought (qabd / rightful possession, ~T+1 settlement). See
+      is_position_settled().
+  12. NEW: WATCHLIST, thresholds, timezones, and calculate_sma() now live in
+      strategy_config.py, shared with app.py and the backtest script, so they can't
+      drift out of sync (this is also where MSTR was excluded for Shariah compliance —
+      crypto balance-sheet exposure).
 
 Execution Infrastructure: Recommended to deploy 24/7 via Railway or AWS EC2.
 """
@@ -27,40 +34,24 @@ import logging
 import json
 from datetime import datetime, timedelta
 import pandas as pd
-import numpy as np
-import pytz
 
 # ── ALPACA SDK IMPORT MODULES ──
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
-from alpaca.data.historical import StockHistoricalDataClient   # <-- ADDED
+from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.timeframe import TimeFrame
 from supabase import create_client, Client
+
+# ── SHARED STRATEGY CONFIG (single source of truth — see strategy_config.py) ──
+from strategy_config import ET, SGT, MAX_CORES_BUDGET, RVOL_THRESHOLD, WATCHLIST, calculate_sma
 
 # ─────────────────────────────────────────────
 # LOGGING SYSTEM CONFIGURATION
 # ─────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
-
-# ─────────────────────────────────────────────
-# CONFIGURATION & TIMEZONE ANCHORS
-# ─────────────────────────────────────────────
-ET = pytz.timezone("US/Eastern")
-SGT = pytz.timezone("Asia/Singapore")
-
-MAX_CORES_BUDGET = 8
-RVOL_THRESHOLD = 1.3  # Institutional volume backing filter (130% of 10-day average)
-
-WATCHLIST = [
-    "NVDA", "AMD", "AVGO", "QCOM", "AMAT", "ASML", "MU", "KLAC", "SMCI", "ARM",
-    "MSTR", "PANW", "TSM", "LRCX", "ON", "MPWR", "MRVL", "NXPI", "TEAM", "INTA",
-    "CRWD", "ZS", "ADBE", "WDAY", "SNPS", "NOW", "SHOP", "TXN", "CDNS", "MCHP",
-    "SWKS", "FTNT", "ANET", "UBER", "DASH", "TSLA", "ISRG", "VRTX", "LLY", "MRK",
-    "AAPL", "JNJ", "PEP", "LIN", "REGN", "INTC", "PG", "NKE", "ADSK", "MDT"
-]
 
 # ─────────────────────────────────────────────
 # CREDENTIAL VALUATION LAYER
@@ -72,7 +63,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "YOUR_SUPABASE_KEY")
 
 try:
     trading_client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=True)
-    data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)   # <-- ADDED
+    data_client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     logger.info("Core execution clients securely bound to remote infrastructure.")
 except Exception as e:
@@ -101,13 +92,8 @@ def ensure_bot_state_record():
         return False
 
 # ─────────────────────────────────────────────
-# TECHNICAL ANALYSIS CALCULATORS
+# TECHNICAL ANALYSIS
 # ─────────────────────────────────────────────
-def calculate_sma(prices: list, period: int) -> float:
-    if len(prices) < period:
-        return 0.0
-    return float(np.mean(prices[-period:]))
-
 def process_market_indicators(symbol: str):
     """
     Queries historical daily bars from Alpaca free tier IEX endpoint,
@@ -125,7 +111,7 @@ def process_market_indicators(symbol: str):
             feed="iex"
         )
 
-        bars = data_client.get_stock_bars(request_params)   # <-- FIXED (was trading_client)
+        bars = data_client.get_stock_bars(request_params)
         if not bars or symbol not in bars.data or len(bars.data[symbol]) < 55:
             return None
 
@@ -188,7 +174,7 @@ def close_position(symbol: str, exit_price: float, reason: str = "SMA_Crossover"
             logger.warning(f"⚠️ Position not found in open_positions: {symbol}")
             return False
 
-        position = position_response.data[0]   # <-- FIXED (was position_response.data, a list)
+        position = position_response.data[0]
         entry_price = float(position["entry_price"])
         qty = float(position["qtc"])
 
@@ -242,11 +228,41 @@ def is_position_open(symbol: str) -> bool:
         logger.error(f"❌ Failed to check open position: {e}")
         return False
 
+def is_position_settled(symbol: str) -> bool:
+    """
+    SHARIAH COMPLIANCE — QABD (RIGHTFUL POSSESSION) CHECK
+    ───────────────────────────────────────────────────────
+    A position may only be sold once at least one full ET calendar day has
+    passed since it was opened (i.e. it was NOT bought today). This mirrors
+    T+1 settlement and ensures the bot never closes a position on the same
+    day it was acquired. If the entry date can't be determined, we treat the
+    position as UNSETTLED (fail safe — block the sale) rather than assume
+    it's tradeable.
+    """
+    try:
+        response = supabase.table("open_positions").select("updated_at").eq("symbol", symbol).execute()
+        if not response.data:
+            logger.warning(f"⚠️ No entry timestamp found for {symbol} — treating as unsettled.")
+            return False
+
+        entry_raw = response.data[0]["updated_at"]
+        entry_dt_utc = datetime.fromisoformat(entry_raw.replace("Z", "+00:00"))
+        entry_date_et = entry_dt_utc.astimezone(ET).date()
+        today_et = datetime.now(ET).date()
+
+        settled = entry_date_et < today_et
+        if not settled:
+            logger.info(f"⏳ {symbol} bought today ({entry_date_et}) — not yet settled, exit blocked.")
+        return settled
+    except Exception as e:
+        logger.error(f"❌ Failed to verify settlement status for {symbol}: {e}")
+        return False  # fail safe: block the sale rather than risk a same-day close
+
 # ─────────────────────────────────────────────
 # CORE EXECUTION LOOP MATRIX
 # ─────────────────────────────────────────────
 def run_execution_cycle():
-    logger.info("Initializing automated scan iteration across 50-stock index portfolio...")
+    logger.info("Initializing automated scan iteration across watchlist...")
 
     try:
         # ── INITIALIZATION CHECK ──
@@ -282,6 +298,10 @@ def run_execution_cycle():
             sma50 = metrics["sma50"]
 
             if (price < sma20 < sma50) or (price < sma50):
+                # ── SHARIAH GATE: block same-day exits (qabd / rightful possession) ──
+                if not is_position_settled(symbol):
+                    continue
+
                 logger.info(f"🚨 EXIT TRIGGER for {symbol}: Price={price:.2f}, SMA20={sma20:.2f}, SMA50={sma50:.2f}")
                 try:
                     order = trading_client.submit_order(order_data=MarketOrderRequest(
