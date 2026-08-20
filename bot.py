@@ -1,7 +1,7 @@
 """
 bot.py — Professional Daily SMA Trend-Following Bot with RVOL Gatekeeper
 ─────────────────────────────────────────────────────────────────────────────
-VERSION 4.5 PRODUCTION UPDATES (fixes applied):
+VERSION 4.6 PRODUCTION UPDATES (fixes applied):
   1. Fixed Supabase serialization crash by cleaning NumPy types (np.float64) before saving.
   2. FIXED: market data now goes through a dedicated StockHistoricalDataClient instead of
      calling get_stock_bars() on the TradingClient, which doesn't have that method. This
@@ -24,6 +24,12 @@ VERSION 4.5 PRODUCTION UPDATES (fixes applied):
       strategy_config.py, shared with app.py and the backtest script, so they can't
       drift out of sync (this is also where MSTR was excluded for Shariah compliance —
       crypto balance-sheet exposure).
+  13. NEW: reconcile_orphaned_positions() — Alpaca can hold positions with no matching
+      row in Supabase's open_positions table (manual trades, or positions bought before
+      tracking existed). Because is_position_settled() fail-safes to "unsettled" when it
+      finds no entry date, an orphaned position could never be sold — permanently. This
+      backfills a real entry date from Alpaca's own fill history at every startup, so
+      no position gets stuck unsellable again.
 
 Execution Infrastructure: Recommended to deploy 24/7 via Railway or AWS EC2.
 """
@@ -37,10 +43,10 @@ import pandas as pd
 
 # ── ALPACA SDK IMPORT MODULES ──
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 from alpaca.data.timeframe import TimeFrame
 from supabase import create_client, Client
 
@@ -274,6 +280,67 @@ def is_position_settled(symbol: str) -> bool:
         logger.error(f"❌ Failed to verify settlement status for {symbol}: {e}")
         return False  # fail safe: block the sale rather than risk a same-day close
 
+def reconcile_orphaned_positions():
+    """
+    STARTUP SAFETY NET — RECONCILE ALPACA POSITIONS WITH SUPABASE TRACKING
+    ───────────────────────────────────────────────────────────────────────
+    Alpaca can hold positions that never got logged into open_positions
+    (manual trades, positions from before tracking existed, etc). Because
+    is_position_settled() fail-safes to "unsettled" whenever it finds no
+    entry date, an orphaned position would otherwise be blocked from ever
+    selling — permanently, not just today. This backfills a REAL entry date
+    for each orphan from Alpaca's own most recent filled BUY order for that
+    symbol, so the settlement gate can evaluate it correctly. Falls back to
+    "now" only if no fill history can be found (rare), which conservatively
+    re-starts that position's settlement clock rather than assuming it's safe.
+    Runs once per bot startup; already-tracked symbols are skipped instantly.
+    """
+    try:
+        live_positions = trading_client.get_all_positions()
+        orphans = [p for p in live_positions if not is_position_open(p.symbol)]
+
+        if not orphans:
+            logger.info("✅ Reconciliation: no orphaned positions found.")
+            return
+
+        logger.warning(f"🔧 Reconciliation: {len(orphans)} position(s) held in Alpaca with no Supabase record — backfilling entry dates.")
+
+        for pos in orphans:
+            symbol = pos.symbol
+            entry_date_iso = None
+
+            try:
+                orders_filter = GetOrdersRequest(
+                    symbols=[symbol],
+                    status=QueryOrderStatus.CLOSED,
+                    side=OrderSide.BUY,
+                    limit=1,
+                )
+                orders = trading_client.get_orders(filter=orders_filter)
+                if orders and getattr(orders[0], "filled_at", None):
+                    entry_date_iso = orders[0].filled_at.isoformat()
+            except Exception as order_err:
+                logger.error(f"❌ Could not fetch fill history for {symbol}: {order_err}")
+
+            if not entry_date_iso:
+                logger.warning(f"⚠️ No fill history found for {symbol} — using current time as fallback (this will block same-day exit for {symbol} today only).")
+                entry_date_iso = datetime.utcnow().isoformat()
+
+            try:
+                supabase.table("open_positions").insert({
+                    "symbol": symbol,
+                    "strategy": "RECONCILED",
+                    "entry_price": float(pos.avg_entry_price),
+                    "qtc": float(pos.qty),
+                    "updated_at": entry_date_iso,
+                }).execute()
+                logger.info(f"✅ Reconciled {symbol}: entry_date={entry_date_iso}, qty={pos.qty}")
+            except Exception as insert_err:
+                logger.error(f"❌ Reconciliation insert failed for {symbol}: {insert_err}")
+
+    except Exception as e:
+        logger.error(f"❌ Reconciliation pass failed: {e}")
+
 # ─────────────────────────────────────────────
 # CORE EXECUTION LOOP MATRIX
 # ─────────────────────────────────────────────
@@ -456,6 +523,9 @@ if __name__ == "__main__":
     if not ensure_bot_state_record():
         logger.error("❌ Failed to initialize database. Exiting.")
         exit(1)
+
+    # Backfill any Alpaca positions missing from Supabase tracking (see docstring #13)
+    reconcile_orphaned_positions()
 
     # Run a quick test heartbeat on startup
     try:
