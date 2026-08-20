@@ -1,6 +1,18 @@
 """
 app.py — Professional Trading Dashboard (SMA Trend-Following Edition)
 ─────────────────────────────────────────────────────────────────────────
+UPDATES IN v3.4:
+  1. NEW: Tab 4 "🧹 Manual Execution Box" is now implemented — PIN-gated manual
+     liquidation panel. Choose how many positions to keep (0 = liquidate
+     everything), pick a sell order (worst/best performers first, or
+     alphabetical), preview exactly what will be sold, type LIQUIDATE to
+     confirm, then submit. Logs each sale to realized_trades and removes it
+     from open_positions via manual_close_position_and_log(), mirroring
+     bot.py's own close_position() so bookkeeping stays consistent regardless
+     of whether a position was closed by the bot or from this dashboard.
+     Does NOT check the Shariah settlement gate — this is a manual
+     administrative action, not the bot's own trading logic.
+
 UPDATES IN v3.3 PATCHED:
   1. Fixed high-contrast canvas data grid rendering error (black text on black bug resolved).
   2. Replaced st.dataframe with st.table globally to force high-contrast text inheritance.
@@ -407,6 +419,53 @@ def run_backtest(strategy: str, df: pd.DataFrame, start_date, end_date) -> dict:
         }
     }
 
+def manual_close_position_and_log(symbol: str, entry_price: float, exit_price: float, qty: float,
+                                   reason: str = "MANUAL_LIQUIDATION") -> tuple:
+    """
+    Log a manually-liquidated position to realized_trades and remove it from
+    open_positions — mirrors bot.py's own close_position() so bookkeeping
+    stays consistent regardless of whether a position was closed by the bot
+    or from this dashboard. Returns (success: bool, error_message: str|None).
+    """
+    try:
+        pl_usd = (exit_price - entry_price) * qty
+        pl_pct = ((exit_price - entry_price) / entry_price) * 100 if entry_price else 0.0
+
+        now_sgt = datetime.now(SGT)
+        trade_data = {
+            "date": now_sgt.strftime("%Y-%m-%d"),
+            "symbol": symbol,
+            "buy_price": str(entry_price),
+            "sell_price": str(exit_price),
+            "qty": qty,
+            "pl_usd": pl_usd,
+            "pl_display": f"${pl_usd:.2f}",
+            "pc_pct": f"{pl_pct:.2f}%",
+            "time_sgt": now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
+            "reason": reason,
+            "strategy": "MANUAL",
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        supabase.table("realized_trades").insert(trade_data).execute()
+        supabase.table("open_positions").delete().eq("symbol", symbol).execute()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def sort_positions_for_liquidation(positions_list, order: str):
+    """
+    'Worst performers first' (default) — sell biggest losers first, keep winners longest.
+    'Best performers first'             — sell biggest winners first (use with caution).
+    'Alphabetical'                      — deterministic, no P&L judgment at all.
+    """
+    if order == "Best performers first":
+        return sorted(positions_list, key=lambda p: float(p.unrealized_plpc), reverse=True)
+    elif order == "Alphabetical":
+        return sorted(positions_list, key=lambda p: p.symbol)
+    else:
+        return sorted(positions_list, key=lambda p: float(p.unrealized_plpc))
+
 # ─────────────────────────────────────────────
 # LIVE METRICS LOADING BLOCK
 # ─────────────────────────────────────────────
@@ -508,9 +567,90 @@ with tab_backtest:
     st.caption("Strategy matrix calculation backtester module. (Not yet implemented.)")
 
 with tab_liq:
-    # TODO: not yet implemented. Needs manual liquidation controls (PIN-gated via
-    # verify_pin(), which is already defined above but unused).
-    st.caption("Strategic administration override panels. (Not yet implemented.)")
+    st.markdown('<div class="section-header">🧹 Manual Liquidation — PIN Protected</div>', unsafe_allow_html=True)
+
+    if not st.session_state.liq_auth:
+        st.warning("This panel submits real sell orders on your Alpaca account. Enter your PIN to continue.")
+        pin_col, btn_col = st.columns([3, 1])
+        entered_pin = pin_col.text_input(
+            "PIN", type="password", key="liq_pin_input",
+            label_visibility="collapsed", placeholder="Enter PIN"
+        )
+        if btn_col.button("Unlock", use_container_width=True):
+            if verify_pin(entered_pin):
+                st.session_state.liq_auth = True
+                st.rerun()
+            else:
+                st.error("Incorrect PIN.")
+    else:
+        top_l, top_r = st.columns([4, 1])
+        top_l.success("🔓 Unlocked — manual liquidation controls are active.")
+        if top_r.button("🔒 Lock", use_container_width=True):
+            st.session_state.liq_auth = False
+            st.rerun()
+
+        if not positions:
+            st.info("No open positions to liquidate.")
+        else:
+            st.markdown(f"**Currently holding {len(positions)} position(s).**")
+
+            ctrl1, ctrl2 = st.columns(2)
+            target_keep = ctrl1.number_input(
+                "Positions to KEEP (0 = liquidate everything)",
+                min_value=0, max_value=len(positions), value=0, step=1,
+            )
+            sell_order = ctrl2.selectbox(
+                "Sell order",
+                ["Worst performers first", "Best performers first", "Alphabetical"],
+            )
+
+            sorted_positions = sort_positions_for_liquidation(positions, sell_order)
+            num_to_sell = len(positions) - target_keep
+            to_sell = sorted_positions[:num_to_sell]
+
+            if not to_sell:
+                st.info("Target already met — nothing to sell.")
+            else:
+                st.markdown(f"**This will sell {len(to_sell)} position(s):**")
+                preview_rows = [{
+                    "Symbol": p.symbol,
+                    "Qty": p.qty,
+                    "Entry": f"${float(p.avg_entry_price):.2f}",
+                    "Current": f"${float(p.current_price):.2f}",
+                    "Unrealized P&L": f"{float(p.unrealized_plpc) * 100:+.2f}%",
+                } for p in to_sell]
+                st.table(pd.DataFrame(preview_rows))
+
+                st.caption(
+                    "⚠️ This does NOT check the Shariah same-day settlement gate — it's a manual "
+                    "administrative action, not the bot's own trading logic."
+                )
+
+                confirm_text = st.text_input("Type LIQUIDATE to confirm", key="liq_confirm_text")
+                if st.button("🧹 Execute Liquidation", type="primary"):
+                    if confirm_text.strip() != "LIQUIDATE":
+                        st.error("You must type LIQUIDATE exactly to confirm.")
+                    else:
+                        results = []
+                        for p in to_sell:
+                            symbol = p.symbol
+                            entry_price = float(p.avg_entry_price)
+                            exit_price = float(p.current_price)
+                            qty = p.qty
+                            try:
+                                trading_client.submit_order(order_data=MarketOrderRequest(
+                                    symbol=symbol, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+                                ))
+                                ok, err = manual_close_position_and_log(symbol, entry_price, exit_price, float(qty))
+                                results.append((symbol, "✅ Sold + logged" if ok else f"⚠️ Sold but logging failed: {err}"))
+                            except Exception as e:
+                                results.append((symbol, f"❌ Order failed: {e}"))
+
+                        for symbol, status in results:
+                            st.write(f"{symbol}: {status}")
+
+                        st.cache_data.clear()
+                        st.success("Liquidation batch complete. Refresh to see updated positions.")
 
 # ══════════════════════════════════════════════
 # TAB 5 — WATCHLIST INTELLIGENCE MATRIX (Click-to-Sort)
