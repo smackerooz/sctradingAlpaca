@@ -175,7 +175,7 @@ def log_open_position(symbol: str, entry_price: float, qty: int, strategy: str =
             "symbol": symbol,
             "strategy": strategy,
             "entry_price": entry_price,
-            "qtc": qty,
+            "qty": qty,
             "updated_at": datetime.utcnow().isoformat()
         }
 
@@ -198,7 +198,7 @@ def close_position(symbol: str, exit_price: float, reason: str = "SMA_Crossover"
 
         position = position_response.data[0]
         entry_price = float(position["entry_price"])
-        qty = float(position["qtc"])
+        qty = float(position["qty"])
 
         # Calculate P&L
         pl_usd = (exit_price - entry_price) * qty
@@ -331,7 +331,7 @@ def reconcile_orphaned_positions():
                     "symbol": symbol,
                     "strategy": "RECONCILED",
                     "entry_price": float(pos.avg_entry_price),
-                    "qtc": float(pos.qty),
+                    "qty": float(pos.qty),
                     "updated_at": entry_date_iso,
                 }).execute()
                 logger.info(f"✅ Reconciled {symbol}: entry_date={entry_date_iso}, qty={pos.qty}")
@@ -545,7 +545,13 @@ if __name__ == "__main__":
         # Scan blocks execution logic runs every 5 minutes during active market framework hours
         if now.weekday() < 5 and (9 <= now.hour <= 16):
             run_execution_cycle()
-            time.sleep(300)  # Sleep for 5 minutes
+            # Sleep in short increments (instead of one 300s blocking sleep) so the
+            # heartbeat stays fresh throughout the wait — dashboard staleness threshold
+            # is 180s, so a single 300s sleep left the bot looking "OFF" for the last
+            # ~2 minutes of every 5-minute cycle even though it was completely healthy.
+            for _ in range(5):
+                time.sleep(60)
+                update_heartbeat_only()
         else:
             logger.info("Market framework outside operational baseline standard hours. Sleep mode active.")
             update_heartbeat_only()  # keep the dashboard's liveness check accurate while idle
