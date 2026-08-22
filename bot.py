@@ -38,7 +38,7 @@ import os
 import time
 import logging
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 # ── ALPACA SDK IMPORT MODULES ──
@@ -88,8 +88,8 @@ def ensure_bot_state_record():
             supabase.table("bot_state").insert({
                 "id": 1,
                 "peak_prices": "{}",
-                "last_heartbeat": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat()
+                "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat()
             }).execute()
             logger.info("✅ Created initial bot_state record")
         return True
@@ -105,7 +105,7 @@ def update_heartbeat_only():
     (the market being closed is not the same as the process being dead).
     """
     try:
-        now_utc = datetime.utcnow()
+        now_utc = datetime.now(timezone.utc)
         supabase.table("bot_state").update({
             "last_heartbeat": now_utc.isoformat() + "+00",
             "updated_at": now_utc.strftime("%Y-%m-%d %H:%M:%S")
@@ -176,11 +176,11 @@ def log_open_position(symbol: str, entry_price: float, qty: int, strategy: str =
             "strategy": strategy,
             "entry_price": entry_price,
             "qty": qty,
-            "updated_at": datetime.utcnow().isoformat()
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
         response = supabase.table("open_positions").insert(position_data).execute()
-        logger.info(f"✅ Open position logged: {symbol} @ \${entry_price:.2f} x {qty}")
+        logger.info(f"✅ Open position logged: {symbol} @ ${entry_price:.2f} x {qty}")
         return True
     except Exception as e:
         logger.error(f"❌ Failed to log open position: {e}")
@@ -205,7 +205,7 @@ def close_position(symbol: str, exit_price: float, reason: str = "SMA_Crossover"
         pl_pct = ((exit_price - entry_price) / entry_price) * 100
 
         # Format for display
-        pl_display = f"\${pl_usd:.2f}"
+        pl_display = f"${pl_usd:.2f}"
         pc_pct = f"{pl_pct:.2f}%"
 
         # Get current time in SGT
@@ -226,11 +226,11 @@ def close_position(symbol: str, exit_price: float, reason: str = "SMA_Crossover"
             "time_sgt": time_sgt_str,
             "reason": reason,
             "strategy": "SMA_RVOL",
-            "created_at": datetime.utcnow().isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat()
         }
 
         supabase.table("realized_trades").insert(trade_data).execute()
-        logger.info(f"✅ Realized trade logged: {symbol} | Entry: \${entry_price:.2f} | Exit: \${exit_price:.2f} | P&L: {pl_display} ({pc_pct})")
+        logger.info(f"✅ Realized trade logged: {symbol} | Entry: ${entry_price:.2f} | Exit: ${exit_price:.2f} | P&L: {pl_display} ({pc_pct})")
 
         # Remove from open_positions
         supabase.table("open_positions").delete().eq("symbol", symbol).execute()
@@ -324,7 +324,7 @@ def reconcile_orphaned_positions():
 
             if not entry_date_iso:
                 logger.warning(f"⚠️ No fill history found for {symbol} — using current time as fallback (this will block same-day exit for {symbol} today only).")
-                entry_date_iso = datetime.utcnow().isoformat()
+                entry_date_iso = datetime.now(timezone.utc).isoformat()
 
             try:
                 supabase.table("open_positions").insert({
@@ -451,7 +451,7 @@ def run_execution_cycle():
         try:
             clean_peaks = {str(ticker): float(val) for ticker, val in peak_prices.items()}
             clean_peaks_json = json.dumps(clean_peaks)
-            now_utc = datetime.utcnow()
+            now_utc = datetime.now(timezone.utc)
 
             update_data = {
                 "peak_prices": clean_peaks_json,
@@ -484,7 +484,7 @@ def run_execution_cycle():
                 supabase.table("bot_logs").insert({
                     "message": f"Heartbeat failure: {str(heartbeat_err)}",
                     "severity": "error",
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat()
                 }).execute()
             except:
                 pass
@@ -533,8 +533,8 @@ if __name__ == "__main__":
         test_json = json.dumps(test_peaks)
         supabase.table("bot_state").update({
             "peak_prices": test_json,
-            "last_heartbeat": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
+            "last_heartbeat": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }).eq("id", 1).execute()
         logger.info("✅ Initial heartbeat test successful")
     except Exception as e:
