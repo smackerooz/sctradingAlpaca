@@ -107,7 +107,7 @@ def update_heartbeat_only():
     try:
         now_utc = datetime.now(timezone.utc)
         supabase.table("bot_state").update({
-            "last_heartbeat": now_utc.isoformat() + "+00",
+            "last_heartbeat": now_utc.isoformat(),
             "updated_at": now_utc.strftime("%Y-%m-%d %H:%M:%S")
         }).eq("id", 1).execute()
     except Exception as e:
@@ -455,7 +455,7 @@ def run_execution_cycle():
 
             update_data = {
                 "peak_prices": clean_peaks_json,
-                "last_heartbeat": now_utc.isoformat() + "+00",
+                "last_heartbeat": now_utc.isoformat(),
                 "updated_at": now_utc.strftime("%Y-%m-%d %H:%M:%S")
             }
 
@@ -470,7 +470,7 @@ def run_execution_cycle():
                     insert_data = {
                         "id": 1,
                         "peak_prices": clean_peaks_json,
-                        "last_heartbeat": now_utc.isoformat() + "+00",
+                        "last_heartbeat": now_utc.isoformat(),
                         "updated_at": now_utc.strftime("%Y-%m-%d %H:%M:%S")
                     }
                     supabase.table("bot_state").insert(insert_data).execute()
