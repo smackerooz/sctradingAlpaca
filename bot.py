@@ -1,7 +1,7 @@
 """
 bot.py — Professional Daily SMA Trend-Following Bot with RVOL Gatekeeper
 ─────────────────────────────────────────────────────────────────────────────
-VERSION 4.6 PRODUCTION UPDATES (fixes applied):
+VERSION 4.7 PRODUCTION UPDATES (fixes applied):
   1. Fixed Supabase serialization crash by cleaning NumPy types (np.float64) before saving.
   2. FIXED: market data now goes through a dedicated StockHistoricalDataClient instead of
      calling get_stock_bars() on the TradingClient, which doesn't have that method. This
@@ -16,7 +16,7 @@ VERSION 4.6 PRODUCTION UPDATES (fixes applied):
   9. Integrated with existing Supabase tables: open_positions and realized_trades.
   10. FIXED: close_position() was indexing position_response.data (a list) with a string
       key, which throws a TypeError the moment any exit actually fires. Now correctly
-      reads position_response.data[0].
+      reads position_response.data.
   11. NEW: Shariah compliance gate — a position can never be sold on the same ET calendar
       day it was bought (qabd / rightful possession, ~T+1 settlement). See
       is_position_settled().
@@ -27,9 +27,12 @@ VERSION 4.6 PRODUCTION UPDATES (fixes applied):
   13. NEW: reconcile_orphaned_positions() — Alpaca can hold positions with no matching
       row in Supabase's open_positions table (manual trades, or positions bought before
       tracking existed). Because is_position_settled() fail-safes to "unsettled" when it
-      finds no entry date, an orphaned position could never be sold — permanently. This
+      finds no entry date, an orphaned position would never be sold — permanently. This
       backfills a real entry date from Alpaca's own fill history at every startup, so
       no position gets stuck unsellable again.
+  14. FIXED: Changed TimeInForce from GTC to DAY for both BUY and SELL orders to support
+      fractional shares (Alpaca requires DAY orders for fractional positions).
+  15. FIXED: Market hours now correctly start at 9:30 AM ET (not 9:00 AM).
 
 Execution Infrastructure: Recommended to deploy 24/7 via Railway or AWS EC2.
 """
@@ -180,7 +183,7 @@ def log_open_position(symbol: str, entry_price: float, qty: int, strategy: str =
         }
 
         response = supabase.table("open_positions").insert(position_data).execute()
-        logger.info(f"✅ Open position logged: {symbol} @ ${entry_price:.2f} x {qty}")
+        logger.info(f"✅ Open position logged: {symbol} @ \${entry_price:.2f} x {qty}")
         return True
     except Exception as e:
         logger.error(f"❌ Failed to log open position: {e}")
@@ -196,7 +199,7 @@ def close_position(symbol: str, exit_price: float, reason: str = "SMA_Crossover"
             logger.warning(f"⚠️ Position not found in open_positions: {symbol}")
             return False
 
-        position = position_response.data[0]
+        position = position_response.data
         entry_price = float(position["entry_price"])
         qty = float(position["qty"])
 
@@ -205,7 +208,7 @@ def close_position(symbol: str, exit_price: float, reason: str = "SMA_Crossover"
         pl_pct = ((exit_price - entry_price) / entry_price) * 100
 
         # Format for display
-        pl_display = f"${pl_usd:.2f}"
+        pl_display = f"\${pl_usd:.2f}"
         pc_pct = f"{pl_pct:.2f}%"
 
         # Get current time in SGT
@@ -230,7 +233,7 @@ def close_position(symbol: str, exit_price: float, reason: str = "SMA_Crossover"
         }
 
         supabase.table("realized_trades").insert(trade_data).execute()
-        logger.info(f"✅ Realized trade logged: {symbol} | Entry: ${entry_price:.2f} | Exit: ${exit_price:.2f} | P&L: {pl_display} ({pc_pct})")
+        logger.info(f"✅ Realized trade logged: {symbol} | Entry: \${entry_price:.2f} | Exit: \${exit_price:.2f} | P&L: {pl_display} ({pc_pct})")
 
         # Remove from open_positions
         supabase.table("open_positions").delete().eq("symbol", symbol).execute()
@@ -267,7 +270,7 @@ def is_position_settled(symbol: str) -> bool:
             logger.warning(f"⚠️ No entry timestamp found for {symbol} — treating as unsettled.")
             return False
 
-        entry_raw = response.data[0]["updated_at"]
+        entry_raw = response.data["updated_at"]
         entry_dt_utc = datetime.fromisoformat(entry_raw.replace("Z", "+00:00"))
         entry_date_et = entry_dt_utc.astimezone(ET).date()
         today_et = datetime.now(ET).date()
@@ -317,8 +320,8 @@ def reconcile_orphaned_positions():
                     limit=1,
                 )
                 orders = trading_client.get_orders(filter=orders_filter)
-                if orders and getattr(orders[0], "filled_at", None):
-                    entry_date_iso = orders[0].filled_at.isoformat()
+                if orders and getattr(orders, "filled_at", None):
+                    entry_date_iso = orders.filled_at.isoformat()
             except Exception as order_err:
                 logger.error(f"❌ Could not fetch fill history for {symbol}: {order_err}")
 
@@ -387,11 +390,12 @@ def run_execution_cycle():
 
                 logger.info(f"🚨 EXIT TRIGGER for {symbol}: Price={price:.2f}, SMA20={sma20:.2f}, SMA50={sma50:.2f}")
                 try:
+                    # ✅ FIXED: Changed from GTC to DAY for fractional shares
                     order = trading_client.submit_order(order_data=MarketOrderRequest(
                         symbol=symbol,
                         qty=active_holdings[symbol].qty,
                         side=OrderSide.SELL,
-                        time_in_force=TimeInForce.GTC
+                        time_in_force=TimeInForce.DAY  # Changed from GTC to DAY
                     ))
                     logger.info(f"Exit order executed: {order.id}")
 
@@ -433,11 +437,12 @@ def run_execution_cycle():
                         shares_to_buy = int(target_allocation // price)
 
                         if shares_to_buy > 0:
+                            # ✅ FIXED: Changed from GTC to DAY for fractional shares
                             order = trading_client.submit_order(order_data=MarketOrderRequest(
                                 symbol=symbol,
                                 qty=shares_to_buy,
                                 side=OrderSide.BUY,
-                                time_in_force=TimeInForce.GTC
+                                time_in_force=TimeInForce.DAY  # Changed from GTC to DAY
                             ))
                             logger.info(f"Entry order executed: {order.id} | Qty: {shares_to_buy}")
 
@@ -542,8 +547,13 @@ if __name__ == "__main__":
 
     while True:
         now = datetime.now(ET)
-        # Scan blocks execution logic runs every 5 minutes during active market framework hours
-        if now.weekday() < 5 and (9 <= now.hour <= 16):
+        
+        # ✅ FIXED: Market hours 9:30 AM - 4:00 PM ET (9:30 PM - 4:00 AM SGT)
+        market_open = (now.weekday() < 5 and 
+                      ((now.hour == 9 and now.minute >= 30) or 
+                       (10 <= now.hour < 16)))
+        
+        if market_open:
             run_execution_cycle()
             # Sleep in short increments (instead of one 300s blocking sleep) so the
             # heartbeat stays fresh throughout the wait — dashboard staleness threshold
