@@ -638,8 +638,12 @@ with tab_liq:
                             exit_price = float(p.current_price)
                             qty = p.qty
                             try:
+                                # ✅ FIXED: Changed from GTC to DAY for fractional shares
                                 trading_client.submit_order(order_data=MarketOrderRequest(
-                                    symbol=symbol, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC,
+                                    symbol=symbol, 
+                                    qty=qty, 
+                                    side=OrderSide.SELL, 
+                                    time_in_force=TimeInForce.DAY,  # ✅ FIXED
                                 ))
                                 ok, err = manual_close_position_and_log(symbol, entry_price, exit_price, float(qty))
                                 results.append((symbol, "✅ Sold + logged" if ok else f"⚠️ Sold but logging failed: {err}"))
